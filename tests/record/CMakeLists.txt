@@ -151,12 +151,6 @@ CREATE_RDC_GPU_TEST(test_annotation test_annotation.cpp)
 
 CREATE_GPU_TEST(test_reachable_capture test_reachable_capture.cpp)
 CREATE_RDC_GPU_TEST(test_reachable_capture test_reachable_capture.cpp)
-if(MNEME_ENABLE_CUDA)
-  # The test launches a __device__ lambda, which nvcc only accepts with
-  # extended lambda support enabled.
-  target_compile_options(test_reachable_capture PRIVATE --extended-lambda)
-  target_compile_options(test_reachable_capture.rdc PRIVATE --extended-lambda)
-endif()
 
 CREATE_GPU_TEST(test_crash_handling test_crash_handling.cpp)
 
