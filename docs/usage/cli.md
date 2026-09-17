@@ -52,6 +52,7 @@ artifact.
 | `--filter-config` | YAML/JSON filter file; implies `config` when the mode is omitted. Required in config mode. |
 | `--chunk-size` | Device memory mapped at once and shared by smaller allocations, e.g. `64MB` or `4GB`; default `4GB`. Sets `MNEME_CHUNK_SIZE`. See the notes below. |
 | `--epilogue-format`                     | Store epilogue snapshots as `diff`, `bytes`, or `best`; defaults to `diff`                                                        |
+| `--capture-mode`                        | Snapshot `full` device memory (every tracked allocation) or only the allocations `reachable` from kernel arguments; defaults to `full`. See [Record → Choosing what to capture](record.md#choosing-what-to-capture) |
 | `-rr`, `--record-ranks`                 | Restrict recording to a comma-separated set of MPI ranks (e.g. `0`, `0,1,3`) or `all` for every rank. See *Multi-rank recording* below. |
 | `--copy-source`                         | Copy the source file that defines each recorded kernel into the record directory and record its MD5 checksum         |
 | `-h`, `--help`                          | Show help message and exit                                                                                                |

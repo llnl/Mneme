@@ -222,7 +222,8 @@ public:
   RecordingBackend()
       : Timer(createLaunchTimer<VendorTypes>(Config::get().KernelTiming)),
         DB(Config::get().getDataDirectory(), Config::get().EpilogueType,
-           Config::get().CopySource, Config::get().KernelTiming) {}
+           Config::get().CopySource, Config::get().KernelTiming,
+           Config::get().Capture) {}
 
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
     if (!ptr)

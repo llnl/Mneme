@@ -67,6 +67,10 @@ kernel may access, including:
 - device global variables, and
 - kernel argument buffers.
 
+With `mneme record --capture-mode reachable`, the heap allocations are
+narrowed to those a pointer-typed kernel argument points into; globals and
+argument buffers are captured as before.
+
 Device heap allocations are identified by the:
 
 - Device allocation address,

@@ -5,6 +5,8 @@
 #include <llvm/ADT/StringRef.h>
 #include <llvm/ADT/Twine.h>
 #include <llvm/Demangle/Demangle.h>
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/raw_ostream.h>
@@ -139,6 +141,59 @@ convertToDouble(llvm::Function &F) {
     }
   }
   return RRInfo;
+}
+
+inline static void collectPointerOffsets(llvm::Type *Ty,
+                                         const llvm::DataLayout &DL,
+                                         uint64_t BaseOffset,
+                                         llvm::SmallVectorImpl<size_t> &Out) {
+  if (Ty->isPointerTy()) {
+    Out.emplace_back(BaseOffset);
+    return;
+  }
+
+  if (auto *STy = llvm::dyn_cast<llvm::StructType>(Ty)) {
+    if (STy->isOpaque())
+      return;
+
+    const auto *SL = DL.getStructLayout(STy);
+    for (unsigned I = 0; I < STy->getNumElements(); ++I)
+      collectPointerOffsets(STy->getElementType(I), DL,
+                            BaseOffset + SL->getElementOffset(I), Out);
+    return;
+  }
+
+  if (auto *ATy = llvm::dyn_cast<llvm::ArrayType>(Ty)) {
+    uint64_t Stride = DL.getTypeAllocSize(ATy->getElementType());
+    for (uint64_t I = 0; I < ATy->getNumElements(); ++I)
+      collectPointerOffsets(ATy->getElementType(), DL, BaseOffset + I * Stride,
+                            Out);
+    return;
+  }
+
+  if (auto *VTy = llvm::dyn_cast<llvm::FixedVectorType>(Ty)) {
+    uint64_t Stride = DL.getTypeAllocSize(VTy->getElementType());
+    for (unsigned I = 0; I < VTy->getNumElements(); ++I)
+      collectPointerOffsets(VTy->getElementType(), DL, BaseOffset + I * Stride,
+                            Out);
+  }
+}
+
+// The byte offsets of every pointer inside each argument's in-memory
+// representation, including pointers nested in by-value aggregates.
+inline static llvm::SmallVector<llvm::SmallVector<size_t>>
+getPointerOffsetsByArg(llvm::Function &F) {
+  llvm::SmallVector<llvm::SmallVector<size_t>> PointerOffsets;
+  const auto &DL = F.getParent()->getDataLayout();
+  for (auto &A : F.args()) {
+    llvm::SmallVector<size_t> ArgOffsets;
+    llvm::Type *ArgStorageTy = A.getType();
+    if (A.hasByRefAttr() || A.hasByValAttr())
+      ArgStorageTy = A.getPointeeInMemoryValueType();
+    collectPointerOffsets(ArgStorageTy, DL, 0, ArgOffsets);
+    PointerOffsets.emplace_back(std::move(ArgOffsets));
+  }
+  return PointerOffsets;
 }
 
 inline static llvm::SmallVector<uint64_t, 8> getFuncDescr(llvm::Function &F) {

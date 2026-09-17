@@ -37,6 +37,7 @@
 #include "mneme/MnemeLLVMUtils.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeMemory.hpp"
+#include "mneme/MnemeReachableBlobs.hpp"
 #include "mneme/MnemeRecordingPolicy.hpp"
 #include "mneme/MnemeSnapshotFormat.hpp"
 #include "mneme/MnemeSnapshotRecords.hpp"
@@ -251,11 +252,13 @@ class KernelInstancesCollection {
   llvm::SmallVector<std::string> KernelArgNames;
   llvm::SmallVector<bool> KernelSpecializations;
   llvm::SmallVector<std::function<double(void *)>> ConvertArgToDouble;
+  llvm::SmallVector<llvm::SmallVector<size_t>> KernelArgPointerOffsets;
   llvm::SmallVector<std::string> ModuleFiles;
   const uint64_t StaticHash;
   const std::string KName;
   SourceFileInfo Source;
   bool CopySource;
+  CaptureMode Capture;
 
 private:
   // Parse Proteus's serialized bitcode in a Mneme-owned LLVMContext and
@@ -280,6 +283,25 @@ private:
     KernelSpecializations = mneme::canSpecialize(*F);
     ConvertArgToDouble = mneme::convertToDouble(*F);
     Source = SourceFileInfo(*Mod, KName);
+    KernelArgPointerOffsets = mneme::getPointerOffsetsByArg(*F);
+  }
+
+  template <DeviceVendors VendorTypes>
+  llvm::SmallVector<void *> selectBlobs(
+      const llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
+      void **Args, const proteus::runtime::GlobalMetadataMap &GlobalVars) {
+    if (Capture == CaptureMode::Full)
+      return allBlobKeys<VendorTypes>(DeviceMemory);
+
+    auto Selected = selectReachableBlobs<VendorTypes>(
+        DeviceMemory, KernelArgPointerOffsets, Args, GlobalVars, KName);
+    LOG_INFO("Kernel {} reaches {} of {} tracked allocations", KName,
+             Selected.size(), DeviceMemory.size());
+    return Selected;
+  }
+
+  static const char *captureModeName(CaptureMode Mode) {
+    return Mode == CaptureMode::Reachable ? "reachable" : "full";
   }
 
   std::string StoreModuleBytes(llvm::StringRef Bytes,
@@ -306,6 +328,7 @@ public:
   llvm::json::Object toJSON(KernelTimingType Timing) const {
     llvm::json::Object Collection;
     Collection["StaticHash"] = StaticHash;
+    Collection["CaptureMode"] = captureModeName(Capture);
     Collection["KernelName"] = KName;
     Collection["DemangledName"] = util::demangleKernelName(KName);
     Collection["Modules"] = llvm::json::Array(ModuleFiles);
@@ -329,9 +352,9 @@ public:
 
   KernelInstancesCollection(const proteus::runtime::KernelMetadata &KInfo,
                             const KernelRecordingPolicy &Policy,
-                            bool CopySource)
+                            bool CopySource, CaptureMode Capture)
       : NumRecords(0), Policy(Policy), StaticHash(KInfo.getStaticHash()),
-        KName(KInfo.getName()), CopySource(CopySource) {}
+        KName(KInfo.getName()), CopySource(CopySource), Capture(Capture) {}
 
   bool hasRecords() const { return NumRecords > 0; }
   const std::string &getName() const { return KName; }
@@ -452,9 +475,15 @@ public:
                                     std::to_string(StaticHash) + "." +
                                     std::to_string(DynamicHash) + ".mneme"));
 
+    // Choose the allocations once; the epilogue closure reuses these keys since
+    // the diff writer pairs each blob with the prologue bytes saved here.
+    llvm::SmallVector<void *> Selected =
+        selectBlobs<VendorTypes>(DeviceMemory, Args, GlobalVars);
+    auto Blobs = resolveBlobs<VendorTypes>(DeviceMemory, Selected);
+
     auto PrologueGlobals = std::make_shared<GlobalSnapshotData>();
-    SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory, KernelArgSizes,
-                                  Args, Stream};
+    SnapshotInput<VendorTypes> In{GlobalVars, Blobs, KernelArgSizes, Args,
+                                  Stream};
     Instance->PrologueFn =
         BytesWriter<VendorTypes>(PrologueGlobals).write(Filename, In).string();
 
@@ -463,14 +492,15 @@ public:
         makeEpilogueWriter<VendorTypes>(EpilogueType, PrologueGlobals);
 
     return [this, DynamicHash, MnemeDir, GlobalVars, Writer, &DeviceMemory,
-            Args, Stream] {
+            Selected, Args, Stream] {
       std::filesystem::path Filename(MnemeDir /
                                      (std::string("DeviceState.epilogue.") +
                                       std::to_string(StaticHash) + "." +
                                       std::to_string(DynamicHash) + ".mneme"));
 
-      SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory, KernelArgSizes,
-                                    Args, Stream};
+      auto Blobs = resolveBlobs<VendorTypes>(DeviceMemory, Selected);
+      SnapshotInput<VendorTypes> In{GlobalVars, Blobs, KernelArgSizes, Args,
+                                    Stream};
       Instances[DynamicHash].EpilogueFn = Writer->write(Filename, In).string();
     };
   }
@@ -486,13 +516,14 @@ class RecordDatabase {
   EpilogueSnapshotType EpilogueType;
   bool CopySource;
   KernelTimingType Timing;
+  CaptureMode Capture;
 
 public:
   RecordDatabase(std::filesystem::path MnemeDirectory,
                  EpilogueSnapshotType EpilogueType, bool CopySource,
-                 KernelTimingType Timing)
+                 KernelTimingType Timing, CaptureMode Capture)
       : MnemeDirectory(std::move(MnemeDirectory)), EpilogueType(EpilogueType),
-        CopySource(CopySource), Timing(Timing) {
+        CopySource(CopySource), Timing(Timing), Capture(Capture) {
     // Logging here constructs the logger first so it outlives flush() at exit.
     LOG_DEBUG("Recording into {}", MnemeDirectory.string());
   }
@@ -558,7 +589,8 @@ public:
       auto Policy = filterLaunch(StaticHash, KInfo.getName());
       if (!Policy)
         return nullptr;
-      It = KernelRecords.try_emplace(StaticHash, KInfo, *Policy, CopySource)
+      It = KernelRecords
+               .try_emplace(StaticHash, KInfo, *Policy, CopySource, Capture)
                .first;
       LOG_INFO("Created instance");
     }

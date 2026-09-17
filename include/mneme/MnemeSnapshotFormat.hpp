@@ -402,13 +402,34 @@ BaseSnapshotSource<VendorTypes>::load(const std::string &KernelName) const {
   return Reader->read(KernelName, BaseSnapshotSource<VendorTypes>());
 }
 
+// DeviceMemory is the selection of live allocations this snapshot captures,
+// not necessarily every tracked allocation.
 template <DeviceVendors VendorTypes> struct SnapshotInput {
   const proteus::runtime::GlobalMetadataMap &GlobalVars;
-  llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory;
+  llvm::ArrayRef<MnemeMemoryBlob<VendorTypes> *> DeviceMemory;
   llvm::ArrayRef<size_t> KernelArgSizes;
   void **Args;
   typename DeviceTraits<VendorTypes>::DeviceStream_t Stream;
 };
+
+// The live blobs for a selection of base addresses, in selection order. The
+// selection is recorded at the prologue and resolved again at the epilogue, so
+// a missing key means the application freed memory the kernel could reach.
+template <DeviceVendors VendorTypes>
+llvm::SmallVector<MnemeMemoryBlob<VendorTypes> *>
+resolveBlobs(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
+             llvm::ArrayRef<void *> Keys) {
+  llvm::SmallVector<MnemeMemoryBlob<VendorTypes> *> Blobs;
+  Blobs.reserve(Keys.size());
+  for (void *Key : Keys) {
+    auto It = DeviceMemory.find(Key);
+    if (It == DeviceMemory.end())
+      LOG_FATAL("Allocation " + util::pointerToHexString(Key) +
+                " was freed between the prologue and epilogue snapshots");
+    Blobs.push_back(&It->second);
+  }
+  return Blobs;
+}
 
 // The on-disk record prefix describing a captured global variable.
 inline GlobalVarHeader
@@ -527,10 +548,10 @@ public:
     }
 
     Size += sizeof(size_t);
-    for (const auto &[Ptr, Blob] : In.DeviceMemory) {
+    for (const auto *Blob : In.DeviceMemory) {
       Size += BlobHeader::serializedSize();
-      Size += Blob.getSize();
-      Size += metadata::serializedSize(Blob.getMetadata());
+      Size += Blob->getSize();
+      Size += metadata::serializedSize(Blob->getMetadata());
     }
 
     Size += sizeof(size_t);
@@ -578,8 +599,8 @@ protected:
                              sizeof(size_t));
 
     // Write the Device Memory
-    for (auto &[Ptr, Blob] : DeviceMemory)
-      OutBC << Blob;
+    for (auto *Blob : DeviceMemory)
+      OutBC << *Blob;
     // Lastly write the arguments
     size_t NumArgs = KernelArgSizes.size();
     LOG_DEBUG("Number of Kernel Arguments in snapshot:{} stored at position:{}",
@@ -642,13 +663,13 @@ protected:
 
     size_t TotalBlobs = DeviceMemory.size();
     util::writeScalar(OutBC, TotalBlobs);
-    for (auto &[Ptr, Blob] : DeviceMemory) {
-      BlobHeader{Blob.getActualSize(), Blob.getSize(), Blob.getBlobAddr()}
+    for (auto *Blob : DeviceMemory) {
+      BlobHeader{Blob->getActualSize(), Blob->getSize(), Blob->getBlobAddr()}
           .write(OutBC);
-      auto MD = Blob.getMetadata();
+      auto MD = Blob->getMetadata();
       mneme::metadata::serialize(OutBC, MD);
 
-      writeCountAndWriteChangedRanges(OutBC, Blob, UpdateBaseData);
+      writeCountAndWriteChangedRanges(OutBC, *Blob, UpdateBaseData);
     }
   }
 

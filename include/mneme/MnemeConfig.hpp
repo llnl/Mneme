@@ -24,6 +24,9 @@ enum class LogLevel { Trace, Debug, Info, Warn, Error, Critical, Off };
 enum class EpilogueSnapshotType { Bytes, Diff, Best };
 enum class FilterMode { Default, Scoped, Config };
 enum class KernelTimingType { Off, Profiler };
+// Full captures every tracked allocation; Reachable captures only the
+// allocations that pointer-typed kernel argument slots point into.
+enum class CaptureMode { Full, Reachable };
 
 // Parses a MNEME_KERNEL_TIMING value; returns nullopt for an invalid one.
 inline std::optional<KernelTimingType>
@@ -221,6 +224,21 @@ getEnvOrDefaultKernelTimingType(const char *VarName, KernelTimingType Default) {
                            *EnvValue + "'. Expected 'profiler' or 'off'.");
 }
 
+inline CaptureMode getEnvOrDefaultCaptureMode(const char *VarName,
+                                              CaptureMode Default) {
+  auto EnvValue = getEnvOrDefaultString(VarName);
+  if (!EnvValue)
+    return Default;
+
+  if (*EnvValue == "full")
+    return CaptureMode::Full;
+  if (*EnvValue == "reachable")
+    return CaptureMode::Reachable;
+
+  throw std::runtime_error("Invalid MNEME_CAPTURE_MODE value '" + *EnvValue +
+                           "'. Expected 'full' or 'reachable'.");
+}
+
 inline bool defaultRecordingPolicy(const std::optional<int> &DistributedRank) {
   if (!DistributedRank)
     return true;
@@ -301,6 +319,7 @@ public:
   const bool CopySource;
   const uint64_t ChunkSize;
   const KernelTimingType KernelTiming;
+  const CaptureMode Capture;
 
   const config_detail::RecordingRankPolicy &getRecordingRankPolicy() const {
     return RankPolicy;
@@ -340,6 +359,8 @@ private:
                                                           4ULL << 30)),
         KernelTiming(config_detail::getEnvOrDefaultKernelTimingType(
             "MNEME_KERNEL_TIMING", KernelTimingType::Off)),
+        Capture(config_detail::getEnvOrDefaultCaptureMode("MNEME_CAPTURE_MODE",
+                                                          CaptureMode::Full)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")) {
 

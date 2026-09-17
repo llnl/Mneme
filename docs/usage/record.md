@@ -125,6 +125,45 @@ MNEME_RR_KERNELS='foo' mneme record -sr 5 -mr 2 -- ./app
 In `scoped` and `config` modes, these count options and environment variables
 are **ignored with a warning**.
 
+## Choosing what to capture
+
+By default a recorded prologue and epilogue contain every live device
+allocation in the process, whether or not the kernel can reach it.
+For applications with a large resident heap this makes snapshots large
+and makes every replay iteration re-upload memory the kernel never
+touches.
+
+`--capture-mode reachable` restricts the snapshot to the allocations the
+launch can actually address:
+
+- every device global registered for the kernel's binary (unchanged from
+  the default), and
+- every tracked allocation that a pointer-typed kernel argument points
+  into, including pointers stored inside `struct`, lambda, or functor
+  arguments passed by value.
+
+```bash
+mneme record --capture-mode reachable -- <application> [args...]
+```
+
+Pointer slots are derived from the kernel's LLVM IR, so no annotation is
+needed. Replay maps each captured allocation at its recorded address, so
+recorded pointer values remain valid; allocations that were not captured
+are not mapped. The recording JSON reports the mode in its
+`CaptureMode` field.
+
+Reachable capture has limits that the default mode does not:
+
+- An argument declared as an integer (for example `uintptr_t`) is not a
+  pointer slot even if it holds a device address, so its buffer is not
+  captured.
+- Only pointers held directly in the arguments are followed. A buffer that
+  is reachable solely through a pointer stored in device memory (such as
+  a device-resident struct of pointers) is not captured.
+- A pointer whose target is neither a tracked allocation nor a registered
+  global, such as managed memory on CUDA, prints a `[mneme]` warning on
+  stderr and is left out. Such a kernel cannot be replayed correctly in either mode.
+
 ## Annotating buffers for verification
 
 By default, replay verification uses exact byte-wise comparison between
