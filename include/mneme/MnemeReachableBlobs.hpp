@@ -50,17 +50,25 @@ llvm::SmallVector<void *> selectReachableBlobs(
   llvm::sort(Extents);
 
   // The end is inclusive so that one-past-the-end pointers select the
-  // allocation they were derived from.
-  auto findBlob = [&](uintptr_t P) -> void * {
+  // allocation they were derived from. When one allocation ends exactly where
+  // the next begins, a pointer on that boundary could have come from either,
+  // so both are selected rather than guessing.
+  auto selectBlobs = [&](uintptr_t P, llvm::SmallVectorImpl<void *> &Out) {
     auto It = std::upper_bound(
         Extents.begin(), Extents.end(), P,
         [](uintptr_t Value, const Extent &E) { return Value < E.first; });
-    if (It == Extents.begin())
-      return nullptr;
-    --It;
-    if (P > It->first + It->second)
-      return nullptr;
-    return reinterpret_cast<void *>(It->first);
+    // It is the first extent starting after P. The candidates are the extent
+    // before it and, only when P sits on that extent's base, the one before
+    // that. Extents do not overlap, so no earlier extent can reach P.
+    bool Found = false;
+    for (int Back = 0; Back < 2 && It != Extents.begin(); ++Back) {
+      --It;
+      if (P > It->first + It->second)
+        break;
+      Out.push_back(reinterpret_cast<void *>(It->first));
+      Found = true;
+    }
+    return Found;
   };
 
   auto insideGlobal = [&](uintptr_t P) {
@@ -81,10 +89,8 @@ llvm::SmallVector<void *> selectReachableBlobs(
       if (P == 0)
         continue;
 
-      if (void *Base = findBlob(P)) {
-        Selected.push_back(Base);
+      if (selectBlobs(P, Selected))
         continue;
-      }
 
       if (insideGlobal(P))
         continue;

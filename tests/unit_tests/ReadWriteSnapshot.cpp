@@ -499,10 +499,11 @@ int main(int argc, char **argv) {
                                  nullptr, reinterpret_cast<void *>(G), 64});
 
     uintptr_t IntoA = A + 16;
+    // One past B's actual (page-rounded) extent, which is also C's base.
     struct {
       int32_t Pad;
       uintptr_t OnePastB;
-    } Aggregate{0, B + 100};
+    } Aggregate{0, B + 4096};
     uintptr_t Null = 0;
     uintptr_t Untracked = 0x9999;
     uint64_t IntegerLikeC = C;
@@ -515,16 +516,17 @@ int main(int argc, char **argv) {
     auto Selected = selectReachableBlobs<Vendor>(Tracked, Offsets, SelArgs,
                                                  Globals, "TestKernel");
     llvm::SmallVector<void *> Expected = {reinterpret_cast<void *>(A),
-                                          reinterpret_cast<void *>(B)};
+                                          reinterpret_cast<void *>(B),
+                                          reinterpret_cast<void *>(C)};
     if (Selected != Expected) {
       std::cerr << "Reachable selection picked " << Selected.size()
-                << " blobs, expected A and B\n";
+                << " blobs, expected A, B and C\n";
       return 512;
     }
 
     auto Resolved = resolveBlobs<Vendor>(Tracked, Selected);
-    if (Resolved.size() != 2 || Resolved[0]->getSize() != 256 ||
-        Resolved[1]->getSize() != 100) {
+    if (Resolved.size() != 3 || Resolved[0]->getSize() != 256 ||
+        Resolved[1]->getSize() != 100 || Resolved[2]->getSize() != 64) {
       std::cerr << "Resolved blobs do not match the selection\n";
       return 512;
     }
