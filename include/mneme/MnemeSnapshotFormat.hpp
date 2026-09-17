@@ -402,8 +402,7 @@ BaseSnapshotSource<VendorTypes>::load(const std::string &KernelName) const {
   return Reader->read(KernelName, BaseSnapshotSource<VendorTypes>());
 }
 
-// DeviceMemory is the selection of live allocations this snapshot captures,
-// not necessarily every tracked allocation.
+// DeviceMemory holds only the blobs this snapshot captures.
 template <DeviceVendors VendorTypes> struct SnapshotInput {
   const proteus::runtime::GlobalMetadataMap &GlobalVars;
   llvm::ArrayRef<MnemeMemoryBlob<VendorTypes> *> DeviceMemory;
@@ -412,9 +411,8 @@ template <DeviceVendors VendorTypes> struct SnapshotInput {
   typename DeviceTraits<VendorTypes>::DeviceStream_t Stream;
 };
 
-// The live blobs for a selection of base addresses, in selection order. The
-// selection is recorded at the prologue and resolved again at the epilogue, so
-// a missing key means the application freed memory the kernel could reach.
+// The live blobs for a list of base addresses, in the same order. A missing
+// key means the allocation was freed after it was selected.
 template <DeviceVendors VendorTypes>
 llvm::SmallVector<MnemeMemoryBlob<VendorTypes> *>
 resolveBlobs(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,

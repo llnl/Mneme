@@ -32,9 +32,9 @@ llvm::SmallVector<void *> allBlobKeys(
   return Keys;
 }
 
-// The base addresses of the tracked allocations a launch can reach through
-// the pointer-typed slots of its arguments, sorted ascending. Globals are
-// always captured, so a pointer into a global is covered but selects nothing.
+// The base addresses of the tracked allocations that the kernel's pointer
+// arguments point into, sorted ascending. Pointers into globals select
+// nothing because globals are always captured.
 template <DeviceVendors VendorTypes>
 llvm::SmallVector<void *> selectReachableBlobs(
     const llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
@@ -49,17 +49,12 @@ llvm::SmallVector<void *> selectReachableBlobs(
                          Blob.getActualSize());
   llvm::sort(Extents);
 
-  // The end is inclusive so that one-past-the-end pointers select the
-  // allocation they were derived from. When one allocation ends exactly where
-  // the next begins, a pointer on that boundary could have come from either,
-  // so both are selected rather than guessing.
+  // A one-past-the-end pointer selects the allocation it came from. If that
+  // address is also the next allocation's base, both are selected.
   auto selectBlobs = [&](uintptr_t P, llvm::SmallVectorImpl<void *> &Out) {
     auto It = std::upper_bound(
         Extents.begin(), Extents.end(), P,
         [](uintptr_t Value, const Extent &E) { return Value < E.first; });
-    // It is the first extent starting after P. The candidates are the extent
-    // before it and, only when P sits on that extent's base, the one before
-    // that. Extents do not overlap, so no earlier extent can reach P.
     bool Found = false;
     for (int Back = 0; Back < 2 && It != Extents.begin(); ++Back) {
       --It;
@@ -95,8 +90,7 @@ llvm::SmallVector<void *> selectReachableBlobs(
       if (insideGlobal(P))
         continue;
 
-      // Printed without the logger so that default builds still report a
-      // pointer whose target cannot be replayed.
+      // Printed directly so the warning is visible even with logging off.
       std::cerr << "[mneme] Kernel " << KernelName.str() << " argument "
                 << ArgIndex << " offset " << Offset << " points to "
                 << reinterpret_cast<void *>(P)
