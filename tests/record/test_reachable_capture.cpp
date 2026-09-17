@@ -1,12 +1,12 @@
 // clang-format off
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=struct_kernel %build/test_reachable_capture%ext | %FILECHECK %s --check-prefix=CHECK
+// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=struct_kernel MNEME_CAPTURE_MODE=full %build/test_reachable_capture%ext | %FILECHECK %s --check-prefix=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-FULL
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=struct_kernel MNEME_CAPTURE_MODE=reachable %build/test_reachable_capture%ext | %FILECHECK %s --check-prefix=CHECK
+// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=struct_kernel MNEME_CAPTURE_MODE=reachable %build/test_reachable_capture%ext | %FILECHECK %s --check-prefix=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-REACHABLE
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=managed_kernel MNEME_CAPTURE_MODE=reachable %build/test_reachable_capture%ext 2> "%t.$$.err" | %FILECHECK %s --check-prefix=CHECK
+// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=managed_kernel MNEME_CAPTURE_MODE=reachable %build/test_reachable_capture%ext 2> "%t.$$.err" | %FILECHECK %s --check-prefix=CHECK
 // RUN: %FILECHECK %s --check-prefix=CHECK-WARN < "%t.$$.err"
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-MANAGED
 // RUN: rm -rf "%t.$$.mneme" "%t.$$.err"
