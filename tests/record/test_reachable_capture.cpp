@@ -6,6 +6,12 @@
 // RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=struct_kernel MNEME_CAPTURE_MODE=reachable %build/test_reachable_capture%ext | %FILECHECK %s --check-prefix=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-REACHABLE
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=lambda_kernel MNEME_CAPTURE_MODE=full %build/test_reachable_capture%ext | %FILECHECK %s --check-prefix=CHECK
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-LAMBDA-FULL
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=lambda_kernel MNEME_CAPTURE_MODE=reachable %build/test_reachable_capture%ext | %FILECHECK %s --check-prefix=CHECK
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-LAMBDA-REACHABLE
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" MNEME_RR_KERNELS=managed_kernel MNEME_CAPTURE_MODE=reachable %build/test_reachable_capture%ext 2> "%t.$$.err" | %FILECHECK %s --check-prefix=CHECK
 // RUN: %FILECHECK %s --check-prefix=CHECK-WARN < "%t.$$.err"
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-MANAGED
@@ -39,6 +45,13 @@ __global__ void struct_kernel(const float *in, Params p) {
     p.out[idx] = in[idx] * 2.0f;
 }
 
+// RAJA-style forall: the kernel takes the loop body by value, so the captured
+// pointers arrive inside the closure object rather than as direct arguments.
+template <typename Body> __global__ void lambda_kernel(Body body) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  body(idx);
+}
+
 // Managed memory is not tracked by the recorder, so this pointer cannot be
 // resolved to a captured allocation.
 __global__ void managed_kernel(float *m, int n) {
@@ -61,6 +74,11 @@ int main() {
   MALLOC_MANAGED(reinterpret_cast<void **>(&managed), N * sizeof(float));
 
   struct_kernel<<<1, N>>>(in, Params{out, N});
+  const float scale = 2.0f;
+  lambda_kernel<<<1, N>>>([=] __device__(int idx) {
+    if (idx < N)
+      out[idx] = in[idx] * scale;
+  });
   managed_kernel<<<1, N>>>(managed, N);
 
   auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceSynchronize());
@@ -86,6 +104,12 @@ int main() {
 // CHECK-RR-REACHABLE: DemangledName: struct_kernel(float const*, Params)
 // CHECK-RR-REACHABLE: CaptureMode: reachable
 // CHECK-RR-REACHABLE: NumBlobs: 2
+// CHECK-RR-LAMBDA-FULL: DemangledName: void lambda_kernel<{{.*}}>({{.*}})
+// CHECK-RR-LAMBDA-FULL: CaptureMode: full
+// CHECK-RR-LAMBDA-FULL: NumBlobs: 3
+// CHECK-RR-LAMBDA-REACHABLE: DemangledName: void lambda_kernel<{{.*}}>({{.*}})
+// CHECK-RR-LAMBDA-REACHABLE: CaptureMode: reachable
+// CHECK-RR-LAMBDA-REACHABLE: NumBlobs: 2
 // CHECK-WARN: [mneme] Kernel {{.*}}managed_kernel{{.*}} argument 0 offset 0 points to {{.*}} which is not a tracked allocation or registered global; it will not be captured
 // CHECK-RR-MANAGED: DemangledName: managed_kernel(float*, int)
 // CHECK-RR-MANAGED: CaptureMode: reachable
