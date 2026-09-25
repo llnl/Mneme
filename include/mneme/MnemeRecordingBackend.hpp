@@ -90,12 +90,12 @@ public:
     auto [Addr, ReservedSize] = PM->allocateAddr(size, nullptr);
     MnemeMemoryBlob<VendorTypes> MemBlob(ReservedSize,
                                          reinterpret_cast<void *>(Addr), size);
-    auto ret = MemBlob.map(reinterpret_cast<void *>(Addr), ReservedSize, size);
+    MemBlob.mapInto(reinterpret_cast<void *>(Addr));
     *ptr = MemBlob.ptr();
     AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
     LOG_DEBUG("Intercepted Device Malloc PTR:{} SIZE:{} ACTUALSIZE:{}", *ptr,
               size, ReservedSize);
-    return ret;
+    return MnemeDeviceRT::DeviceSuccess;
   }
 
   DeviceError_t rtManagedMalloc(void **ptr, size_t size,
