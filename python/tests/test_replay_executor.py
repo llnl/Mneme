@@ -122,8 +122,6 @@ class FakeDeviceModule:
 
 class FakeRecordedExecution:
     def __init__(self, kernel_descr=None, kernel_instances=None):
-        self.va_addr = 0x1000
-        self.va_size = 0x2000
         self.kernel_instances = (
             {"rid": kernel_descr} if kernel_instances is None else kernel_instances
         )

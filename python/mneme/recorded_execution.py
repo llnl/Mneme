@@ -359,7 +359,6 @@ class RecordedExecution:
 
       - Kernel identity (static hash, name, demangled name)
       - Argument names and specialization availability
-      - Virtual address space reservation information (VA base + size)
       - LLVM IR module file paths required for linking
       - A mapping of **dynamic hash → KernelInstance**, representing each observed
         launch instance (grid/block/shared-mem and snapshot paths)
@@ -381,10 +380,6 @@ class RecordedExecution:
         Recorded kernel argument names (for display/debugging).
     specializations : list[bool]
         Per-argument specialization availability flags.
-    va_addr : str
-        Base virtual address (hex string) used by Mneme’s memory manager.
-    va_size : int
-        Virtual address space size in bytes (or recording-specific unit).
     kernel_instances : dict[str, KernelInstance]
         Mapping from dynamic hash to recorded launch instance descriptor.
     """
@@ -483,8 +478,6 @@ class RecordedExecution:
         llvm_files: List[str],
         arg_names: List[str],
         specializations: List[bool],
-        va_addr: str,
-        va_size: int,
         kernel_instances: Dict[str, KernelInstance],
         source_file: Optional[str] = None,
         source_copy: Optional[str] = None,
@@ -498,8 +491,6 @@ class RecordedExecution:
         self.llvm_files = llvm_files
         self.arg_names = arg_names
         self.specializations = specializations
-        self.va_addr = va_addr
-        self.va_size = va_size
         self.kernel_instances = kernel_instances
         for instance in kernel_instances.values():
             instance.execution = self
@@ -511,7 +502,7 @@ class RecordedExecution:
         self._link_mod = None
 
     def __str__(self):
-        return f"KernelName: {self.kernel_name} NumArgs: {len(self.arg_names)}, VASize: {self.va_size}, VAddr: {self.va_addr}"
+        return f"KernelName: {self.kernel_name} NumArgs: {len(self.arg_names)}"
 
     def __getitem__(self, key):
         return self.kernel_instances[key]
@@ -632,8 +623,6 @@ class RecordedExecution:
             res["SourceLine"] = self.source_line
         if self.source_end_line is not None:
             res["SourceEndLine"] = self.source_end_line
-        res["VASize"] = self.va_size
-        res["VAddr"] = self.va_addr
         res["instances"] = {}
         for k, v in self.items():
             res["instances"][k] = v.to_dict(base_dir)
@@ -735,8 +724,6 @@ class RecordedExecution:
             resolved_modules,
             record_db["ArgNames"],
             record_db["Specializations"],
-            record_db["VAddr"],
-            record_db["VASize"],
             instances,
             source_file=record_db.get("SourceFile"),
             source_copy=source_copy,
