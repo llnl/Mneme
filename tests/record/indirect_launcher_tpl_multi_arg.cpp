@@ -1,6 +1,6 @@
 // clang-format off
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/indirect_launcher_tpl_multi_arg%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/indirect_launcher_tpl_multi_arg%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on

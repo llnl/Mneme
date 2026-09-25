@@ -22,7 +22,6 @@ def test_default_controls(build_test_program, tmp_path, monkeypatch):
             "-sr", "2",
             "-mr", "1",
             "-rdb", str(directory),
-            "-vass", "1",
             "--", str(build_test_program["binary"]), "1024",
         ]
     ) == 0
@@ -55,7 +54,6 @@ def test_config_record_and_replay(build_test_program, tmp_path):
             "record",
             "--filter-config", str(policy),
             "-rdb", str(directory),
-            "-vass", "1",
             "--", str(build_test_program["binary"]), "1024",
         ]
     ) == 0

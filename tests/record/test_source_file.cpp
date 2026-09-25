@@ -1,12 +1,12 @@
 // clang-format off
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/source_file_kernel.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" MNEME_COPY_SOURCE=1 %build/test_source_file%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/source_file_kernel.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" MNEME_COPY_SOURCE=1 %build/test_source_file%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-SINGLE
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/multi_line_kernel.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" MNEME_COPY_SOURCE=1 %build/test_source_file%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/multi_line_kernel.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" MNEME_COPY_SOURCE=1 %build/test_source_file%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-MULTI
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/lambda_kernel.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" MNEME_COPY_SOURCE=1 %build/test_source_file%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/lambda_kernel.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" MNEME_COPY_SOURCE=1 %build/test_source_file%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-LAMBDA
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on

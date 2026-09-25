@@ -341,12 +341,13 @@ class Record:
             default=os.getcwd(),
             help="Path to directory to store the recorded database(s) and memory snapshots",
         )
+        # Ignored; kept so existing scripts still parse.
         parser.add_argument(
             "-vass",
             "--virtual-address-space-size",
             type=int,
-            default=4,
-            help="Size (in GigaBytes) of virtual address space to be allocatd by mneme.",
+            default=None,
+            help=argparse.SUPPRESS,
         )
 
         parser.add_argument(
@@ -422,8 +423,8 @@ class Record:
         librecord_path = utils.get_mneme_record_library_name()
         logger.debug(f"LD_PRELOAD={librecord_path}")
         record_env["LD_PRELOAD"] = librecord_path
-        logger.debug(f"MNEME_PAGE_SIZE={args.virtual_address_space_size}")
-        record_env["MNEME_PAGE_SIZE"] = str(args.virtual_address_space_size)
+        if args.virtual_address_space_size is not None:
+            print("mneme: warning: -vass is ignored", file=sys.stderr)
 
         record_db_dir = Path(args.record_db_dir).resolve()
         if record_db_dir.exists() and not record_db_dir.is_dir():

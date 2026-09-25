@@ -61,18 +61,6 @@ inline std::optional<std::string> getEnvOrDefaultString(const char *VarName) {
   return std::string(EnvValue);
 }
 
-inline std::optional<long> getEnvOrDefaultPageSizeGiB(const char *VarName) {
-  const char *EnvValue = std::getenv(VarName);
-  if (!EnvValue)
-    return std::nullopt;
-
-  return std::atol(EnvValue);
-}
-
-inline uint64_t pageSizeGiBToBytes(long PageSizeGiB) {
-  return static_cast<uint64_t>(PageSizeGiB * 1024L * 1024L * 1024L);
-}
-
 inline LogLevel getEnvOrDefaultLogLevel(const char *VarName, LogLevel Default) {
   auto EnvValue = getEnvOrDefaultString(VarName);
   if (!EnvValue)
@@ -217,7 +205,6 @@ public:
 
   const FilterMode RecordingFilterMode;
   const std::optional<std::string> FilterConfigPath;
-  const std::optional<long> PageSizeGiB;
   const LogLevel MnemeLogLevel;
   const EpilogueSnapshotType EpilogueType;
   const bool CopySource;
@@ -239,11 +226,6 @@ public:
     return std::filesystem::absolute(Path);
   }
 
-  uint64_t getPageSizeBytesOrDefault(long DefaultPageSizeGiB) const {
-    return config_detail::pageSizeGiBToBytes(
-        PageSizeGiB.value_or(DefaultPageSizeGiB));
-  }
-
   std::optional<std::string> getLogDirectory() const {
     if (MnemeLogDir && !std::filesystem::exists(*MnemeLogDir)) {
       throw std::runtime_error("'MNEME_LOG_DIR' directory does not exist\n");
@@ -259,8 +241,6 @@ private:
   Config()
       : RecordingFilterMode(config_detail::getFilterMode()),
         FilterConfigPath(config_detail::getEnvOrDefaultString("MNEME_FILTER_CONFIG")),
-        PageSizeGiB(
-            config_detail::getEnvOrDefaultPageSizeGiB("MNEME_PAGE_SIZE")),
         MnemeLogLevel(config_detail::getEnvOrDefaultLogLevel(
             "MNEME_LOG_LEVEL", LogLevel::Critical)),
         EpilogueType(config_detail::getEnvOrDefaultEpilogueSnapshotType(

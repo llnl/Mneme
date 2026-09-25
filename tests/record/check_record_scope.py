@@ -30,7 +30,6 @@ def check_case(
     env.update(
         MNEME_FILTER_MODE="scoped",
         MNEME_DATA_DIR=str(directory),
-        MNEME_PAGE_SIZE="1",
         MNEME_LOG_LEVEL="off",
         MNEME_RECORD_RANKS="all",
     )

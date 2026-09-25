@@ -1,6 +1,6 @@
 // clang-format off
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" MNEME_COPY_SOURCE=1 %build/test_source_file_no_debug%ext > "%t.$$.out" 2>&1
+// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" MNEME_COPY_SOURCE=1 %build/test_source_file_no_debug%ext > "%t.$$.out" 2>&1
 // RUN: %FILECHECK %s --check-prefix=CHECK < "%t.$$.out"
 // RUN: %FILECHECK %s --check-prefix=CHECK-WARN < "%t.$$.out"
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR

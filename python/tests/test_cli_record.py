@@ -69,8 +69,6 @@ def test_record_happy_path(tmp_path, record_parser, monkeypatch):
         [
             "--record-db-dir",
             str(record_dir),
-            "--virtual-address-space-size",
-            "8",
             "--",
             fake_binary,
             "42",
@@ -85,7 +83,6 @@ def test_record_happy_path(tmp_path, record_parser, monkeypatch):
     # Validate environment
     env = captured["env"]
     assert env["LD_PRELOAD"] == fake_lib
-    assert env["MNEME_PAGE_SIZE"] == "8"
     assert "MNEME_MAX_RECORDINGS" not in env
     assert "MNEME_SKIP_RECORDINGS" not in env
     assert env["MNEME_DATA_DIR"] == str(record_dir)
@@ -238,8 +235,8 @@ def test_record_handles_not_executable(record_parser, tmp_path, monkeypatch):
         Record.run(args, verbosity=None)
 
 
-def test_record_default_page_size(record_parser, tmp_path, monkeypatch):
-    """MNEME_PAGE_SIZE uses default value if not provided explicitly."""
+def test_record_defaults(record_parser, tmp_path, monkeypatch):
+    """Defaults are exported when not provided explicitly."""
     record_dir = tmp_path / "records"
     record_dir.mkdir()
 
@@ -267,7 +264,6 @@ def test_record_default_page_size(record_parser, tmp_path, monkeypatch):
 
     Record.run(args, verbosity=None)
 
-    assert captured["env"]["MNEME_PAGE_SIZE"] == "4"  # default from code
     assert "MNEME_SKIP_RECORDINGS" not in captured["env"]
     assert "MNEME_MAX_RECORDINGS" not in captured["env"]
     assert captured["env"]["MNEME_FILTER_MODE"] == "default"
@@ -295,6 +291,15 @@ def _capture_env_with_args(record_parser, tmp_path, monkeypatch, extra_args):
     )
     Record.run(args, verbosity=None)
     return captured["env"]
+
+
+@pytest.mark.parametrize("flag", ["-vass", "--virtual-address-space-size"])
+def test_record_vass_is_ignored(record_parser, tmp_path, monkeypatch, capsys, flag):
+    monkeypatch.delenv("MNEME_PAGE_SIZE", raising=False)
+    env = _capture_env_with_args(record_parser, tmp_path, monkeypatch, [flag, "8"])
+    assert "MNEME_PAGE_SIZE" not in env
+    assert "-vass is ignored" in capsys.readouterr().err
+    assert "-vass" not in record_parser.format_help()
 
 
 @pytest.mark.parametrize("record_ranks", ["0,2", "all"])
