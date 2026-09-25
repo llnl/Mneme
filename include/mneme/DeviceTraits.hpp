@@ -277,14 +277,26 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return getPageSize(DeviceID, hipMemAllocationGranularityMinimum);
   }
 
-  // hipMemRelease never returns memory to the device (ROCm 6.4-7.2), so
-  // unmapped handles are kept and reused for mappings of the same size.
+  // Before ROCm 6.4.2 (HIP 60443484) hipMemRelease never returns memory to the
+  // device, so there unmapped handles are kept and reused for the same size.
   // Leaked so blobs released during static destruction can still use it.
   static std::vector<hipMemGenericAllocationHandle_t> &
   freeHandles(uint64_t Size) {
     static auto *Pool = new std::unordered_map<
         uint64_t, std::vector<hipMemGenericAllocationHandle_t>>();
     return (*Pool)[Size];
+  }
+
+  static void releaseHandle(uint64_t Size, hipMemGenericAllocationHandle_t H) {
+    static const bool ReleaseLeaks = [] {
+      int Version = 0;
+      (void)hipRuntimeGetVersion(&Version);
+      return Version < 60443484;
+    }();
+    if (ReleaseLeaks)
+      freeHandles(Size).push_back(H);
+    else
+      (void)hipMemRelease(H);
   }
 
   // The driver treats Addr as a hint, so a reservation elsewhere is Occupied.
@@ -324,7 +336,7 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
       }
       (void)hipMemUnmap(Addr, Size);
     }
-    Free.push_back(H);
+    releaseHandle(Size, H);
     (void)hipMemAddressFree(Addr, Size);
     return MapStatus::OutOfMemory;
   }
@@ -333,7 +345,7 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
                          hipMemGenericAllocationHandle_t H) {
     auto EC = DeviceErrorCheck(hipMemUnmap(Addr, Size));
     if (!EC) {
-      freeHandles(Size).push_back(H);
+      releaseHandle(Size, H);
       EC = DeviceErrorCheck(hipMemAddressFree(Addr, Size));
     }
     if (EC)
