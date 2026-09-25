@@ -287,9 +287,6 @@ def recorded_execution(request, build_test_program, tmp_path):
         assert (
             len(recorded_execution.llvm_files) == 1
         ), "Mneme record should have 1 llvm file"
-        assert recorded_execution.va_size == (
-            2 * 1024 * 1024 * 1024
-        ), "Recorded Virtual Address size should be 2 GB"
         assert (
             len(recorded_execution.kernel_instances.keys()) == 1
         ), "Recording should had recorded single kernel"

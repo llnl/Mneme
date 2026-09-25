@@ -159,8 +159,7 @@ public:
     LOG_INFO("Hash value is {}", KInfo.getStaticHash());
 
     auto RecordAction = DB.takeSnapshot<VendorTypes>(
-        PM->getVAStart(), PM->getTotalVASize(), KInfo, AllocatedBlobs, GridDim,
-        BlockDim, Args, SharedMem, Stream);
+        KInfo, AllocatedBlobs, GridDim, BlockDim, Args, SharedMem, Stream);
     if (RecordAction)
       LOG_INFO("Successfully Recorded Prologue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
