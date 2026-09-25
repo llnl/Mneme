@@ -118,12 +118,11 @@ deallocations performed by the application.
 To do this, Mneme provides its own device memory allocator, which:
 
 1. tracks the size and device address of every allocation,
-2. maintains a virtual view of the device address space, and
+2. maps each allocation at a device address it chooses, and
 3. records allocation lifetimes across kernel launches.
 
-Internally, this allocator is implemented as a virtual page-based
-memory manager, allowing Mneme to reason about device memory layout
-independently of the underlying vendor runtime.
+Mneme places allocations far from addresses the vendor runtime and host
+use, so replay can map the same addresses again.
 
 This mechanism enables Mneme to precisely identify which regions of
 device memory may be accessed by a kernel.
@@ -231,9 +230,8 @@ state recorded during the record phase.
 
 This involves:
 
-1. recreating the virtual device address space,
-2. remapping recorded memory regions to replay-time allocations, and
-3. populating device memory with the recorded contents of:
+1. mapping device memory at the recorded allocation addresses, and
+2. populating device memory with the recorded contents of:
     - heap allocations,
     - device global variables, and
     - kernel argument buffers.
