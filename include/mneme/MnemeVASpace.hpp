@@ -14,9 +14,18 @@ struct VARange {
   uint64_t size() const { return End - Start; }
 };
 
-// Unmapped user-space ranges of this process, from /proc/self/maps.
-inline std::vector<VARange> getFreeVARanges(uintptr_t Lo, uintptr_t Hi) {
-  std::vector<VARange> Mapped;
+constexpr uint64_t LargePageSize = 2ULL << 20;
+
+// Large-page alignment when [Addr, Addr + Size) allows it, else PageSize.
+inline uint64_t mapAlignment(uintptr_t Addr, uint64_t Size,
+                             uint64_t PageSize) {
+  if (Size >= LargePageSize && Addr % LargePageSize == 0)
+    return LargePageSize;
+  return PageSize;
+}
+
+// Calls F(Range, Line) for each entry of /proc/self/maps.
+template <typename Fn> void forEachMapping(Fn F) {
   std::ifstream Maps("/proc/self/maps");
   std::string Line;
   while (std::getline(Maps, Line)) {
@@ -25,8 +34,25 @@ inline std::vector<VARange> getFreeVARanges(uintptr_t Lo, uintptr_t Hi) {
       continue;
     uintptr_t S = std::stoull(Line.substr(0, Dash), nullptr, 16);
     uintptr_t E = std::stoull(Line.substr(Dash + 1), nullptr, 16);
-    Mapped.push_back({S, E});
+    F(VARange{S, E}, Line);
   }
+}
+
+// /proc/self/maps lines overlapping [Lo, Hi).
+inline std::string getMappingsIn(uintptr_t Lo, uintptr_t Hi) {
+  std::string Out;
+  forEachMapping([&](const VARange &R, const std::string &Line) {
+    if (R.Start < Hi && R.End > Lo)
+      Out += Line + "\n";
+  });
+  return Out;
+}
+
+// Unmapped user-space ranges of this process, from /proc/self/maps.
+inline std::vector<VARange> getFreeVARanges(uintptr_t Lo, uintptr_t Hi) {
+  std::vector<VARange> Mapped;
+  forEachMapping(
+      [&](const VARange &R, const std::string &) { Mapped.push_back(R); });
   std::sort(
       Mapped.begin(), Mapped.end(),
       [](const VARange &A, const VARange &B) { return A.Start < B.Start; });
