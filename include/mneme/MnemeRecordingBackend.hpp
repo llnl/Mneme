@@ -33,6 +33,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   // create the allocator we assume that the allocations go to the same device.
   int DeviceID = -1;
 
+  static constexpr int MaxMapTries = 16;
+
   void initializePageManagerIfNeeded() {
     if (PM)
       return;
@@ -44,7 +46,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     LOG_DEBUG("Initializing system {}", arch);
     if (DeviceID == -1)
       Runtime.origGetDeviceID(&DeviceID);
-    PM = initializePageManager<VendorTypes>(DeviceID);
+    PM = std::make_unique<PageManager<VendorTypes>>(
+        MnemeDeviceRT::getMinPageSize(DeviceID));
   }
 
 public:
@@ -87,15 +90,27 @@ public:
   DeviceError_t rtMalloc(void **ptr, size_t size) override {
     initializePageManagerIfNeeded();
 
-    auto [Addr, ReservedSize] = PM->allocateAddr(size, nullptr);
-    MnemeMemoryBlob<VendorTypes> MemBlob(ReservedSize,
-                                         reinterpret_cast<void *>(Addr), size);
-    MemBlob.mapInto(reinterpret_cast<void *>(Addr));
-    *ptr = MemBlob.ptr();
-    AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
-    LOG_DEBUG("Intercepted Device Malloc PTR:{} SIZE:{} ACTUALSIZE:{}", *ptr,
-              size, ReservedSize);
-    return MnemeDeviceRT::DeviceSuccess;
+    for (int Try = 0; Try < MaxMapTries; ++Try) {
+      auto R = PM->allocateAddr(size);
+      MnemeMemoryBlob<VendorTypes> MemBlob(R.Size, nullptr, size);
+      switch (MemBlob.mapFixed(R.Addr, R.Size, R.Align, DeviceID)) {
+      case MapStatus::Mapped:
+        *ptr = R.Addr;
+        AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
+        LOG_DEBUG("Intercepted Device Malloc PTR:{} SIZE:{} ACTUALSIZE:{}",
+                  *ptr, size, R.Size);
+        return MnemeDeviceRT::DeviceSuccess;
+      case MapStatus::Occupied:
+        // Something else lives there; keep the range out of the free set.
+        LOG_DEBUG("Device address {} is occupied, retrying", R.Addr);
+        break;
+      case MapStatus::OutOfMemory:
+        PM->releaseAddr(R.Addr, R.Size);
+        *ptr = nullptr;
+        return MnemeDeviceRT::DeviceOutOfMemory;
+      }
+    }
+    LOG_FATAL("Cannot map {} bytes of device memory", size);
   }
 
   DeviceError_t rtManagedMalloc(void **ptr, size_t size,
@@ -118,17 +133,20 @@ public:
       LOG_WARN("Mneme was instructed to de-allocate nullptr..., skipping");
       return MnemeDeviceRT::DeviceSuccess;
     }
-    if (!AllocatedBlobs.contains(ptr)) {
+    auto It = AllocatedBlobs.find(ptr);
+    if (It == AllocatedBlobs.end()) {
       LOG_CRITICAL("Free address that is not being allocated through Mneme {}",
                    ptr);
       LOG_FATAL("Free address that is not being allocated through Mneme\n");
     }
-    PM->releaseAddr(AllocatedBlobs[ptr].getActualSize(), ptr);
-    auto ret = AllocatedBlobs[ptr].release();
+    auto &Blob = It->second;
     LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
-              AllocatedBlobs[ptr].getSize(),
-              AllocatedBlobs[ptr].getActualSize());
-    AllocatedBlobs.erase(ptr);
+              Blob.getSize(), Blob.getActualSize());
+    // Like hipFree, wait for kernels that may still use the memory.
+    MnemeDeviceRT::DeviceSynchronize();
+    auto ret = Blob.release();
+    PM->releaseAddr(ptr, Blob.getActualSize());
+    AllocatedBlobs.erase(It);
     return ret;
   }
 
