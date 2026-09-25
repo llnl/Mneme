@@ -1,6 +1,6 @@
 // clang-format off
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: env MNEME_MAX_RECORDINGS=1 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_crash_handling%ext > %t.out 2>&1 || true
+// RUN: env MNEME_MAX_RECORDINGS=1 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/test_crash_handling%ext > %t.out 2>&1 || true
 // RUN: %FILECHECK %s --check-prefixes=CHECK < %t.out
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on

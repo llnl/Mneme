@@ -66,18 +66,6 @@ inline uint64_t getEnvOrDefaultIntLenient(const char *VarName,
   return EnvValue ? static_cast<uint64_t>(std::atoi(EnvValue)) : Default;
 }
 
-inline std::optional<long> getEnvOrDefaultPageSizeGiB(const char *VarName) {
-  const char *EnvValue = std::getenv(VarName);
-  if (!EnvValue)
-    return std::nullopt;
-
-  return std::atol(EnvValue);
-}
-
-inline uint64_t pageSizeGiBToBytes(long PageSizeGiB) {
-  return static_cast<uint64_t>(PageSizeGiB * 1024L * 1024L * 1024L);
-}
-
 inline LogLevel getEnvOrDefaultLogLevel(const char *VarName, LogLevel Default) {
   auto EnvValue = getEnvOrDefaultString(VarName);
   if (!EnvValue)
@@ -200,7 +188,6 @@ public:
   const std::optional<std::string> KernelRegex;
   const uint64_t MaxRecordings;
   const uint64_t SkipRecordings;
-  const std::optional<long> PageSizeGiB;
   const LogLevel MnemeLogLevel;
   const EpilogueSnapshotType EpilogueType;
   const bool CopySource;
@@ -216,11 +203,6 @@ public:
       throw std::runtime_error("Path :" + Path.string() + " does not exist.\n");
     }
     return std::filesystem::absolute(Path);
-  }
-
-  uint64_t getPageSizeBytesOrDefault(long DefaultPageSizeGiB) const {
-    return config_detail::pageSizeGiBToBytes(
-        PageSizeGiB.value_or(DefaultPageSizeGiB));
   }
 
   std::optional<std::string> getLogDirectory() const {
@@ -241,8 +223,6 @@ private:
             "MNEME_MAX_RECORDINGS", 4)),
         SkipRecordings(config_detail::getEnvOrDefaultIntLenient(
             "MNEME_SKIP_RECORDINGS", 0)),
-        PageSizeGiB(
-            config_detail::getEnvOrDefaultPageSizeGiB("MNEME_PAGE_SIZE")),
         MnemeLogLevel(config_detail::getEnvOrDefaultLogLevel(
             "MNEME_LOG_LEVEL", LogLevel::Critical)),
         EpilogueType(config_detail::getEnvOrDefaultEpilogueSnapshotType(

@@ -46,7 +46,6 @@ artifact.
 | Option                                  | Description                                                                                                               |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------            |
 | `-rdb`, `--record-db-dir`               | Path to a **existing** directory where recorded artifacts (metadata, LLVM IR, and device memory snapshots) will be stored |
-| `-vass`, `--virtual-address-space-size` | Size (in **GB**) of the virtual address space allocated by Mneme for recording                                            |
 | `-mr`, `--per-kernel-max-recordings`    | Maximum number of times the same GPU kernel may be recorded with different dynamic hashes                                 |
 | `--epilogue-format`                     | Store epilogue snapshots as `diff`, `bytes`, or `best`; defaults to `diff`                                                        |
 | `-rr`, `--record-ranks`                 | Restrict recording to a comma-separated set of MPI ranks (e.g. `0`, `0,1,3`) or `all` for every rank. See *Multi-rank recording* below. |
@@ -77,13 +76,7 @@ mneme record -rdb record-dir -- ./vecAdd 1024
 mneme record -rdb record-dir -mr 1 -- ./vecAdd 1024
 ```
 
-3. Increase the virtual address space used during recording:
-
-```bash
-mneme record -rdb record-dir -vass 64 -- ./vecAdd 1024
-```
-
-4. Record only on rank 0 of a 4-rank MPI run (this is also the default for distributed runs):
+3. Record only on rank 0 of a 4-rank MPI run (this is also the default for distributed runs):
 
 ```bash
 mneme record -rdb record-dir --record-ranks 0 -- mpirun -n 4 ./app
@@ -119,7 +112,7 @@ To override the default, pass `--record-ranks`:
     Mneme may record multiple instances of the same kernel if it is invoked with different dynamic execution contexts. The `--per-kernel-max-recordings` option can be used to limit this behavior.
 
 !!! note
-    The virtual address space size should be chosen large enough to accommodate all device allocations performed by the application during kernel execution
+    Mneme maps device memory per allocation at addresses it chooses, so no address space size is needed. The old `-vass` option is accepted but ignored.
 
 !!! note
     `--record-ranks` is equivalent to setting the environment variable
