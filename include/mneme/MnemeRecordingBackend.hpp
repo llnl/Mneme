@@ -93,7 +93,7 @@ public:
     for (int Try = 0; Try < MaxMapTries; ++Try) {
       auto R = PM->allocateAddr(size);
       MnemeMemoryBlob<VendorTypes> MemBlob(R.Size, nullptr, size);
-      switch (MemBlob.mapFixed(R.Addr, R.Size, R.Align, DeviceID)) {
+      switch (MemBlob.mapFixed(R.Addr, R.Addr, R.Size, R.Align, DeviceID)) {
       case MapStatus::Mapped:
         *ptr = R.Addr;
         AllocatedBlobs.insert({*ptr, std::move(MemBlob)});

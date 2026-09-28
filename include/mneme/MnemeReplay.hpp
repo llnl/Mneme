@@ -166,31 +166,13 @@ class PrologueState : public ReplayMemState<VendorTypes> {
   using MnemeDeviceRT = DeviceTraits<VendorTypes>;
   using Blob = MnemeMemoryBlob<VendorTypes>;
 
-  static void mapBlob(uintptr_t Addr, Blob &B, uint64_t PageSize,
-                      int DeviceID) {
-    uint64_t Size = util::roundUp(B.getActualSize(), PageSize);
-    if (Size == 0) {
-      B.mapInto(reinterpret_cast<void *>(Addr));
-      return;
-    }
-    auto Status = B.mapFixed(reinterpret_cast<void *>(Addr), Size,
-                             util::mapAlignment(Addr, Size, PageSize),
-                             DeviceID);
-    if (Status == MapStatus::Mapped)
-      return;
-    LOG_FATAL("Cannot map recorded address {} size {}: {}\n{}",
-              reinterpret_cast<void *>(Addr), Size,
-              Status == MapStatus::Occupied ? "occupied" : "out of memory",
-              util::getMappingsIn(Addr, Addr + Size));
-  }
-
 public:
   PrologueState(const std::string &KernelName, const std::string &SnapshotFile)
       : ReplayMemState<VendorTypes>(
             BaseSnapshotSource<VendorTypes>(SnapshotFile).load(KernelName)) {}
 
   // Maps every blob at its recorded address. Blobs closer than a large page
-  // share one mapping, owned by the lowest blob.
+  // share one page-rounded mapping, owned by the lowest blob.
   void load() override {
     std::vector<std::pair<uintptr_t, Blob *>> Blobs;
     for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
@@ -200,28 +182,54 @@ public:
     int DeviceID = 0;
     MnemeDeviceRT::getDevice(DeviceID);
     uint64_t PageSize = MnemeDeviceRT::getMinPageSize(DeviceID);
+    auto StartOf = [&](size_t I) { return Blobs[I].first & ~(PageSize - 1); };
     auto EndOf = [&](size_t I) {
-      return Blobs[I].first +
-             util::roundUp(Blobs[I].second->getActualSize(), PageSize);
+      return util::roundUp(Blobs[I].first + Blobs[I].second->getActualSize(),
+                           PageSize);
+    };
+    // Blobs [I, J) within Slack of each other's pages, and their page end.
+    auto Group = [&](size_t I, size_t Limit, uint64_t Slack) {
+      uintptr_t End = EndOf(I);
+      size_t J = I + 1;
+      for (; J < Limit && StartOf(J) <= End + Slack; ++J)
+        End = std::max(End, EndOf(J));
+      return std::make_pair(J, End);
+    };
+    auto MapGroup = [&](size_t I, size_t J, uintptr_t End) {
+      uintptr_t Start = StartOf(I);
+      if (End > Start) {
+        uint64_t Size = End - Start;
+        auto Status = Blobs[I].second->mapFixed(
+            reinterpret_cast<void *>(Blobs[I].first),
+            reinterpret_cast<void *>(Start), Size,
+            util::mapAlignment(Start, Size, PageSize), DeviceID);
+        if (Status != MapStatus::Mapped)
+          return Status;
+        ++I;
+      }
+      for (size_t K = I; K < J; ++K)
+        Blobs[K].second->mapInto(reinterpret_cast<void *>(Blobs[K].first));
+      return MapStatus::Mapped;
     };
 
     for (size_t I = 0, N = Blobs.size(); I < N;) {
-      uintptr_t Start = Blobs[I].first;
-      uintptr_t End = EndOf(I);
-      size_t J = I + 1;
-      for (; J < N && Blobs[J].first < End + util::LargePageSize; ++J)
-        End = std::max(End, EndOf(J));
-
-      uint64_t Size = End - Start;
-      if (J - I > 1 && Size &&
-          Blobs[I].second->mapFixed(reinterpret_cast<void *>(Start), Size,
-                                    util::mapAlignment(Start, Size, PageSize),
-                                    DeviceID) == MapStatus::Mapped) {
-        for (size_t K = I + 1; K < J; ++K)
-          Blobs[K].second->mapInto(reinterpret_cast<void *>(Blobs[K].first));
-      } else {
-        for (size_t K = I; K < J; ++K)
-          mapBlob(Blobs[K].first, *Blobs[K].second, PageSize, DeviceID);
+      auto [J, End] = Group(I, N, util::LargePageSize);
+      if (J - I > 1 && MapGroup(I, J, End) == MapStatus::Mapped) {
+        I = J;
+        continue;
+      }
+      // Something may live between the blobs; map only blobs sharing pages.
+      for (size_t K = I; K < J;) {
+        auto [L, E] = Group(K, J, 0);
+        auto Status = MapGroup(K, L, E);
+        if (Status != MapStatus::Mapped)
+          LOG_FATAL("Cannot map recorded range {}-{}: {}\n{}",
+                    reinterpret_cast<void *>(StartOf(K)),
+                    reinterpret_cast<void *>(E),
+                    Status == MapStatus::Occupied ? "occupied"
+                                                  : "out of memory",
+                    util::getMappingsIn(StartOf(K), E));
+        K = L;
       }
       I = J;
     }
