@@ -33,8 +33,9 @@ protected:
   uint64_t Size;
   std::unique_ptr<uint8_t[]> HostData;
   bool IsMapped;
-  // Non-zero when this blob owns a fixed mapping of MappedSize bytes.
+  // Non-zero when this blob owns the MappedSize-byte mapping at MapAddr.
   uint64_t MappedSize = 0;
+  void *MapAddr = nullptr;
   MemoryAllocationHandle_t Handle{};
 
 public:
@@ -43,20 +44,22 @@ public:
       : ActualSize(ActualSize), BlobAddr(BlobAddr), Size(Size),
         HostData(new uint8_t[Size]), IsMapped(false) {}
 
-  // Maps MapSize bytes of new device memory at exactly VA, owned by this blob.
-  MapStatus mapFixed(void *VA, uint64_t MapSize, uint64_t Alignment,
-                     int DeviceID) {
+  // Maps MapSize bytes of new device memory at exactly MapVA, owned by this
+  // blob, and places the blob at VA inside it.
+  MapStatus mapFixed(void *VA, void *MapVA, uint64_t MapSize,
+                     uint64_t Alignment, int DeviceID) {
     auto Status =
-        MnemeDeviceRT::mapFixed(VA, MapSize, Alignment, DeviceID, Handle);
+        MnemeDeviceRT::mapFixed(MapVA, MapSize, Alignment, DeviceID, Handle);
     if (Status == MapStatus::Mapped) {
       BlobAddr = VA;
       IsMapped = true;
       MappedSize = MapSize;
+      MapAddr = MapVA;
     }
     return Status;
   }
 
-  // Points this blob at VA inside a mapping another blob owns.
+  // Points this blob at VA inside a mapping it does not own.
   void mapInto(void *VA) {
     BlobAddr = VA;
     IsMapped = true;
@@ -84,7 +87,7 @@ public:
       return ret;
     }
     if (MappedSize)
-      MnemeDeviceRT::unmapFixed(BlobAddr, MappedSize, Handle);
+      MnemeDeviceRT::unmapFixed(MapAddr, MappedSize, Handle);
     MappedSize = 0;
     BlobAddr = 0;
     return MnemeDeviceRT::DeviceSuccess;
@@ -126,6 +129,7 @@ public:
       HostData = std::move(other.HostData);
       IsMapped = other.IsMapped;
       MappedSize = other.MappedSize;
+      MapAddr = other.MapAddr;
       Handle = other.Handle;
       PtrMD = other.PtrMD;
       other.BlobAddr = 0;
@@ -139,7 +143,8 @@ public:
       : PtrMD(other.PtrMD), ActualSize(other.ActualSize),
         BlobAddr(other.BlobAddr), Size(other.Size),
         HostData(std::move(other.HostData)), IsMapped(other.IsMapped),
-        MappedSize(other.MappedSize), Handle(other.Handle) {
+        MappedSize(other.MappedSize), MapAddr(other.MapAddr),
+        Handle(other.Handle) {
     other.BlobAddr = 0;
     other.MappedSize = 0;
     other.HostData = nullptr;
