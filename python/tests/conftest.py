@@ -156,8 +156,8 @@ def build_vecadd(
     }
 
 
-def build_vecadd_annotations(
-    tmp_path_factory, call_mneme_config, has_amd_gpu, has_nvidia_gpu
+def build_test_target(
+    target, source, tmp_path_factory, call_mneme_config, has_amd_gpu, has_nvidia_gpu
 ):
     has_nvidia = has_nvidia_gpu
     has_amd = has_amd_gpu
@@ -166,7 +166,7 @@ def build_vecadd_annotations(
     if has_nvidia:
         cuda_arch = detect_local_sm_via_nvidia_smi()
 
-    tmpdir = tmp_path_factory.mktemp("vecadd_annotations")
+    tmpdir = tmp_path_factory.mktemp(target)
     src_dir = pathlib.Path(__file__).parents[0] / "c_src" / "cmake"
 
     mneme_cc = call_mneme_config("cc")
@@ -192,8 +192,8 @@ def build_vecadd_annotations(
             f"-DCMAKE_CXX_COMPILER={mneme_cxx}",
             f"-DCMAKE_PREFIX_PATH={mneme_cmake_dir}",
             "-DRDC=Off",
-            "-DTEST_TARGET_NAME=vecAddAnnotations",
-            "-DTEST_SOURCE_FILE=vec_add_annotations.cu",
+            f"-DTEST_TARGET_NAME={target}",
+            f"-DTEST_SOURCE_FILE={source}",
             str(src_dir),
         ],
         cwd=tmpdir,
@@ -205,7 +205,7 @@ def build_vecadd_annotations(
     return {
         "src_dir": src_dir,
         "build_dir": tmpdir,
-        "binary": tmpdir / "vecAddAnnotations",
+        "binary": tmpdir / target,
         "rdc": "Off",
         "cc": mneme_cc,
         "cxx": mneme_cxx,
@@ -234,8 +234,30 @@ def build_annotation_test_program(
 ):
     key = "vecadd_annotations_cached"
     if key not in build_cache:
-        build_cache[key] = build_vecadd_annotations(
-            tmp_path_factory, call_mneme_config, has_amd_gpu, has_nvidia_gpu
+        build_cache[key] = build_test_target(
+            "vecAddAnnotations",
+            "vec_add_annotations.cu",
+            tmp_path_factory,
+            call_mneme_config,
+            has_amd_gpu,
+            has_nvidia_gpu,
+        )
+    return build_cache[key]
+
+
+@pytest.fixture
+def build_small_allocs_program(
+    tmp_path_factory, build_cache, has_amd_gpu, has_nvidia_gpu
+):
+    key = "small_allocs_cached"
+    if key not in build_cache:
+        build_cache[key] = build_test_target(
+            "smallAllocs",
+            "small_allocs.cu",
+            tmp_path_factory,
+            call_mneme_config,
+            has_amd_gpu,
+            has_nvidia_gpu,
         )
     return build_cache[key]
 
