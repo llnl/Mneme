@@ -69,3 +69,18 @@ def test_replay(recorded_execution, noop_verifies, has_amd_gpu, has_nvidia_gpu, 
     assert report["Result"]["verified"]
     assert report["Result"]["noop_verifies"] is noop_verifies
     assert ("a kernel that does nothing would pass verification" in captured.err) is noop_verifies
+
+
+def test_replay_small_allocations(build_small_allocs_program, tmp_path, capsys):
+    binary = build_small_allocs_program["binary"]
+    out_dir = tmp_path / "record_out"
+    rc = mneme_main(["record", "--record-db-dir", str(out_dir), "--", str(binary)])
+    assert rc == 0, "smallAllocs failed under mneme record"
+
+    records = list(out_dir.glob("*.json"))
+    assert len(records) == 1, "Expected one record JSON"
+
+    capsys.readouterr()
+    assert mneme_main(["replay", "-rdb", str(records[0]), "default<O0>"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["Result"]["verified"], "Replay of small allocations not verified"
