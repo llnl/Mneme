@@ -54,8 +54,6 @@ int main() {
   }
 
   if (!isIntegrated()) {
-    // CHECK: Host read: {{PASS|SKIPPED}}
-    // CHECK: Host write: {{PASS|SKIPPED}}
     printf("Host read: SKIPPED (discrete GPU)\n");
     printf("Host write: SKIPPED (discrete GPU)\n");
     return 0;
@@ -92,3 +90,6 @@ int main() {
   MnemeDeviceRT::DeviceFree(Data);
   return 0;
 }
+
+// CHECK: Host read: {{PASS|SKIPPED}}
+// CHECK: Host write: {{PASS|SKIPPED}}
