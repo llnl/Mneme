@@ -118,8 +118,8 @@ deallocations performed by the application.
 To do this, Mneme provides its own device memory allocator, which:
 
 1. tracks the size and device address of every allocation,
-2. maps each allocation at a device address it chooses, packing small
-   allocations into shared mappings, and
+2. maps each allocation at a device address it chooses, packing
+   allocations smaller than `MNEME_CHUNK_SIZE` into shared mappings, and
 3. records allocation lifetimes across kernel launches.
 
 Mneme places allocations far from addresses the vendor runtime and host
