@@ -86,11 +86,6 @@ On-node messages are then staged through MPICH's shared-memory buffers. They
 are correct but slower, and the setting also applies to buffers that Mneme does
 not manage. Replay does not use MPI and is unaffected.
 
-**Current status:**
-- Verified on Tuolumne (MI300A, ROCm 6.4, cray-mpich 9.0.1) with on-node runs.
-- Messages between nodes have not been tested.
-- Discrete GPUs and other MPI implementations have not been tested.
-
 ## Reporting Issues or Requesting Support
 
 If any of these limitations block your use case, please:
