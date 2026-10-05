@@ -49,22 +49,27 @@ public:
     return std::nullopt;
   }
 
-  void release(uintptr_t Start, uint64_t Size) {
+  // Merges only with free neighbors inside [Lo, Hi).
+  void release(uintptr_t Start, uint64_t Size, uintptr_t Lo = 0,
+               uintptr_t Hi = UINTPTR_MAX) {
     uintptr_t End = Start + Size;
     auto Next = ByAddr.lower_bound(Start);
-    if (Next != ByAddr.end() && Next->first == End) {
+    if (Next != ByAddr.end() && Next->first == End && End < Hi) {
       End += Next->second;
       Next = erase(Next);
     }
     if (Next != ByAddr.begin()) {
       auto Prev = std::prev(Next);
-      if (Prev->first + Prev->second == Start) {
+      if (Prev->first + Prev->second == Start && Prev->first >= Lo) {
         Start = Prev->first;
         erase(Prev);
       }
     }
     insert(Start, End - Start);
   }
+
+  // Drops the free range that starts at Start.
+  void remove(uintptr_t Start) { erase(ByAddr.find(Start)); }
 };
 
 // Picks device addresses for recorded allocations. Regions are nominal, never
@@ -153,72 +158,80 @@ public:
   }
 };
 
-// Packs allocations smaller than a large page into shared large-page chunks,
-// since mapping each one separately is slow.
-template <mneme::DeviceVendors VendorTypes> class SmallAllocator {
+// Packs allocations into shared ChunkSize-byte chunks, each one device mapping,
+// since mapping each allocation separately is slow.
+template <mneme::DeviceVendors VendorTypes> class ChunkAllocator {
   using DT = mneme::DeviceTraits<VendorTypes>;
   using Handle_t = typename DT::MemoryAllocationHandle_t;
-  static constexpr uint64_t ChunkSize = mneme::util::LargePageSize;
 
   struct Chunk {
     Handle_t Handle{};
-    FreeRanges Free;
     uint64_t Used = 0;
   };
+  using ChunkMap = std::map<uintptr_t, Chunk>;
 
   PageManager<VendorTypes> &PM;
   int DeviceID;
+  uint64_t ChunkSize;
   // Start -> chunk.
-  std::map<uintptr_t, Chunk> Chunks;
+  ChunkMap Chunks;
+  // Chunks may be adjacent but are separate mappings, so ranges never span two.
+  FreeRanges Free;
   // One empty chunk stays mapped so malloc/free loops don't remap.
   bool HasSpare = false;
 
-public:
-  // Matches the device malloc alignment guarantee.
-  static constexpr uint64_t Alignment = 256;
-
-  static bool isSmall(uint64_t Size) { return Size < ChunkSize; }
-
-  static uint64_t actualSize(uint64_t Size) {
-    return std::max(mneme::util::roundUp(Size, Alignment), Alignment);
+  typename ChunkMap::iterator chunkOf(uintptr_t Addr) {
+    return std::prev(Chunks.upper_bound(Addr));
   }
 
-  SmallAllocator(PageManager<VendorTypes> &PM, int DeviceID)
-      : PM(PM), DeviceID(DeviceID) {}
-
-  // Size must come from actualSize(). Nullptr when out of device memory.
-  void *allocate(uint64_t Size) {
-    for (auto &[Start, C] : Chunks) {
-      auto Addr = C.Free.allocate(Size, Alignment);
-      if (!Addr)
-        continue;
-      if (C.Used == 0)
-        HasSpare = false;
-      C.Used += Size;
-      return reinterpret_cast<void *>(*Addr);
-    }
-
+  bool mapChunk() {
     Handle_t H{};
     auto R = PM.mapAddr(ChunkSize, [&](const auto &R) {
       return DT::mapFixed(R.Addr, R.Size, R.Align, DeviceID, H);
     });
     if (!R)
-      return nullptr;
+      return false;
     uintptr_t Start = reinterpret_cast<uintptr_t>(R->Addr);
-    LOG_DEBUG("New small allocation chunk {}", R->Addr);
-    auto &C = Chunks[Start];
-    C.Handle = H;
-    if (Size < ChunkSize)
-      C.Free.release(Start + Size, ChunkSize - Size);
-    C.Used = Size;
-    return R->Addr;
+    LOG_DEBUG("New {}-byte allocation chunk {}", ChunkSize, R->Addr);
+    Chunks[Start].Handle = H;
+    Free.release(Start, ChunkSize, Start, Start + ChunkSize);
+    return true;
+  }
+
+public:
+  // Matches the device malloc alignment guarantee.
+  static constexpr uint64_t Alignment = 256;
+
+  static uint64_t actualSize(uint64_t Size) {
+    return std::max(mneme::util::roundUp(Size, Alignment), Alignment);
+  }
+
+  ChunkAllocator(PageManager<VendorTypes> &PM, int DeviceID, uint64_t ChunkSize)
+      : PM(PM), DeviceID(DeviceID), ChunkSize(ChunkSize) {}
+
+  bool packs(uint64_t Size) const { return Size < ChunkSize; }
+
+  // Size must come from actualSize(). Nullptr when out of device memory.
+  void *allocate(uint64_t Size) {
+    auto Addr = Free.allocate(Size, Alignment);
+    if (!Addr) {
+      if (!mapChunk())
+        return nullptr;
+      Addr = Free.allocate(Size, Alignment);
+    }
+    auto &C = chunkOf(*Addr)->second;
+    if (C.Used == 0)
+      HasSpare = false;
+    C.Used += Size;
+    return reinterpret_cast<void *>(*Addr);
   }
 
   void release(void *Addr, uint64_t Size) {
     uintptr_t A = reinterpret_cast<uintptr_t>(Addr);
-    auto It = std::prev(Chunks.upper_bound(A));
+    auto It = chunkOf(A);
     auto &C = It->second;
-    C.Free.release(A, Size);
+    uintptr_t Start = It->first;
+    Free.release(A, Size, Start, Start + ChunkSize);
     C.Used -= Size;
     if (C.Used)
       return;
@@ -226,16 +239,17 @@ public:
       HasSpare = true;
       return;
     }
-    DT::unmapFixed(reinterpret_cast<void *>(It->first), ChunkSize, C.Handle);
-    PM.releaseAddr(reinterpret_cast<void *>(It->first), ChunkSize);
+    Free.remove(Start);
+    DT::unmapFixed(reinterpret_cast<void *>(Start), ChunkSize, C.Handle);
+    PM.releaseAddr(reinterpret_cast<void *>(Start), ChunkSize);
     Chunks.erase(It);
   }
 
-  ~SmallAllocator() {
+  ~ChunkAllocator() {
     for (auto &[Start, C] : Chunks)
       DT::unmapFixed(reinterpret_cast<void *>(Start), ChunkSize, C.Handle);
   }
 
-  SmallAllocator(const SmallAllocator &) = delete;
-  SmallAllocator &operator=(const SmallAllocator &) = delete;
+  ChunkAllocator(const ChunkAllocator &) = delete;
+  ChunkAllocator &operator=(const ChunkAllocator &) = delete;
 };
