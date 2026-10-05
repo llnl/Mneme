@@ -254,11 +254,9 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     grantHostAccess(Addr, Size, DeviceID);
   }
 
-  // On an APU (MI300A) hipMalloc memory is host-accessible and applications and
-  // GPU-aware MPI rely on it, but a VMM mapping is GPU-only: host reads see the
-  // reservation placeholder (zeros on ROCm 6.4.0, SIGSEGV on 6.4.3+). HIP
-  // before 7.1 ignores hipMemLocationTypeHost in hipMemSetAccess, so ask ROCr
-  // directly.
+  // On integrated GPUs, applications expect device memory to be
+  // host-accessible, but VMM mappings are GPU-only by default. Grant the CPU
+  // access through ROCr, since hipMemSetAccess may ignore host locations.
   static void grantHostAccess(void *Addr, uint64_t Size, int DeviceID) {
     int Integrated = 0;
     hipErrCheck(hipDeviceGetAttribute(&Integrated, hipDeviceAttributeIntegrated,
