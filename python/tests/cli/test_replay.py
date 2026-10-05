@@ -1,4 +1,7 @@
 import json
+import re
+
+import pytest
 
 import pytest
 
@@ -84,3 +87,57 @@ def test_replay_small_allocations(build_small_allocs_program, tmp_path, capsys):
     assert mneme_main(["replay", "-rdb", str(records[0]), "default<O0>"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["Result"]["verified"], "Replay of small allocations not verified"
+
+
+MiB = 1 << 20
+CHUNK_LOG = re.compile(r"New (\d+)-byte allocation chunk (0x[0-9a-f]+)")
+MALLOC_LOG = re.compile(r"Intercepted Device Malloc PTR:(0x[0-9a-f]+) SIZE:(\d+)")
+
+
+@pytest.mark.parametrize("chunk_size", [None, 8 * MiB])
+def test_replay_chunked_allocations(
+    build_chunked_allocs_program, tmp_path, capsys, monkeypatch, chunk_size
+):
+    binary = build_chunked_allocs_program["binary"]
+    out_dir = tmp_path / "record_out"
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    # Scoped to the record run so replay's in-process config stays default.
+    with monkeypatch.context() as env:
+        env.setenv("MNEME_LOG_LEVEL", "debug")
+        env.setenv("MNEME_LOG_DIR", str(log_dir))
+        if chunk_size:
+            env.setenv("MNEME_CHUNK_SIZE", str(chunk_size))
+        rc = mneme_main(
+            ["record", "--record-db-dir", str(out_dir), "--", str(binary)]
+        )
+    assert rc == 0, "chunkedAllocs failed under mneme record"
+
+    (log,) = [p.read_text() for p in log_dir.glob("*.log")]
+    large = chunk_size or 256 * MiB
+    chunks = {}
+    for line in log.splitlines():
+        if m := CHUNK_LOG.search(line):
+            chunks[int(m[2], 16)] = int(m[1])
+        elif m := MALLOC_LOG.search(line):
+            ptr, size = int(m[1], 16), int(m[2])
+            if size < 2 * MiB:
+                expected = [2 * MiB]
+            elif size < large:
+                expected = [large]
+            else:
+                expected = []
+            owner = [s for c, s in chunks.items() if c <= ptr < c + s]
+            assert owner == expected, f"{size}-byte allocation at {ptr:#x}"
+    if chunk_size:
+        assert log.count("raise MNEME_CHUNK_SIZE") == 1
+    else:
+        assert sorted(chunks.values()) == [2 * MiB, large], "Chunks were remapped"
+
+    records = list(out_dir.glob("*.json"))
+    assert len(records) == 1, "Expected one record JSON"
+
+    capsys.readouterr()
+    assert mneme_main(["replay", "-rdb", str(records[0]), "default<O0>"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["Result"]["verified"], "Replay of chunked allocations not verified"
