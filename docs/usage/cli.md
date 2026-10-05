@@ -108,6 +108,11 @@ To override the default, pass `--record-ranks`:
 - `--record-ranks all` records on every rank (previous default behavior).
 - `--record-ranks 0,2` records only on the listed ranks.
 
+!!! warning "GPU-aware Cray MPICH on AMD APUs"
+    On-node MPI messages from GPU buffers can crash with `SIGBUS` while
+    recording. Set `MPICH_SMP_SINGLE_COPY_MODE=NONE` for the recorded run.
+    See [Limitations](../limitations.md#4-gpu-aware-cray-mpich-on-amd-apus-needs-mpich_smp_single_copy_modenone).
+
 ### Notes
 
 !!! note
