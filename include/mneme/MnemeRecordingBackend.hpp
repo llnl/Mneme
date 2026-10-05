@@ -28,7 +28,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   RecordDatabase DB;
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
-  std::unique_ptr<SmallAllocator<VendorTypes>> Small;
+  std::unique_ptr<ChunkAllocator<VendorTypes>> Small;
 
   // NOTE: We only keep track of the first time we set the device id. Once we
   // create the allocator we assume that the allocations go to the same device.
@@ -47,7 +47,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
       Runtime.origGetDeviceID(&DeviceID);
     PM = std::make_unique<PageManager<VendorTypes>>(
         MnemeDeviceRT::getMinPageSize(DeviceID));
-    Small = std::make_unique<SmallAllocator<VendorTypes>>(*PM, DeviceID);
+    Small = std::make_unique<ChunkAllocator<VendorTypes>>(
+        *PM, DeviceID, util::LargePageSize);
   }
 
 public:
@@ -91,7 +92,7 @@ public:
     initializePageManagerIfNeeded();
 
     MnemeMemoryBlob<VendorTypes> MemBlob;
-    if (Small->isSmall(size)) {
+    if (Small->packs(size)) {
       uint64_t ActualSize = Small->actualSize(size);
       void *Addr = Small->allocate(ActualSize);
       if (Addr) {
@@ -146,7 +147,7 @@ public:
     // Like hipFree, wait for kernels that may still use the memory.
     MnemeDeviceRT::DeviceSynchronize();
     auto ret = Blob.release();
-    if (Small->isSmall(Blob.getSize()))
+    if (Small->packs(Blob.getSize()))
       Small->release(ptr, Blob.getActualSize());
     else
       PM->releaseAddr(ptr, Blob.getActualSize());
