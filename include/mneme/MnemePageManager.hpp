@@ -4,6 +4,8 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
+#include <utility>
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeLogger.hpp"
@@ -12,50 +14,56 @@
 
 // Free address ranges with best-fit allocation and coalescing release.
 class FreeRanges {
+  using AddrMap = std::map<uintptr_t, uint64_t>;
   // Start -> size.
-  std::map<uintptr_t, uint64_t> Ranges;
+  AddrMap ByAddr;
+  // (Size, start) of the same ranges.
+  std::set<std::pair<uint64_t, uintptr_t>> BySize;
+
+  void insert(uintptr_t Start, uint64_t Size) {
+    ByAddr.emplace(Start, Size);
+    BySize.emplace(Size, Start);
+  }
+
+  AddrMap::iterator erase(AddrMap::iterator It) {
+    BySize.erase({It->second, It->first});
+    return ByAddr.erase(It);
+  }
 
 public:
   std::optional<uintptr_t> allocate(uint64_t Size, uint64_t Align) {
-    auto Best = Ranges.end();
-    uintptr_t Addr = 0;
-    for (auto It = Ranges.begin(); It != Ranges.end(); ++It) {
-      uintptr_t A = mneme::util::roundUp(It->first, Align);
-      if (A + Size > It->first + It->second)
+    for (auto It = BySize.lower_bound({Size, 0}); It != BySize.end(); ++It) {
+      auto [RangeSize, Start] = *It;
+      uintptr_t Addr = mneme::util::roundUp(Start, Align);
+      uintptr_t End = Start + RangeSize;
+      if (Addr + Size > End)
         continue;
-      if (Best == Ranges.end() || It->second < Best->second) {
-        Best = It;
-        Addr = A;
-      }
+      BySize.erase(It);
+      ByAddr.erase(Start);
+      if (Addr > Start)
+        insert(Start, Addr - Start);
+      if (Addr + Size < End)
+        insert(Addr + Size, End - Addr - Size);
+      return Addr;
     }
-    if (Best == Ranges.end())
-      return std::nullopt;
-
-    uintptr_t Start = Best->first;
-    uintptr_t End = Start + Best->second;
-    Ranges.erase(Best);
-    if (Addr > Start)
-      Ranges.emplace(Start, Addr - Start);
-    if (Addr + Size < End)
-      Ranges.emplace(Addr + Size, End - Addr - Size);
-    return Addr;
+    return std::nullopt;
   }
 
   void release(uintptr_t Start, uint64_t Size) {
     uintptr_t End = Start + Size;
-    auto Next = Ranges.lower_bound(Start);
-    if (Next != Ranges.end() && Next->first == End) {
+    auto Next = ByAddr.lower_bound(Start);
+    if (Next != ByAddr.end() && Next->first == End) {
       End += Next->second;
-      Next = Ranges.erase(Next);
+      Next = erase(Next);
     }
-    if (Next != Ranges.begin()) {
+    if (Next != ByAddr.begin()) {
       auto Prev = std::prev(Next);
       if (Prev->first + Prev->second == Start) {
-        Prev->second = End - Prev->first;
-        return;
+        Start = Prev->first;
+        erase(Prev);
       }
     }
-    Ranges.emplace_hint(Next, Start, End - Start);
+    insert(Start, End - Start);
   }
 };
 
