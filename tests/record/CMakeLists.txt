@@ -139,6 +139,8 @@ CREATE_RDC_GPU_TEST(test_annotation test_annotation.cpp)
 
 CREATE_GPU_TEST(test_crash_handling test_crash_handling.cpp)
 
+CREATE_GPU_TEST(test_host_access test_host_access.cpp)
+
 CREATE_GPU_TEST(test_source_file test_source_file.cpp)
 CREATE_RDC_GPU_TEST(test_source_file test_source_file.cpp)
 

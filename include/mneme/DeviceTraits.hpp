@@ -9,6 +9,8 @@
 #ifdef MNEME_ENABLE_HIP
 #include <hip/amd_detail/amd_hip_runtime.h>
 #include <hip/hip_runtime.h>
+#include <hsa/hsa.h>
+#include <hsa/hsa_ext_amd.h>
 
 #define hipErrCheck(CALL)                                                      \
   {                                                                            \
@@ -249,6 +251,40 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     ADesc.flags = hipMemAccessFlagsProtReadWrite;
 
     hipErrCheck(hipMemSetAccess(Addr, Size, &ADesc, 1));
+    grantHostAccess(Addr, Size, DeviceID);
+  }
+
+  // On integrated GPUs, applications expect device memory to be
+  // host-accessible, but VMM mappings are GPU-only by default. Grant the CPU
+  // access through ROCr, since hipMemSetAccess may ignore host locations.
+  static void grantHostAccess(void *Addr, uint64_t Size, int DeviceID) {
+    int Integrated = 0;
+    hipErrCheck(hipDeviceGetAttribute(&Integrated, hipDeviceAttributeIntegrated,
+                                      DeviceID));
+    if (!Integrated)
+      return;
+
+    static hsa_agent_t CpuAgent = [] {
+      hsa_agent_t Agent{0};
+      hsa_iterate_agents(
+          [](hsa_agent_t A, void *Data) {
+            hsa_device_type_t Type;
+            hsa_agent_get_info(A, HSA_AGENT_INFO_DEVICE, &Type);
+            if (Type != HSA_DEVICE_TYPE_CPU)
+              return HSA_STATUS_SUCCESS;
+            *static_cast<hsa_agent_t *>(Data) = A;
+            return HSA_STATUS_INFO_BREAK;
+          },
+          &Agent);
+      return Agent;
+    }();
+    if (!CpuAgent.handle)
+      LOG_FATAL("Cannot find the HSA CPU agent to grant host access");
+
+    hsa_amd_memory_access_desc_t Desc{HSA_ACCESS_PERMISSION_RW, CpuAgent};
+    if (hsa_amd_vmem_set_access(Addr, Size, &Desc, 1) != HSA_STATUS_SUCCESS)
+      LOG_FATAL("Cannot grant host access to device memory at {} size {}", Addr,
+                Size);
   }
 
   static uint64_t getMinPageSize(int DeviceID) {
