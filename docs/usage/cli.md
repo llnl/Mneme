@@ -109,6 +109,9 @@ To override the default, pass `--record-ranks`:
     Mneme maps device memory per allocation at addresses it chooses, so no address space size is needed. The old `-vass` option is accepted but ignored.
 
 !!! note
+    Mneme packs allocations smaller than `MNEME_CHUNK_SIZE` bytes (default 256 MiB, must be a multiple of 2 MiB) into shared device mappings, since creating a mapping is slow. Larger allocations each get their own mapping.
+
+!!! note
     `--record-ranks` is equivalent to setting the environment variable
     `MNEME_RECORD_RANKS` directly (e.g., when launching the recording
     library via `LD_PRELOAD` outside of `mneme record`). Omitting both the

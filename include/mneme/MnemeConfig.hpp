@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mneme/MnemeRank.hpp"
+#include "mneme/MnemeVASpace.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -64,6 +65,25 @@ inline uint64_t getEnvOrDefaultIntLenient(const char *VarName,
                                           uint64_t Default) {
   const char *EnvValue = std::getenv(VarName);
   return EnvValue ? static_cast<uint64_t>(std::atoi(EnvValue)) : Default;
+}
+
+inline uint64_t getEnvOrDefaultChunkSize(const char *VarName,
+                                         uint64_t Default) {
+  auto EnvValue = getEnvOrDefaultString(VarName);
+  if (!EnvValue)
+    return Default;
+
+  errno = 0;
+  char *End = nullptr;
+  unsigned long long Parsed = std::strtoull(EnvValue->c_str(), &End, 10);
+  if (!std::isdigit(static_cast<unsigned char>((*EnvValue)[0])) ||
+      errno == ERANGE || *End != '\0' || Parsed <= util::LargePageSize ||
+      Parsed % util::LargePageSize != 0) {
+    warnMalformedEnvironmentValue("environment variable", VarName, *EnvValue,
+                                  "; expected a multiple of 2 MiB above 2 MiB");
+    return Default;
+  }
+  return Parsed;
 }
 
 inline LogLevel getEnvOrDefaultLogLevel(const char *VarName, LogLevel Default) {
@@ -174,6 +194,7 @@ public:
   const uint64_t SkipRecordings;
   const LogLevel MnemeLogLevel;
   const EpilogueSnapshotType EpilogueType;
+  const uint64_t ChunkSize;
 
   bool isRecordingEnabledForCurrentRank() const {
     return RecordingEnabledThisRank;
@@ -210,6 +231,8 @@ private:
             "MNEME_LOG_LEVEL", LogLevel::Critical)),
         EpilogueType(config_detail::getEnvOrDefaultEpilogueSnapshotType(
             "MNEME_EPILOGUE_TYPE", EpilogueSnapshotType::Diff)),
+        ChunkSize(config_detail::getEnvOrDefaultChunkSize("MNEME_CHUNK_SIZE",
+                                                          256ULL << 20)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")),
         RecordingEnabledThisRank(

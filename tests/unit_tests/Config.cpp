@@ -27,6 +27,7 @@ void clearMnemeEnv() {
   unsetenv("MNEME_LOG_LEVEL");
   unsetenv("MNEME_LOG_DIR");
   unsetenv("MNEME_EPILOGUE_TYPE");
+  unsetenv("MNEME_CHUNK_SIZE");
   unsetenv("MNEME_RECORD_RANKS");
   unsetenv("FLUX_TASK_RANK");
   unsetenv("OMPI_COMM_WORLD_RANK");
@@ -68,6 +69,8 @@ int main() {
     expect(!Conf.getLogDirectory(), "MNEME_LOG_DIR should default to unset");
     expect(Conf.EpilogueType == EpilogueSnapshotType::Diff,
            "MNEME_EPILOGUE_TYPE should default to diff");
+    expect(Conf.ChunkSize == 256ULL << 20,
+           "MNEME_CHUNK_SIZE should default to 256 MiB");
   }
 
   auto TempDir = makeTempDir();
@@ -78,6 +81,7 @@ int main() {
   setenv("MNEME_LOG_LEVEL", "debug", 1);
   setenv("MNEME_LOG_DIR", TempDir.c_str(), 1);
   setenv("MNEME_EPILOGUE_TYPE", "diff", 1);
+  setenv("MNEME_CHUNK_SIZE", "8388608", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.KernelRegex && *Conf.KernelRegex == "_two",
@@ -94,7 +98,19 @@ int main() {
            "MNEME_LOG_DIR should use the configured directory");
     expect(Conf.EpilogueType == EpilogueSnapshotType::Diff,
            "MNEME_EPILOGUE_TYPE should map diff");
+    expect(Conf.ChunkSize == 8ULL << 20,
+           "MNEME_CHUNK_SIZE should use the configured value");
   }
+
+  for (const char *Bad :
+       {"", "2097152", "3145728", "-4194304", "8M", "18446744073709551616"}) {
+    setenv("MNEME_CHUNK_SIZE", Bad, 1);
+    auto Conf = Config::createFromEnvironment();
+    expect(Conf.ChunkSize == 256ULL << 20,
+           std::string("invalid MNEME_CHUNK_SIZE '") + Bad +
+               "' should fall back to 256 MiB");
+  }
+  unsetenv("MNEME_CHUNK_SIZE");
 
   setenv("MNEME_MAX_RECORDINGS", "12abc", 1);
   setenv("MNEME_SKIP_RECORDINGS", "6abc", 1);
