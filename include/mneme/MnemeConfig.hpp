@@ -77,10 +77,10 @@ inline uint64_t getEnvOrDefaultChunkSize(const char *VarName,
   char *End = nullptr;
   unsigned long long Parsed = std::strtoull(EnvValue->c_str(), &End, 10);
   if (!std::isdigit(static_cast<unsigned char>((*EnvValue)[0])) ||
-      errno == ERANGE || *End != '\0' || Parsed <= util::LargePageSize ||
+      errno == ERANGE || *End != '\0' || Parsed < util::LargePageSize ||
       Parsed % util::LargePageSize != 0) {
     warnMalformedEnvironmentValue("environment variable", VarName, *EnvValue,
-                                  "; expected a multiple of 2 MiB above 2 MiB");
+                                  "; expected a multiple of 2 MiB");
     return Default;
   }
   return Parsed;

@@ -107,18 +107,13 @@ def test_replay_chunked_allocations(
             chunks[int(m[2], 16)] = int(m[1])
         elif m := MALLOC_LOG.search(line):
             ptr, size = int(m[1], 16), int(m[2])
-            if size < 2 * MiB:
-                expected = [2 * MiB]
-            elif size < large:
-                expected = [large]
-            else:
-                expected = []
+            expected = [large] if size < large else []
             owner = [s for c, s in chunks.items() if c <= ptr < c + s]
             assert owner == expected, f"{size}-byte allocation at {ptr:#x}"
     if chunk_size:
         assert log.count("raise MNEME_CHUNK_SIZE") == 1
     else:
-        assert sorted(chunks.values()) == [2 * MiB, large], "Chunks were remapped"
+        assert len(CHUNK_LOG.findall(log)) == 1, "Chunks were remapped"
 
     records = list(out_dir.glob("*.json"))
     assert len(records) == 1, "Expected one record JSON"
