@@ -169,8 +169,6 @@ template <mneme::DeviceVendors VendorTypes> class ChunkAllocator {
   ChunkMap Chunks;
   // Chunks may be adjacent but are separate mappings, so ranges never span two.
   FreeRanges Free;
-  // One empty chunk stays mapped so malloc/free loops don't remap.
-  bool HasSpare = false;
 
   typename ChunkMap::iterator chunkOf(uintptr_t Addr) {
     return std::prev(Chunks.upper_bound(Addr));
@@ -211,10 +209,7 @@ public:
         return nullptr;
       Addr = Free.allocate(Size, Alignment);
     }
-    auto &C = chunkOf(*Addr)->second;
-    if (C.Used == 0)
-      HasSpare = false;
-    C.Used += Size;
+    chunkOf(*Addr)->second.Used += Size;
     return reinterpret_cast<void *>(*Addr);
   }
 
@@ -225,12 +220,9 @@ public:
     uintptr_t Start = It->first;
     Free.release(A, Size, Start, Start + ChunkSize);
     C.Used -= Size;
-    if (C.Used)
+    // The last chunk stays mapped so malloc/free loops don't remap.
+    if (C.Used || Chunks.size() == 1)
       return;
-    if (!HasSpare) {
-      HasSpare = true;
-      return;
-    }
     Free.remove(Start);
     DT::unmapFixed(reinterpret_cast<void *>(Start), ChunkSize, C.Handle);
     Chunks.erase(It);

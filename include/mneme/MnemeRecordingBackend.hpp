@@ -35,8 +35,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   // release them with the device free, which must then be forwarded.
   llvm::DenseSet<void *> PassthroughAllocs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
-  std::unique_ptr<ChunkAllocator<VendorTypes>> Small;
-  std::unique_ptr<ChunkAllocator<VendorTypes>> Large;
+  std::unique_ptr<ChunkAllocator<VendorTypes>> Packer;
   bool WarnedUnpacked = false;
 
   // NOTE: We only keep track of the first time we set the device id. Once we
@@ -56,19 +55,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
       Runtime.origGetDeviceID(&DeviceID);
     PM = std::make_unique<PageManager<VendorTypes>>(
         MnemeDeviceRT::getMinPageSize(DeviceID));
-    Small = std::make_unique<ChunkAllocator<VendorTypes>>(*PM, DeviceID,
-                                                          util::LargePageSize);
-    Large = std::make_unique<ChunkAllocator<VendorTypes>>(
+    Packer = std::make_unique<ChunkAllocator<VendorTypes>>(
         *PM, DeviceID, Config::get().ChunkSize);
-  }
-
-  // Shared by rtMalloc and rtFree so both pick the same allocator.
-  ChunkAllocator<VendorTypes> *packerFor(uint64_t Size) {
-    if (Small->packs(Size))
-      return Small.get();
-    if (Large->packs(Size))
-      return Large.get();
-    return nullptr;
   }
 
 public:
@@ -120,7 +108,7 @@ public:
     initializePageManagerIfNeeded();
 
     MnemeMemoryBlob<VendorTypes> MemBlob;
-    if (auto *Packer = packerFor(size)) {
+    if (Packer->packs(size)) {
       uint64_t ActualSize = Packer->actualSize(size);
       void *Addr = Packer->allocate(ActualSize);
       if (Addr) {
@@ -196,7 +184,7 @@ public:
     // Like hipFree, wait for kernels that may still use the memory.
     MnemeDeviceRT::DeviceSynchronize();
     auto ret = Blob.release();
-    if (auto *Packer = packerFor(Blob.getSize()))
+    if (Packer->packs(Blob.getSize()))
       Packer->release(ptr, Blob.getActualSize());
     AllocatedBlobs.erase(It);
     return ret;
@@ -313,8 +301,7 @@ public:
       }
     }
 
-    Small.reset();
-    Large.reset();
+    Packer.reset();
     PM.reset();
 
     LOG_DEBUG("RecordingBackend destructor complete");
