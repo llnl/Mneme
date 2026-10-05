@@ -7,8 +7,8 @@
 
 # The template job to test whether a machine is up.
 # Expects CI_MACHINE defined to machine name.
-# It passes so the sub-pipelines still start and report a down machine as a
-# failed GitHub check.
+# It fails so that "Retry failed jobs" re-runs the check and then creates the
+# skipped sub-pipelines with the machine's current state.
 .machine-check:
   stage: prerequisites
   interruptible: true
@@ -20,13 +20,8 @@
       if [[ $(jq '.[env.CI_MACHINE].total_nodes_up' /usr/global/tools/lorenz/data/loginnodeStatus) == 0 ]]
       then
         echo -e "\e[31mNo node available on ${CI_MACHINE}\e[0m"
-        echo "MACHINE_DOWN=true" > machine.env
-      else
-        echo "MACHINE_DOWN=false" > machine.env
+        exit 1
       fi
-  artifacts:
-    reports:
-      dotenv: machine.env
 
 .pipeline-trigger-rules:
   rules:
