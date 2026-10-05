@@ -107,7 +107,7 @@ int main() {
   }
 
   for (const char *Bad :
-       {"", "2097152", "3145728", "-4194304", "8M", "18446744073709551616"}) {
+       {"", "0", "3145728", "-4194304", "8M", "18446744073709551616"}) {
     setenv("MNEME_CHUNK_SIZE", Bad, 1);
     auto Conf = Config::createFromEnvironment();
     expect(Conf.ChunkSize == 256ULL << 20,

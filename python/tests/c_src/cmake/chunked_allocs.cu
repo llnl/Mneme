@@ -38,7 +38,7 @@ static void *alloc(size_t Bytes) {
 }
 
 int main() {
-  // Freed right away, so later buffers reuse the spare chunks.
+  // Freed right away, so later buffers reuse the kept chunk.
   for (int I = 0; I < 50; ++I) {
     prefix(Free)(alloc(16 << 20));
     prefix(Free)(alloc(1000));
