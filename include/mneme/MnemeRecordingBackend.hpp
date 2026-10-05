@@ -44,8 +44,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     LOG_DEBUG("Initializing system {}", arch);
     if (DeviceID == -1)
       Runtime.origGetDeviceID(&DeviceID);
-    PM = initializePageManager<VendorTypes>(
-        DeviceID, (void *)MnemeDeviceRT::getSuggestedAddr());
+    PM = initializePageManager<VendorTypes>(DeviceID);
   }
 
 public:

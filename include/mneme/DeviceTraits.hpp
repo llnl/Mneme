@@ -291,8 +291,6 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return hipStreamDestroy(Stream);
   }
 
-  static constexpr uintptr_t getSuggestedAddr() { return 0x1534f7e00000; }
-
   static hipError_t deviceLaunchKernel(const void *function_address,
                                        dim3 numBlocks, dim3 dimBlocks,
                                        void **args, size_t sharedMemBytes,
@@ -646,8 +644,6 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   static DeviceError_t deviceStreamDestroy(DeviceStream_t Stream) {
     return cudaStreamDestroy(Stream);
   }
-
-  static constexpr uintptr_t getSuggestedAddr() { return 0x153940000000; }
 
   static DeviceError_t deviceLaunchKernel(const void *kernelFunc, dim3 gridDim,
                                           dim3 blockDim, void **kernelArgs,

@@ -1,0 +1,77 @@
+#pragma once
+#include <algorithm>
+#include <cstdint>
+#include <fstream>
+#include <string>
+#include <vector>
+
+namespace mneme {
+namespace util {
+
+struct VARange {
+  uintptr_t Start;
+  uintptr_t End;
+  uint64_t size() const { return End - Start; }
+};
+
+// Unmapped user-space ranges of this process, from /proc/self/maps.
+inline std::vector<VARange> getFreeVARanges(uintptr_t Lo, uintptr_t Hi) {
+  std::vector<VARange> Mapped;
+  std::ifstream Maps("/proc/self/maps");
+  std::string Line;
+  while (std::getline(Maps, Line)) {
+    size_t Dash = Line.find('-');
+    if (Dash == std::string::npos)
+      continue;
+    uintptr_t S = std::stoull(Line.substr(0, Dash), nullptr, 16);
+    uintptr_t E = std::stoull(Line.substr(Dash + 1), nullptr, 16);
+    Mapped.push_back({S, E});
+  }
+  std::sort(
+      Mapped.begin(), Mapped.end(),
+      [](const VARange &A, const VARange &B) { return A.Start < B.Start; });
+
+  std::vector<VARange> Free;
+  uintptr_t Cur = Lo;
+  for (const auto &M : Mapped) {
+    if (M.Start >= Hi)
+      break;
+    if (M.Start > Cur)
+      Free.push_back({Cur, M.Start});
+    Cur = std::max(Cur, M.End);
+  }
+  if (Cur < Hi)
+    Free.push_back({Cur, Hi});
+  return Free;
+}
+
+// Candidate addresses for a Size-byte reservation, centered in the largest
+// free gaps first so neither the heap nor the mmap region grows into it.
+inline std::vector<uintptr_t> suggestVAddrs(uint64_t Size, uint64_t Alignment) {
+  constexpr uintptr_t Lo = 1ULL << 32;
+  constexpr uintptr_t Hi = 1ULL << 47;
+  constexpr uint64_t PreferredAlign = 1ULL << 30;
+
+  auto Free = getFreeVARanges(Lo, Hi);
+  std::sort(Free.begin(), Free.end(), [](const VARange &A, const VARange &B) {
+    return A.size() > B.size();
+  });
+
+  std::vector<uintptr_t> Addrs;
+  for (const auto &G : Free) {
+    if (G.size() < Size + 2 * Alignment)
+      continue;
+    uintptr_t Mid = G.Start + (G.size() - Size) / 2;
+    uint64_t Align =
+        G.size() >= Size + 2 * PreferredAlign ? PreferredAlign : Alignment;
+    uintptr_t Addr = Mid & ~(Align - 1);
+    if (Addr < G.Start)
+      Addr += Align;
+    if (Addr + Size <= G.End)
+      Addrs.push_back(Addr);
+  }
+  return Addrs;
+}
+
+} // namespace util
+} // namespace mneme
