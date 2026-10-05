@@ -263,6 +263,23 @@ def build_small_allocs_program(
 
 
 @pytest.fixture
+def build_chunked_allocs_program(
+    tmp_path_factory, build_cache, has_amd_gpu, has_nvidia_gpu
+):
+    key = "chunked_allocs_cached"
+    if key not in build_cache:
+        build_cache[key] = build_test_target(
+            "chunkedAllocs",
+            "chunked_allocs.cu",
+            tmp_path_factory,
+            call_mneme_config,
+            has_amd_gpu,
+            has_nvidia_gpu,
+        )
+    return build_cache[key]
+
+
+@pytest.fixture
 def recorded_execution(request, build_test_program, tmp_path):
     """
     Test that 'mneme record <binary>' correctly generates
