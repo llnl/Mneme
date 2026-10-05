@@ -72,40 +72,28 @@ public:
   void remove(uintptr_t Start) { erase(ByAddr.find(Start)); }
 };
 
-// Picks device addresses for recorded allocations. Regions are nominal, never
-// reserved with the driver; each allocation maps its own range.
+// Picks device addresses for recorded allocations: first fit above one anchor
+// address, using /proc/self/maps as the free list.
 template <mneme::DeviceVendors VendorTypes> class PageManager {
   using DT = mneme::DeviceTraits<VendorTypes>;
-  static constexpr uint64_t MinRegionSize = 1ULL << 40;
+  static constexpr uintptr_t MaxAddr = 1ULL << 47;
   static constexpr int MaxMapTries = 16;
 
   uint64_t PageSize;
-  // Start -> size.
-  std::map<uintptr_t, uint64_t> Regions;
-  FreeRanges Free;
+  uintptr_t Anchor = 0;
+  // End of the free gap the anchor was picked in.
+  uintptr_t Limit = 0;
 
-  bool overlapsRegion(uintptr_t Start, uint64_t Size) const {
-    auto It = Regions.upper_bound(Start);
-    if (It != Regions.end() && It->first < Start + Size)
-      return true;
-    return It != Regions.begin() &&
-           std::prev(It)->first + std::prev(It)->second > Start;
-  }
-
-  void grow(uint64_t Size) {
-    uint64_t RegionSize = std::max(
-        MinRegionSize, mneme::util::roundUp(Size, mneme::util::LargePageSize));
-    for (uintptr_t Addr :
-         DT::getCandidateAddrs(RegionSize, mneme::util::LargePageSize)) {
-      if (overlapsRegion(Addr, RegionSize))
-        continue;
-      LOG_INFO("New device address region {} size {}",
-               reinterpret_cast<void *>(Addr), RegionSize);
-      Regions.emplace(Addr, RegionSize);
-      Free.release(Addr, RegionSize);
-      return;
-    }
-    LOG_FATAL("No device address region for {} bytes", Size);
+  void pickAnchor(uint64_t Size) {
+    auto Addrs = DT::getCandidateAddrs(Size, mneme::util::LargePageSize);
+    if (Addrs.empty())
+      LOG_FATAL("No device address range for {} bytes", Size);
+    Anchor = Addrs.front();
+    auto Free = mneme::util::getFreeVARanges(Anchor, MaxAddr);
+    Limit = !Free.empty() && Free.front().Start == Anchor ? Free.front().End
+                                                          : MaxAddr;
+    LOG_INFO("Device address anchor {} limit {}",
+             reinterpret_cast<void *>(Anchor), reinterpret_cast<void *>(Limit));
   }
 
 public:
@@ -117,44 +105,48 @@ public:
 
   explicit PageManager(uint64_t PageSize) : PageSize(PageSize) {}
 
-  // Large sizes get large-page alignment so they can use big GPU fragments.
-  AddrRange allocateAddr(uint64_t Size) {
+  // Maps a range with Map(Range), skipping occupied addresses. Large sizes get
+  // large-page alignment so they can use big GPU fragments. Nullopt when the
+  // device is out of memory.
+  template <typename MapFn>
+  std::optional<AddrRange> mapAddr(uint64_t Size, MapFn Map) {
     uint64_t Align = Size >= mneme::util::LargePageSize
                          ? mneme::util::LargePageSize
                          : PageSize;
     uint64_t ActualSize = std::max(mneme::util::roundUp(Size, Align), PageSize);
 
-    auto Addr = Free.allocate(ActualSize, Align);
-    if (!Addr) {
-      grow(ActualSize);
-      Addr = Free.allocate(ActualSize, Align);
-    }
-    return {reinterpret_cast<void *>(*Addr), ActualSize, Align};
-  }
-
-  void releaseAddr(void *Addr, uint64_t Size) {
-    Free.release(reinterpret_cast<uintptr_t>(Addr), Size);
-  }
-
-  // Allocates a range and maps it with Map(Range), skipping occupied
-  // addresses. Nullopt when the device is out of memory.
-  template <typename MapFn>
-  std::optional<AddrRange> mapAddr(uint64_t Size, MapFn Map) {
-    for (int Try = 0; Try < MaxMapTries; ++Try) {
-      auto R = allocateAddr(Size);
+    if (!Anchor)
+      pickAnchor(ActualSize);
+    uintptr_t From = Anchor;
+    bool Reanchored = false;
+    int Tries = 0;
+    while (true) {
+      auto Addr = mneme::util::firstFreeVAddr(From, Limit, ActualSize, Align);
+      if (!Addr) {
+        if (Reanchored)
+          LOG_FATAL("No device address range for {} bytes", Size);
+        pickAnchor(ActualSize);
+        From = Anchor;
+        Reanchored = true;
+        continue;
+      }
+      AddrRange R{reinterpret_cast<void *>(*Addr), ActualSize, Align};
       switch (Map(R)) {
       case mneme::MapStatus::Mapped:
         return R;
-      case mneme::MapStatus::Occupied:
-        // Something else lives there; keep the range out of the free set.
-        LOG_DEBUG("Device address {} is occupied, retrying", R.Addr);
-        break;
       case mneme::MapStatus::OutOfMemory:
-        releaseAddr(R.Addr, R.Size);
         return std::nullopt;
+      case mneme::MapStatus::Occupied:
+        // Blocked by something /proc/self/maps does not show.
+        if (++Tries == MaxMapTries)
+          LOG_FATAL("Cannot map {} bytes at {}:\n{}", Size, R.Addr,
+                    mneme::util::getMappingsIn(*Addr - ActualSize,
+                                               *Addr + 2 * ActualSize));
+        LOG_DEBUG("Device address {} is occupied, retrying", R.Addr);
+        From = *Addr + ActualSize;
+        break;
       }
     }
-    LOG_FATAL("Cannot map {} bytes of device memory", Size);
   }
 };
 
@@ -241,7 +233,6 @@ public:
     }
     Free.remove(Start);
     DT::unmapFixed(reinterpret_cast<void *>(Start), ChunkSize, C.Handle);
-    PM.releaseAddr(reinterpret_cast<void *>(Start), ChunkSize);
     Chunks.erase(It);
   }
 

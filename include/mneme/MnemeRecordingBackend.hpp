@@ -169,8 +169,6 @@ public:
     auto ret = Blob.release();
     if (auto *Packer = packerFor(Blob.getSize()))
       Packer->release(ptr, Blob.getActualSize());
-    else
-      PM->releaseAddr(ptr, Blob.getActualSize());
     AllocatedBlobs.erase(It);
     return ret;
   }
