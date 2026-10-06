@@ -90,6 +90,13 @@ public:
   }
 
   DeviceError_t rtMalloc(void **ptr, size_t size) override {
+    // Like the vendor runtimes, return no memory for an empty allocation. A
+    // zero-size block would share its address with the next allocation.
+    if (size == 0) {
+      *ptr = nullptr;
+      return MnemeDeviceRT::DeviceSuccess;
+    }
+
     initializePageManagerIfNeeded();
 
     auto [Addr, ReservedSize] = PM->allocateAddr(size, nullptr);
@@ -121,6 +128,8 @@ public:
   }
 
   void trackPassthroughAlloc(void *ptr, size_t size, const char *api) override {
+    if (!ptr)
+      return;
     PassthroughAllocs.insert(ptr);
     LOG_DEBUG("Intercepted {} PTR:{} SIZE:{}", api, ptr, size);
     LOG_WARN(
