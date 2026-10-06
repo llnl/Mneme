@@ -81,19 +81,13 @@ template <mneme::DeviceVendors VendorTypes> class PageManager {
 
   uint64_t PageSize;
   uintptr_t Anchor = 0;
-  // End of the free gap the anchor was picked in.
-  uintptr_t Limit = 0;
 
   void pickAnchor(uint64_t Size) {
     auto Addrs = mneme::util::suggestVAddrs(Size, mneme::util::LargePageSize);
     if (Addrs.empty())
       LOG_FATAL("No device address range for {} bytes", Size);
     Anchor = Addrs.front();
-    auto Free = mneme::util::getFreeVARanges(Anchor, MaxAddr);
-    Limit = !Free.empty() && Free.front().Start == Anchor ? Free.front().End
-                                                          : MaxAddr;
-    LOG_INFO("Device address anchor {} limit {}",
-             reinterpret_cast<void *>(Anchor), reinterpret_cast<void *>(Limit));
+    LOG_INFO("Device address anchor {}", reinterpret_cast<void *>(Anchor));
   }
 
 public:
@@ -118,18 +112,11 @@ public:
     if (!Anchor)
       pickAnchor(ActualSize);
     uintptr_t From = Anchor;
-    bool Reanchored = false;
     int Tries = 0;
     while (true) {
-      auto Addr = mneme::util::firstFreeVAddr(From, Limit, ActualSize, Align);
-      if (!Addr) {
-        if (Reanchored)
-          LOG_FATAL("No device address range for {} bytes", Size);
-        pickAnchor(ActualSize);
-        From = Anchor;
-        Reanchored = true;
-        continue;
-      }
+      auto Addr = mneme::util::firstFreeVAddr(From, MaxAddr, ActualSize, Align);
+      if (!Addr)
+        LOG_FATAL("No device address range for {} bytes", Size);
       AddrRange R{reinterpret_cast<void *>(*Addr), ActualSize, Align};
       switch (Map(R)) {
       case mneme::MapStatus::Mapped:
