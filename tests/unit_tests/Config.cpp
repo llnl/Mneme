@@ -69,8 +69,8 @@ int main() {
     expect(!Conf.getLogDirectory(), "MNEME_LOG_DIR should default to unset");
     expect(Conf.EpilogueType == EpilogueSnapshotType::Diff,
            "MNEME_EPILOGUE_TYPE should default to diff");
-    expect(Conf.ChunkSize == 256ULL << 20,
-           "MNEME_CHUNK_SIZE should default to 256 MiB");
+    expect(Conf.ChunkSize == 4ULL << 30,
+           "MNEME_CHUNK_SIZE should default to 4 GiB");
   }
 
   auto TempDir = makeTempDir();
@@ -102,13 +102,28 @@ int main() {
            "MNEME_CHUNK_SIZE should use the configured value");
   }
 
-  for (const char *Bad :
-       {"", "0", "3145728", "-4194304", "8M", "18446744073709551616"}) {
+  for (auto [Value, Expected] :
+       {std::pair<const char *, uint64_t>{"8M", 8ULL << 20},
+        {"8MiB", 8ULL << 20},
+        {"4g", 4ULL << 30},
+        {"8MB", 8ULL << 20},
+        {"4gb", 4ULL << 30},
+        {"4194304B", 4ULL << 20},
+        {"2048K", 2ULL << 20},
+        {"1T", 1ULL << 40}}) {
+    setenv("MNEME_CHUNK_SIZE", Value, 1);
+    auto Conf = Config::createFromEnvironment();
+    expect(Conf.ChunkSize == Expected,
+           std::string("MNEME_CHUNK_SIZE '") + Value + "' should parse");
+  }
+
+  for (const char *Bad : {"", "0", "3145728", "-4194304", "3M", "3MB", "8iB",
+                          "M", "16777216T", "18446744073709551616"}) {
     setenv("MNEME_CHUNK_SIZE", Bad, 1);
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.ChunkSize == 256ULL << 20,
+    expect(Conf.ChunkSize == 4ULL << 30,
            std::string("invalid MNEME_CHUNK_SIZE '") + Bad +
-               "' should fall back to 256 MiB");
+               "' should fall back to 4 GiB");
   }
   unsetenv("MNEME_CHUNK_SIZE");
 

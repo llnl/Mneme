@@ -290,7 +290,7 @@ def test_record_vass_is_ignored(record_parser, tmp_path, monkeypatch, capsys, fl
     monkeypatch.delenv("MNEME_PAGE_SIZE", raising=False)
     env = _capture_env_with_args(record_parser, tmp_path, monkeypatch, [flag, "8"])
     assert "MNEME_PAGE_SIZE" not in env
-    assert "-vass is ignored" in capsys.readouterr().err
+    assert "-vass is deprecated and ignored" in capsys.readouterr().err
     assert "-vass" not in record_parser.format_help()
 
 

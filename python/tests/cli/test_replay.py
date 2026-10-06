@@ -92,15 +92,14 @@ def test_replay_chunked_allocations(
     with monkeypatch.context() as env:
         env.setenv("MNEME_LOG_LEVEL", "debug")
         env.setenv("MNEME_LOG_DIR", str(log_dir))
-        if chunk_size:
-            env.setenv("MNEME_CHUNK_SIZE", str(chunk_size))
+        flags = ["--chunk-size", f"{chunk_size // MiB}M"] if chunk_size else []
         rc = mneme_main(
-            ["record", "--record-db-dir", str(out_dir), "--", str(binary)]
+            ["record", "--record-db-dir", str(out_dir), *flags, "--", str(binary)]
         )
     assert rc == 0, "chunkedAllocs failed under mneme record"
 
     (log,) = [p.read_text() for p in log_dir.glob("*.log")]
-    large = chunk_size or 256 * MiB
+    large = chunk_size or 4096 * MiB
     chunks = {}
     for line in log.splitlines():
         if m := CHUNK_LOG.search(line):

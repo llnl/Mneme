@@ -106,10 +106,10 @@ To override the default, pass `--record-ranks`:
     Mneme may record multiple instances of the same kernel if it is invoked with different dynamic execution contexts. The `--per-kernel-max-recordings` option can be used to limit this behavior.
 
 !!! note
-    Mneme maps device memory per allocation at addresses it chooses, so no address space size is needed. The old `-vass` option is accepted but ignored.
+    Mneme no longer reserves a fixed virtual address space. It maps device memory on demand, in chunks at addresses it chooses. The `-vass` option is deprecated: it is still accepted, but ignored with a warning. Use `--chunk-size` instead.
 
 !!! note
-    Mneme packs allocations smaller than `MNEME_CHUNK_SIZE` bytes (default 256 MiB, must be a multiple of 2 MiB) into shared device mappings, since creating a mapping is slow. Larger allocations each get their own mapping.
+    Mneme packs allocations smaller than the chunk size into shared device mappings, since creating a mapping is slow. Larger allocations each get their own mapping. Set the chunk size with `--chunk-size` or the `MNEME_CHUNK_SIZE` environment variable, as bytes or with a suffix such as `64MB` or `4GB`. Suffixes `K`, `M`, `G` and `T` are powers of 2 and may be followed by `B` or `iB`, so `64M`, `64MB` and `64MiB` are all 64 MiB. It must be a multiple of 2 MiB, and the default is `4GB`. If the device lacks memory for a full chunk, Mneme maps a smaller one.
 
 !!! note
     `--record-ranks` is equivalent to setting the environment variable
