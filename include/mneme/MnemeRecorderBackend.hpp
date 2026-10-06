@@ -26,6 +26,7 @@ template <DeviceVendors VendorTypes> struct RecorderRuntimeFunctions {
   DeviceError_t (*origMallocManaged)(void **ptr, size_t size,
                                      unsigned int flags) = nullptr;
   DeviceError_t (*origFreeDevice)(void *devPtr) = nullptr;
+  DeviceError_t (*origFreeAsync)(void *devPtr, DeviceStream_t stream) = nullptr;
   DeviceError_t (*origFreeHost)(void *ptr) = nullptr;
   DeviceError_t (*origSetDeviceID)(int id) = nullptr;
   DeviceError_t (*origGetDeviceID)(int *id) = nullptr;
@@ -61,6 +62,10 @@ template <DeviceVendors VendorTypes> struct RecorderRuntimeFunctions {
         dlsym(rtLib, MnemeDeviceRT::getDeviceFreeFnName());
     assert(origFreeDevice && "Expected non-null Device free function pointer");
 
+    reinterpret_cast<void *&>(origFreeAsync) =
+        dlsym(rtLib, MnemeDeviceRT::getAsyncFreeFnName());
+    assert(origFreeAsync && "Expected non-null async free function pointer");
+
     reinterpret_cast<void *&>(origSetDeviceID) =
         dlsym(rtLib, MnemeDeviceRT::getDeviceSetIDFnName());
     assert(origSetDeviceID && "Expected non-null set device id fn name");
@@ -88,7 +93,12 @@ public:
                                         unsigned int flags) = 0;
   virtual DeviceError_t rtHostMalloc(void **ptr, size_t size,
                                      unsigned int flags) = 0;
+  // Remember an allocation that the vendor runtime served directly, so that
+  // freeing it is forwarded instead of treated as an unknown address.
+  virtual void trackPassthroughAlloc(void *ptr, size_t size,
+                                     const char *api) = 0;
   virtual DeviceError_t rtFree(void *ptr) = 0;
+  virtual DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) = 0;
   virtual DeviceError_t rtHostFree(void *ptr) = 0;
   virtual DeviceError_t rtLaunchKernel(const void *func, dim3 &GridDim,
                                        dim3 &BlockDim, void **Args,

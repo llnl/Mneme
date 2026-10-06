@@ -4,6 +4,7 @@
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeRecord.hpp"
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <utility>
 
 #ifdef __GNUC__
@@ -36,6 +37,44 @@ public:
   }
 };
 
+// The CUDA runtime's own implementation of an intercepted function.
+template <typename FnT> static FnT getOrigFn(const char *Name) {
+  static void *RTLib = DeviceTraits<DeviceVendors::CUDA>::getRTLib();
+  auto Fn = reinterpret_cast<FnT>(dlsym(RTLib, Name));
+  if (!Fn)
+    LOG_FATAL("Could not find {} in the CUDA runtime", Name);
+  return Fn;
+}
+
+// Mneme serves only cudaMalloc. Other allocation functions go to the CUDA
+// runtime, and their pointers are tracked so that cudaFree forwards them.
+static void trackAlloc(void *Ptr, size_t Size, const char *Api) {
+  MnemeRecorderCUDAPreload::instance().trackPassthroughAlloc(Ptr, Size, Api);
+}
+
+using MallocAsyncFn = cudaError_t (*)(void **, size_t, cudaStream_t);
+using MallocFromPoolAsyncFn = cudaError_t (*)(void **, size_t, cudaMemPool_t,
+                                              cudaStream_t);
+
+static cudaError_t mallocAsync(MallocAsyncFn Orig, const char *Api,
+                               void **devPtr, size_t size,
+                               cudaStream_t hStream) {
+  auto ret = Orig(devPtr, size, hStream);
+  if (ret == cudaSuccess)
+    trackAlloc(*devPtr, size, Api);
+  return ret;
+}
+
+static cudaError_t mallocFromPoolAsync(MallocFromPoolAsyncFn Orig,
+                                       const char *Api, void **ptr, size_t size,
+                                       cudaMemPool_t memPool,
+                                       cudaStream_t stream) {
+  auto ret = Orig(ptr, size, memPool, stream);
+  if (ret == cudaSuccess)
+    trackAlloc(*ptr, size, Api);
+  return ret;
+}
+
 extern "C" {
 cudaError_t cudaMalloc(void **ptr, size_t size) {
   auto &mneme = MnemeRecorderCUDAPreload::instance();
@@ -49,11 +88,71 @@ cudaError_t cudaMallocManaged(void **ptr, size_t size, unsigned int flags) {
   return mneme.rtManagedMalloc(ptr, size, flags);
 };
 
-cudaError_t cudaHostMalloc(void **ptr, size_t size, unsigned int flags) {
+cudaError_t cudaHostAlloc(void **ptr, size_t size, unsigned int flags) {
   auto &mneme = MnemeRecorderCUDAPreload::instance();
   LOG_DEBUG("Entering Mneme to Malloc 'Host|Pinned' pointer of size : {}",
             size);
   return mneme.rtHostMalloc(ptr, size, flags);
+}
+
+cudaError_t cudaMallocHost(void **ptr, size_t size) {
+  static auto Orig =
+      getOrigFn<cudaError_t (*)(void **, size_t)>("cudaMallocHost");
+  auto ret = Orig(ptr, size);
+  if (ret == cudaSuccess)
+    trackAlloc(*ptr, size, "cudaMallocHost");
+  return ret;
+}
+
+cudaError_t cudaMallocPitch(void **devPtr, size_t *pitch, size_t width,
+                            size_t height) {
+  static auto Orig =
+      getOrigFn<cudaError_t (*)(void **, size_t *, size_t, size_t)>(
+          "cudaMallocPitch");
+  auto ret = Orig(devPtr, pitch, width, height);
+  if (ret == cudaSuccess)
+    trackAlloc(*devPtr, *pitch * height, "cudaMallocPitch");
+  return ret;
+}
+
+cudaError_t cudaMalloc3D(cudaPitchedPtr *pitchedDevPtr, cudaExtent extent) {
+  static auto Orig =
+      getOrigFn<cudaError_t (*)(cudaPitchedPtr *, cudaExtent)>("cudaMalloc3D");
+  auto ret = Orig(pitchedDevPtr, extent);
+  if (ret == cudaSuccess)
+    trackAlloc(pitchedDevPtr->ptr,
+               pitchedDevPtr->pitch * extent.height * extent.depth,
+               "cudaMalloc3D");
+  return ret;
+}
+
+cudaError_t cudaMallocAsync(void **devPtr, size_t size, cudaStream_t hStream) {
+  static auto Orig = getOrigFn<MallocAsyncFn>("cudaMallocAsync");
+  return mallocAsync(Orig, "cudaMallocAsync", devPtr, size, hStream);
+}
+
+cudaError_t cudaMallocAsync_ptsz(void **devPtr, size_t size,
+                                 cudaStream_t hStream) {
+  static auto Orig = getOrigFn<MallocAsyncFn>("cudaMallocAsync_ptsz");
+  return mallocAsync(Orig, "cudaMallocAsync", devPtr, size, hStream);
+}
+
+cudaError_t cudaMallocFromPoolAsync(void **ptr, size_t size,
+                                    cudaMemPool_t memPool,
+                                    cudaStream_t stream) {
+  static auto Orig =
+      getOrigFn<MallocFromPoolAsyncFn>("cudaMallocFromPoolAsync");
+  return mallocFromPoolAsync(Orig, "cudaMallocFromPoolAsync", ptr, size,
+                             memPool, stream);
+}
+
+cudaError_t cudaMallocFromPoolAsync_ptsz(void **ptr, size_t size,
+                                         cudaMemPool_t memPool,
+                                         cudaStream_t stream) {
+  static auto Orig =
+      getOrigFn<MallocFromPoolAsyncFn>("cudaMallocFromPoolAsync_ptsz");
+  return mallocFromPoolAsync(Orig, "cudaMallocFromPoolAsync", ptr, size,
+                             memPool, stream);
 }
 
 cudaError_t cudaFree(void *ptr) {
@@ -62,9 +161,23 @@ cudaError_t cudaFree(void *ptr) {
   return mneme.rtFree(ptr);
 };
 
-cudaError_t cudaHostFree(void *ptr) {
+cudaError_t cudaFreeAsync(void *devPtr, cudaStream_t hStream) {
   auto &mneme = MnemeRecorderCUDAPreload::instance();
-  LOG_DEBUG("Entering Mneme to HostFree pointer");
+  LOG_DEBUG("Entering Mneme to FreeAsync pointer");
+  return mneme.rtFreeAsync(devPtr, hStream);
+}
+
+// Used instead of cudaFreeAsync when compiling with a per-thread default
+// stream, where stream 0 means the calling thread's stream.
+cudaError_t cudaFreeAsync_ptsz(void *devPtr, cudaStream_t hStream) {
+  auto &mneme = MnemeRecorderCUDAPreload::instance();
+  LOG_DEBUG("Entering Mneme to FreeAsync pointer");
+  return mneme.rtFreeAsync(devPtr, hStream ? hStream : cudaStreamPerThread);
+}
+
+cudaError_t cudaFreeHost(void *ptr) {
+  auto &mneme = MnemeRecorderCUDAPreload::instance();
+  LOG_DEBUG("Entering Mneme to FreeHost pointer");
   return mneme.rtHostFree(ptr);
 }
 

@@ -4,6 +4,7 @@
 #include "mneme/MnemeLLVMUtils.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeRecord.hpp"
+#include <dlfcn.h>
 #include <hip/hip_runtime.h>
 #include <utility>
 
@@ -28,6 +29,21 @@ public:
   }
 };
 
+// The HIP runtime's own implementation of an intercepted function.
+template <typename FnT> static FnT getOrigFn(const char *Name) {
+  static void *RTLib = DeviceTraits<DeviceVendors::HIP>::getRTLib();
+  auto Fn = reinterpret_cast<FnT>(dlsym(RTLib, Name));
+  if (!Fn)
+    LOG_FATAL("Could not find {} in the HIP runtime", Name);
+  return Fn;
+}
+
+// Mneme serves only hipMalloc. Other allocation functions go to the HIP
+// runtime, and their pointers are tracked so that hipFree forwards them.
+static void trackAlloc(void *Ptr, size_t Size, const char *Api) {
+  MnemeRecorderHIPPreload::instance().trackPassthroughAlloc(Ptr, Size, Api);
+}
+
 extern "C" {
 hipError_t hipMalloc(void **ptr, size_t size) {
   LOG_DEBUG("Entering Mneme to Malloc pointer of size : {}", size);
@@ -48,14 +64,117 @@ hipError_t hipHostMalloc(void **ptr, size_t size, unsigned int flags) {
   return mneme.rtHostMalloc(ptr, size, flags);
 }
 
+hipError_t hipHostAlloc(void **ptr, size_t size, unsigned int flags) {
+  static auto Orig =
+      getOrigFn<hipError_t (*)(void **, size_t, unsigned int)>("hipHostAlloc");
+  auto ret = Orig(ptr, size, flags);
+  if (ret == hipSuccess)
+    trackAlloc(*ptr, size, "hipHostAlloc");
+  return ret;
+}
+
+hipError_t hipMallocHost(void **ptr, size_t size) {
+  static auto Orig =
+      getOrigFn<hipError_t (*)(void **, size_t)>("hipMallocHost");
+  auto ret = Orig(ptr, size);
+  if (ret == hipSuccess)
+    trackAlloc(*ptr, size, "hipMallocHost");
+  return ret;
+}
+
+hipError_t hipMemAllocHost(void **ptr, size_t size) {
+  static auto Orig =
+      getOrigFn<hipError_t (*)(void **, size_t)>("hipMemAllocHost");
+  auto ret = Orig(ptr, size);
+  if (ret == hipSuccess)
+    trackAlloc(*ptr, size, "hipMemAllocHost");
+  return ret;
+}
+
+hipError_t hipExtMallocWithFlags(void **ptr, size_t sizeBytes,
+                                 unsigned int flags) {
+  static auto Orig = getOrigFn<hipError_t (*)(void **, size_t, unsigned int)>(
+      "hipExtMallocWithFlags");
+  auto ret = Orig(ptr, sizeBytes, flags);
+  if (ret == hipSuccess)
+    trackAlloc(*ptr, sizeBytes, "hipExtMallocWithFlags");
+  return ret;
+}
+
+hipError_t hipMallocPitch(void **ptr, size_t *pitch, size_t width,
+                          size_t height) {
+  static auto Orig =
+      getOrigFn<hipError_t (*)(void **, size_t *, size_t, size_t)>(
+          "hipMallocPitch");
+  auto ret = Orig(ptr, pitch, width, height);
+  if (ret == hipSuccess)
+    trackAlloc(*ptr, *pitch * height, "hipMallocPitch");
+  return ret;
+}
+
+hipError_t hipMemAllocPitch(hipDeviceptr_t *dptr, size_t *pitch,
+                            size_t widthInBytes, size_t height,
+                            unsigned int elementSizeBytes) {
+  static auto Orig =
+      getOrigFn<hipError_t (*)(hipDeviceptr_t *, size_t *, size_t, size_t,
+                               unsigned int)>("hipMemAllocPitch");
+  auto ret = Orig(dptr, pitch, widthInBytes, height, elementSizeBytes);
+  if (ret == hipSuccess)
+    trackAlloc(*dptr, *pitch * height, "hipMemAllocPitch");
+  return ret;
+}
+
+hipError_t hipMalloc3D(hipPitchedPtr *pitchedDevPtr, hipExtent extent) {
+  static auto Orig =
+      getOrigFn<hipError_t (*)(hipPitchedPtr *, hipExtent)>("hipMalloc3D");
+  auto ret = Orig(pitchedDevPtr, extent);
+  if (ret == hipSuccess)
+    trackAlloc(pitchedDevPtr->ptr,
+               pitchedDevPtr->pitch * extent.height * extent.depth,
+               "hipMalloc3D");
+  return ret;
+}
+
+hipError_t hipMallocAsync(void **dev_ptr, size_t size, hipStream_t stream) {
+  static auto Orig =
+      getOrigFn<hipError_t (*)(void **, size_t, hipStream_t)>("hipMallocAsync");
+  auto ret = Orig(dev_ptr, size, stream);
+  if (ret == hipSuccess)
+    trackAlloc(*dev_ptr, size, "hipMallocAsync");
+  return ret;
+}
+
+hipError_t hipMallocFromPoolAsync(void **dev_ptr, size_t size,
+                                  hipMemPool_t mem_pool, hipStream_t stream) {
+  static auto Orig =
+      getOrigFn<hipError_t (*)(void **, size_t, hipMemPool_t, hipStream_t)>(
+          "hipMallocFromPoolAsync");
+  auto ret = Orig(dev_ptr, size, mem_pool, stream);
+  if (ret == hipSuccess)
+    trackAlloc(*dev_ptr, size, "hipMallocFromPoolAsync");
+  return ret;
+}
+
 hipError_t hipFree(void *ptr) {
   LOG_DEBUG("Entering Mneme to Free pointer");
   auto &mneme = MnemeRecorderHIPPreload::instance();
   return mneme.rtFree(ptr);
 };
 
+hipError_t hipFreeAsync(void *dev_ptr, hipStream_t stream) {
+  LOG_DEBUG("Entering Mneme to FreeAsync pointer");
+  auto &mneme = MnemeRecorderHIPPreload::instance();
+  return mneme.rtFreeAsync(dev_ptr, stream);
+}
+
 hipError_t hipHostFree(void *ptr) {
   LOG_DEBUG("Entering Mneme to HostFree pointer");
+  auto &mneme = MnemeRecorderHIPPreload::instance();
+  return mneme.rtHostFree(ptr);
+}
+
+hipError_t hipFreeHost(void *ptr) {
+  LOG_DEBUG("Entering Mneme to FreeHost pointer");
   auto &mneme = MnemeRecorderHIPPreload::instance();
   return mneme.rtHostFree(ptr);
 }

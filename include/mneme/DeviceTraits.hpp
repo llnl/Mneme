@@ -94,6 +94,7 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return "hipMallocManaged";
   }
   static constexpr const char *getDeviceFreeFnName() { return "hipFree"; }
+  static constexpr const char *getAsyncFreeFnName() { return "hipFreeAsync"; }
   static constexpr const char *getPinnedFreeFnName() { return "hipHostFree"; }
 
   static const char *getDeviceGetIDFnName() { return "hipGetDevice"; }
@@ -409,12 +410,13 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   }
   static constexpr const char *getDeviceMallocFnName() { return "cudaMalloc"; }
   static constexpr const char *getPinnedMallocFnName() {
-    return "cudaMallocHost";
+    return "cudaHostAlloc";
   }
   static constexpr const char *getManagedMallocFnName() {
     return "cudaMallocManaged";
   }
   static constexpr const char *getDeviceFreeFnName() { return "cudaFree"; }
+  static constexpr const char *getAsyncFreeFnName() { return "cudaFreeAsync"; }
   static constexpr const char *getPinnedFreeFnName() { return "cudaFreeHost"; }
   static constexpr const char *getUURegisterFunctionFnName() {
     return "__cudaRegisterFunction";

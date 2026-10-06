@@ -71,7 +71,15 @@ public:
     return Backend->rtHostMalloc(ptr, size, flags);
   }
 
+  void trackPassthroughAlloc(void *ptr, size_t size, const char *api) {
+    Backend->trackPassthroughAlloc(ptr, size, api);
+  }
+
   DeviceError_t rtFree(void *ptr) { return Backend->rtFree(ptr); }
+
+  DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) {
+    return Backend->rtFreeAsync(ptr, stream);
+  }
 
   DeviceError_t rtHostFree(void *ptr) { return Backend->rtHostFree(ptr); }
 

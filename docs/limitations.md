@@ -5,17 +5,33 @@ These are not fundamental design blockers, but they may affect certain applicati
 
 ---
 
-## 1. No Support for Managed Memory
+## 1. Only `cudaMalloc`/`hipMalloc` Memory Is Captured
 
-Mneme does **not** currently support CUDA Unified / Managed Memory (`cudaMallocManaged`).
+Mneme captures device memory allocated with `cudaMalloc`/`hipMalloc`. It passes
+the following allocation functions through to the vendor runtime, so their
+memory is **not** captured:
+
+- Managed memory: `cudaMallocManaged`, `hipMallocManaged`
+- Pinned host memory: `cudaMallocHost`, `cudaHostAlloc`, `hipHostMalloc`,
+  `hipHostAlloc`, `hipMallocHost`, `hipMemAllocHost`
+- Pitched and 3D memory: `cudaMallocPitch`, `cudaMalloc3D`, `hipMallocPitch`,
+  `hipMemAllocPitch`, `hipMalloc3D`
+- Stream-ordered memory: `cudaMallocAsync`, `cudaMallocFromPoolAsync`,
+  `hipMallocAsync`, `hipMallocFromPoolAsync`
+- `hipExtMallocWithFlags`
+
+Recording still works with these allocations. Mneme logs a warning for each one,
+and forwards their frees (including `cudaFree`/`hipFree` and
+`cudaFreeAsync`/`hipFreeAsync`) to the vendor runtime.
 
 **Implications:**
-- Kernels that rely on managed memory allocations may fail during replay.
-- Memory state reconstruction assumes explicit device memory allocations (`cudaMalloc`, `hipMalloc`).
+- Kernels that access this memory may fail during replay.
+- Freeing memory from any other allocation function (for example, the CUDA
+  driver API's `cuMemAlloc`) with `cudaFree`/`hipFree` aborts recording.
 
 **Workaround:**
-- Replace managed memory with explicit host–device memory transfers.
-- Use pinned host memory and explicit `cudaMemcpy` where possible.
+- Allocate memory that recorded kernels access with `cudaMalloc`/`hipMalloc`.
+- Use explicit `cudaMemcpy`/`hipMemcpy` transfers instead of managed memory.
 
 ---
 
