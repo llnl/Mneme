@@ -90,8 +90,7 @@ public:
   }
 
   DeviceError_t rtMalloc(void **ptr, size_t size) override {
-    // Like the vendor runtimes, return no memory for an empty allocation. A
-    // zero-size block would share its address with the next allocation.
+    // Like the vendor runtimes, return no memory for an empty allocation.
     if (size == 0) {
       *ptr = nullptr;
       return MnemeDeviceRT::DeviceSuccess;
