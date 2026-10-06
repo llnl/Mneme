@@ -42,9 +42,9 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   // create the allocator we assume that the allocations go to the same device.
   int DeviceID = -1;
 
-  void initializePageManagerIfNeeded() {
+  PageManager<VendorTypes> &getOrCreatePageManager() {
     if (PM)
-      return;
+      return *PM;
 
     // NOTE: We need this arch cause internally we initialize the device.
     // FIXME: We need to have a DeviceTrait function to initialize the GPU
@@ -57,6 +57,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
         MnemeDeviceRT::getMinPageSize(DeviceID));
     Packer = std::make_unique<ChunkAllocator<VendorTypes>>(
         *PM, DeviceID, Config::get().ChunkSize);
+    return *PM;
   }
 
 public:
@@ -105,7 +106,7 @@ public:
       return ret;
     }
 
-    initializePageManagerIfNeeded();
+    auto &Pages = getOrCreatePageManager();
 
     MnemeMemoryBlob<VendorTypes> MemBlob;
     if (Packer->packs(size)) {
@@ -122,7 +123,7 @@ public:
                  size);
         WarnedUnpacked = true;
       }
-      PM->mapAddr(size, [&](const auto &R) {
+      Pages.mapAddr(size, [&](const auto &R) {
         MemBlob = MnemeMemoryBlob<VendorTypes>(R.Size, nullptr, size);
         return MemBlob.mapFixed(R.Addr, R.Addr, R.Size, R.Align, DeviceID);
       });
@@ -221,7 +222,7 @@ public:
   DeviceError_t rtLaunchKernel(const void *func, dim3 &GridDim, dim3 &BlockDim,
                                void **Args, size_t SharedMem,
                                DeviceStream_t Stream) override {
-    initializePageManagerIfNeeded();
+    getOrCreatePageManager();
 
     if (Config::get().RecordingFilterMode == FilterMode::Scoped &&
         !detail::scopeAllowsRecording(func))
