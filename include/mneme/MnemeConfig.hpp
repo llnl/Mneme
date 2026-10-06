@@ -73,14 +73,51 @@ inline uint64_t getEnvOrDefaultChunkSize(const char *VarName,
   if (!EnvValue)
     return Default;
 
+  // Suffixes are binary: 8M, 8MB and 8MiB are all 8 MiB.
+  std::string Digits = *EnvValue;
+  auto EndsWith = [&](std::string_view S) {
+    return Digits.size() > S.size() &&
+           std::equal(S.rbegin(), S.rend(), Digits.rbegin(),
+                      [](char A, char B) {
+                        return A == std::tolower(static_cast<unsigned char>(B));
+                      });
+  };
+  bool HasIB = EndsWith("ib");
+  if (HasIB || EndsWith("b"))
+    Digits.resize(Digits.size() - (HasIB ? 2 : 1));
+  unsigned Shift = 0;
+  if (!Digits.empty()) {
+    switch (std::toupper(static_cast<unsigned char>(Digits.back()))) {
+    case 'K':
+      Shift = 10;
+      break;
+    case 'M':
+      Shift = 20;
+      break;
+    case 'G':
+      Shift = 30;
+      break;
+    case 'T':
+      Shift = 40;
+      break;
+    }
+  }
+  if (Shift)
+    Digits.pop_back();
+
   errno = 0;
   char *End = nullptr;
-  unsigned long long Parsed = std::strtoull(EnvValue->c_str(), &End, 10);
-  if (!std::isdigit(static_cast<unsigned char>((*EnvValue)[0])) ||
-      errno == ERANGE || *End != '\0' || Parsed < util::LargePageSize ||
+  unsigned long long Parsed = std::strtoull(Digits.c_str(), &End, 10);
+  bool Valid = (Shift || !HasIB) && !Digits.empty() &&
+               std::isdigit(static_cast<unsigned char>(Digits[0])) &&
+               errno != ERANGE && *End == '\0' &&
+               Parsed <= (ULLONG_MAX >> Shift);
+  Parsed <<= Shift;
+  if (!Valid || Parsed < util::LargePageSize ||
       Parsed % util::LargePageSize != 0) {
-    warnMalformedEnvironmentValue("environment variable", VarName, *EnvValue,
-                                  "; expected a multiple of 2 MiB");
+    warnMalformedEnvironmentValue(
+        "environment variable", VarName, *EnvValue,
+        "(expected a multiple of 2 MiB, such as 64MB or 4GB)");
     return Default;
   }
   return Parsed;
@@ -251,7 +288,7 @@ private:
         CopySource(
             config_detail::getEnvOrDefaultBool("MNEME_COPY_SOURCE", false)),
         ChunkSize(config_detail::getEnvOrDefaultChunkSize("MNEME_CHUNK_SIZE",
-                                                          256ULL << 20)),
+                                                          4ULL << 30)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")),
         RecordingEnabledThisRank(
