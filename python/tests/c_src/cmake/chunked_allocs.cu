@@ -86,7 +86,8 @@ int main() {
   std::vector<long> HOut(NumBufs);
   prefix(Memcpy)(HOut.data(), Out, NumBufs * sizeof(long),
                  prefix(MemcpyDeviceToHost));
-  int Bad = 0;
+  // Failed attempts inside the allocator must not leak to the app.
+  int Bad = prefix(GetLastError)() != prefix(Success);
   for (int B = 0; B < NumBufs; ++B)
     Bad += HOut[B] != 2 * B * 1000 + 7;
   printf("%s\n", Bad ? "FAIL" : "PASS");
