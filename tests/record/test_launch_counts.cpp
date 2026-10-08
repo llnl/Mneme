@@ -7,6 +7,9 @@
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP
 // RUN: ls "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP-LS
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: MNEME_SKIP_RECORDINGS=1 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP-ONE
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext other | %FILECHECK %s --check-prefixes=CHECK,CHECK-OTHER
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-REGEX
 // RUN: cat "%t.$$.mneme/FilteredKernels.jsonl" | %FILECHECK %s --check-prefix=CHECK-FILTERED
@@ -45,6 +48,14 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-SKIP-LS-NOT: DeviceState
 // CHECK-SKIP-LS: RecordedIR_
 // CHECK-SKIP-LS-NOT: DeviceState
+
+// CHECK-SKIP-ONE: NumInstances: 2
+// CHECK-SKIP-ONE: TotalLaunches: 5
+// CHECK-SKIP-ONE: NumUnrecordedInstances: 0
+// CHECK-SKIP-ONE-DAG: BlockDims:(32, 1, 1)
+// CHECK-SKIP-ONE-DAG: Occurrences: 3
+// CHECK-SKIP-ONE-DAG: BlockDims:(64, 1, 1)
+// CHECK-SKIP-ONE-DAG: Occurrences: 2
 
 // CHECK-REGEX-NOT: other_kernel
 // CHECK-REGEX: DemangledName: count_kernel()
