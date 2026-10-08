@@ -213,7 +213,7 @@ class KernelInstancesCollection {
   llvm::DenseMap<uint64_t, KernelInstance> Instances;
   uint64_t NumRecords;
   uint64_t TotalLaunches = 0;
-  int MaxRecordings;
+  uint64_t MaxRecordings;
   uint64_t SkipRecordings;
   llvm::SmallVector<size_t> KernelArgSizes;
   llvm::SmallVector<std::string> KernelArgNames;
@@ -303,11 +303,11 @@ public:
 
   KernelInstancesCollection(void *VAddr, uint64_t VASize,
                             const proteus::runtime::KernelMetadata &KInfo,
-                            int MaxRecordings, uint64_t SkipRecordings,
+                            uint64_t MaxRecordings, uint64_t SkipRecordings,
                             bool CopySource)
-      : VAddr(VAddr), VASize(VASize), MaxRecordings(MaxRecordings),
-        SkipRecordings(SkipRecordings), NumRecords(0), KName(KInfo.getName()),
-        CopySource(CopySource) {}
+      : VAddr(VAddr), VASize(VASize), NumRecords(0),
+        MaxRecordings(MaxRecordings), SkipRecordings(SkipRecordings),
+        KName(KInfo.getName()), CopySource(CopySource) {}
 
   bool hasRecords() const { return NumRecords > 0; }
 
