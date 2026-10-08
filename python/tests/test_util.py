@@ -68,7 +68,7 @@ def test_cond_gpu_time_no_profile_calls_original():
     """GPU timing is skipped when profile=False."""
 
     @cond_gpu_time("gpu_time")
-    def fn(self, res, config, kernel_name):
+    def fn(self, res, config, kernel_name, device_func, iterations):
         return 7
 
     config = DummyConfig()
@@ -78,7 +78,7 @@ def test_cond_gpu_time_no_profile_calls_original():
         "mneme.utils.gpu_profile_stop"
     ) as stop:
 
-        out = fn(DummySelf(), res, config, "kernel", profile=False)
+        out = fn(DummySelf(), res, config, "kernel", None, 3, profile=False)
 
     assert out == 7
     start.assert_not_called()
@@ -90,7 +90,7 @@ def test_cond_gpu_time_profile_records_gpu_measurements():
     """GPU start/stop functions are invoked and result stored on exp."""
 
     @cond_gpu_time("gpu_time")
-    def fn(self, res, config, kernel_name):
+    def fn(self, res, config, kernel_name, device_func, iterations):
         return "DONE"
 
     config = DummyConfig()
@@ -100,9 +100,9 @@ def test_cond_gpu_time_profile_records_gpu_measurements():
         "mneme.utils.gpu_profile_stop", return_value={"cycles": 123}
     ) as stop:
 
-        out = fn(DummySelf(), res, config, "mykernel", profile=True)
+        out = fn(DummySelf(), res, config, "mykernel", None, 3, profile=True)
 
     assert out == "DONE"
     start.assert_called_once_with("mykernel.kd")
-    stop.assert_called_once_with("CID")
+    stop.assert_called_once_with("CID", 3)
     assert res.gpu_time == {"cycles": 123}
