@@ -63,6 +63,7 @@ def _init_profile():
 
         profile_lib.MnemePy_getNumRecords.argtypes = [
             c_uint64,
+            c_int64,
         ]
         profile_lib.MnemePy_getNumRecords.restype = c_int64
 
@@ -93,7 +94,7 @@ def gpu_profile_start(kernel_name: str):
     return int(profile_lib.MnemePy_startProfile(_encode_string(kernel_name)))
 
 
-def gpu_profile_stop(correlation_id: int):
+def gpu_profile_stop(correlation_id: int, launches: int):
     """
     Stop GPU profiling and return recorded profiling values.
 
@@ -101,6 +102,8 @@ def gpu_profile_stop(correlation_id: int):
     ----------
     correlation_id : int
         Correlation identifier returned by :func:`gpu_profile_start`.
+    launches : int
+        Number of target kernel launches to wait for.
 
     Returns
     -------
@@ -111,15 +114,19 @@ def gpu_profile_stop(correlation_id: int):
     Raises
     ------
     RuntimeError
-        If the profiling library has not been initialized via :func:`init_profiler`.
+        If the profiling library has not been initialized via :func:`init_profiler`,
+        or fewer than ``launches`` records arrived.
     """
     if profile_lib is None:
         raise RuntimeError("Profile library is not initialized")
 
-    num_records = profile_lib.MnemePy_getNumRecords(correlation_id)
+    num_records = profile_lib.MnemePy_getNumRecords(correlation_id, launches)
 
-    if num_records <= 0 or num_records > 10_000_000:
-        raise RuntimeError(f"Bad num_records={num_records} for token={correlation_id}")
+    if num_records < launches:
+        raise RuntimeError(
+            f"Profiler delivered {num_records} of {launches} records "
+            f"for token={correlation_id}"
+        )
 
     logger.debug(f"Profiler contains {num_records} records")
     arr = (c_int64 * num_records)()
