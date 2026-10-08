@@ -48,6 +48,7 @@ artifact.
 | `-rdb`, `--record-db-dir`               | Path to a **existing** directory where recorded artifacts (metadata, LLVM IR, and device memory snapshots) will be stored |
 | `-vass`, `--virtual-address-space-size` | Size (in **GB**) of the virtual address space allocated by Mneme for recording                                            |
 | `-mr`, `--per-kernel-max-recordings`    | Maximum number of times the same GPU kernel may be recorded with different dynamic hashes                                 |
+| `-sr`, `--per-kernel-skip-recordings`   | Number of launches of each GPU kernel to skip before recording it                                                         |
 | `--epilogue-format`                     | Store epilogue snapshots as `diff`, `bytes`, or `best`; defaults to `diff`                                                        |
 | `-rr`, `--record-ranks`                 | Restrict recording to a comma-separated set of MPI ranks (e.g. `0`, `0,1,3`) or `all` for every rank. See *Multi-rank recording* below. |
 | `--copy-source`                         | Copy the source file that defines each recorded kernel into the record directory and record its MD5 checksum         |
@@ -117,6 +118,12 @@ To override the default, pass `--record-ranks`:
 
 !!! note
     Mneme may record multiple instances of the same kernel if it is invoked with different dynamic execution contexts. The `--per-kernel-max-recordings` option can be used to limit this behavior.
+    Launches that are skipped or exceed the limit are still counted in the kernel's database, under `TotalLaunches` and the `Occurrences` of each launch configuration.
+
+!!! note
+    To record only some kernels, set `MNEME_RR_KERNELS` to a regular expression before running `mneme record`.
+    Kernels for which neither the mangled nor the demangled name matches are not recorded; their launch counts are written to `FilteredKernels.jsonl` in the record directory.
+    See [Usage → Artifacts](artifacts.md#filtered-kernels).
 
 !!! note
     The virtual address space size should be chosen large enough to accommodate all device allocations performed by the application during kernel execution
