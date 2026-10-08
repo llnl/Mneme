@@ -119,6 +119,11 @@ To override the default, pass `--record-ranks`:
 
 !!! note
     Mneme can save several instances of a kernel. Set `recording.defaults.max_records` in a filter file to limit distinct launch configurations. Repeated configurations remain deduplicated, even when their inputs change.
+    Launches that are skipped, not selected, or exceed the limit are still counted in the kernel's database, under `TotalLaunches` and the `Occurrences` of each launch configuration.
+
+!!! note
+    Kernels that the recording filter excludes are not recorded; their launch counts are written to `FilteredKernels.jsonl` in the record directory.
+    See [Usage → Artifacts](artifacts.md#filtered-kernels).
 
 !!! note
     Mneme no longer reserves a fixed virtual address space. It maps device memory on demand, in chunks at addresses it chooses. The `-vass` option is deprecated: it is still accepted, but ignored with a warning. Use `--chunk-size` instead.
