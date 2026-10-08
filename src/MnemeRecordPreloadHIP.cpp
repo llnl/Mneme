@@ -29,11 +29,7 @@ public:
   }
 };
 
-// Mneme serves only hipMalloc. Other allocation functions go to the HIP
-// runtime, and their pointers are tracked so that hipFree forwards them.
-static void trackAlloc(void *Ptr, size_t Size, const char *Api) {
-  MnemeRecorderHIPPreload::instance().trackPassthroughAlloc(Ptr, Size, Api);
-}
+using Recorder = MnemeRecorderHIPPreload;
 
 extern "C" {
 hipError_t hipMalloc(void **ptr, size_t size) {
@@ -56,105 +52,63 @@ hipError_t hipHostMalloc(void **ptr, size_t size, unsigned int flags) {
 }
 
 hipError_t hipHostAlloc(void **ptr, size_t size, unsigned int flags) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::HIP,
-                   hipError_t (*)(void **, size_t, unsigned int)>(
-          "hipHostAlloc");
-  auto ret = Orig(ptr, size, flags);
-  if (ret == hipSuccess)
-    trackAlloc(*ptr, size, "hipHostAlloc");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipHostAlloc", [&] { return std::pair{*ptr, size}; }, ptr, size, flags);
 }
 
 hipError_t hipMallocHost(void **ptr, size_t size) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::HIP, hipError_t (*)(void **, size_t)>(
-          "hipMallocHost");
-  auto ret = Orig(ptr, size);
-  if (ret == hipSuccess)
-    trackAlloc(*ptr, size, "hipMallocHost");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipMallocHost", [&] { return std::pair{*ptr, size}; }, ptr, size);
 }
 
 hipError_t hipMemAllocHost(void **ptr, size_t size) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::HIP, hipError_t (*)(void **, size_t)>(
-          "hipMemAllocHost");
-  auto ret = Orig(ptr, size);
-  if (ret == hipSuccess)
-    trackAlloc(*ptr, size, "hipMemAllocHost");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipMemAllocHost", [&] { return std::pair{*ptr, size}; }, ptr, size);
 }
 
 hipError_t hipExtMallocWithFlags(void **ptr, size_t sizeBytes,
                                  unsigned int flags) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::HIP,
-                   hipError_t (*)(void **, size_t, unsigned int)>(
-          "hipExtMallocWithFlags");
-  auto ret = Orig(ptr, sizeBytes, flags);
-  if (ret == hipSuccess)
-    trackAlloc(*ptr, sizeBytes, "hipExtMallocWithFlags");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipExtMallocWithFlags", [&] { return std::pair{*ptr, sizeBytes}; }, ptr,
+      sizeBytes, flags);
 }
 
 hipError_t hipMallocPitch(void **ptr, size_t *pitch, size_t width,
                           size_t height) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::HIP,
-                   hipError_t (*)(void **, size_t *, size_t, size_t)>(
-          "hipMallocPitch");
-  auto ret = Orig(ptr, pitch, width, height);
-  if (ret == hipSuccess)
-    trackAlloc(*ptr, *pitch * height, "hipMallocPitch");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipMallocPitch", [&] { return std::pair{*ptr, *pitch * height}; }, ptr,
+      pitch, width, height);
 }
 
 hipError_t hipMemAllocPitch(hipDeviceptr_t *dptr, size_t *pitch,
                             size_t widthInBytes, size_t height,
                             unsigned int elementSizeBytes) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::HIP,
-                   hipError_t (*)(hipDeviceptr_t *, size_t *, size_t, size_t,
-                                  unsigned int)>("hipMemAllocPitch");
-  auto ret = Orig(dptr, pitch, widthInBytes, height, elementSizeBytes);
-  if (ret == hipSuccess)
-    trackAlloc(*dptr, *pitch * height, "hipMemAllocPitch");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipMemAllocPitch", [&] { return std::pair{*dptr, *pitch * height}; },
+      dptr, pitch, widthInBytes, height, elementSizeBytes);
 }
 
 hipError_t hipMalloc3D(hipPitchedPtr *pitchedDevPtr, hipExtent extent) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::HIP,
-                   hipError_t (*)(hipPitchedPtr *, hipExtent)>("hipMalloc3D");
-  auto ret = Orig(pitchedDevPtr, extent);
-  if (ret == hipSuccess)
-    trackAlloc(pitchedDevPtr->ptr,
-               pitchedDevPtr->pitch * extent.height * extent.depth,
-               "hipMalloc3D");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipMalloc3D",
+      [&] {
+        return std::pair{pitchedDevPtr->ptr,
+                         pitchedDevPtr->pitch * extent.height * extent.depth};
+      },
+      pitchedDevPtr, extent);
 }
 
 hipError_t hipMallocAsync(void **dev_ptr, size_t size, hipStream_t stream) {
-  static auto Orig = getRuntimeFn<DeviceVendors::HIP,
-                                  hipError_t (*)(void **, size_t, hipStream_t)>(
-      "hipMallocAsync");
-  auto ret = Orig(dev_ptr, size, stream);
-  if (ret == hipSuccess)
-    trackAlloc(*dev_ptr, size, "hipMallocAsync");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipMallocAsync", [&] { return std::pair{*dev_ptr, size}; }, dev_ptr,
+      size, stream);
 }
 
 hipError_t hipMallocFromPoolAsync(void **dev_ptr, size_t size,
                                   hipMemPool_t mem_pool, hipStream_t stream) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::HIP,
-                   hipError_t (*)(void **, size_t, hipMemPool_t, hipStream_t)>(
-          "hipMallocFromPoolAsync");
-  auto ret = Orig(dev_ptr, size, mem_pool, stream);
-  if (ret == hipSuccess)
-    trackAlloc(*dev_ptr, size, "hipMallocFromPoolAsync");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "hipMallocFromPoolAsync", [&] { return std::pair{*dev_ptr, size}; },
+      dev_ptr, size, mem_pool, stream);
 }
 
 hipError_t hipFree(void *ptr) {

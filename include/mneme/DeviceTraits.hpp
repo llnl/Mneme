@@ -90,7 +90,10 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceEvent_t = hipEvent_t;
   static constexpr auto DeviceSuccess = hipSuccess;
 
-  static inline void *getRTLib() { return loadRTLib("libamdhip64.so"); }
+  static inline void *getRTLib() {
+    static void *Lib = loadRTLib("libamdhip64.so");
+    return Lib;
+  }
   static constexpr const char *getLaunchKernelFnName() {
     return "hipLaunchKernel";
   }
@@ -412,7 +415,10 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   static constexpr auto DeviceSuccess = cudaSuccess;
   static constexpr auto DeviceDriverSuccess = CUDA_SUCCESS;
 
-  static inline void *getRTLib() { return loadRTLib("libcudart.so"); }
+  static inline void *getRTLib() {
+    static void *Lib = loadRTLib("libcudart.so");
+    return Lib;
+  }
   static constexpr const char *getLaunchKernelFnName() {
     return "cudaLaunchKernel";
   }
@@ -759,8 +765,8 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
 // Calling the function by name from Mneme would call Mneme's wrapper instead.
 template <DeviceVendors Vendor, typename FnT>
 FnT getRuntimeFn(const char *Name) {
-  static void *RTLib = DeviceTraits<Vendor>::getRTLib();
-  auto Fn = reinterpret_cast<FnT>(dlsym(RTLib, Name));
+  auto Fn =
+      reinterpret_cast<FnT>(dlsym(DeviceTraits<Vendor>::getRTLib(), Name));
   if (!Fn)
     LOG_FATAL("Could not find {} in the device runtime", Name);
   return Fn;

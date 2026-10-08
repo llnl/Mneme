@@ -12,6 +12,7 @@ namespace mneme {
 
 template <DeviceVendors VendorTypes> class MnemeRecorder {
 public:
+  static constexpr DeviceVendors Vendor = VendorTypes;
   using MnemeDeviceRT = DeviceTraits<VendorTypes>;
   using DeviceError_t = typename MnemeDeviceRT::DeviceError_t;
   using DeviceStream_t = typename MnemeDeviceRT::DeviceStream_t;
@@ -98,5 +99,19 @@ public:
     return Backend->rtGetDevice(deviceID);
   }
 };
+
+// Calls the runtime's own Name and tracks the allocation Allocated() returns.
+// Each wrapper's lambda has a distinct type, so each wrapper gets its own Orig.
+template <typename RecorderT, typename AllocatedFn, typename... ArgTs>
+auto forwardAlloc(const char *Name, AllocatedFn Allocated, ArgTs... Args) {
+  using FnT = typename RecorderT::DeviceError_t (*)(ArgTs...);
+  static auto Orig = getRuntimeFn<RecorderT::Vendor, FnT>(Name);
+  auto Ret = Orig(Args...);
+  if (Ret == RecorderT::MnemeDeviceRT::DeviceSuccess) {
+    auto [Ptr, Size] = Allocated();
+    RecorderT::instance().trackPassthroughAlloc(Ptr, Size, Name);
+  }
+  return Ret;
+}
 
 } // namespace mneme

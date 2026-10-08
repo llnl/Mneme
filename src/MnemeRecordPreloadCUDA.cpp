@@ -37,34 +37,7 @@ public:
   }
 };
 
-// Mneme serves only cudaMalloc. Other allocation functions go to the CUDA
-// runtime, and their pointers are tracked so that cudaFree forwards them.
-static void trackAlloc(void *Ptr, size_t Size, const char *Api) {
-  MnemeRecorderCUDAPreload::instance().trackPassthroughAlloc(Ptr, Size, Api);
-}
-
-using MallocAsyncFn = cudaError_t (*)(void **, size_t, cudaStream_t);
-using MallocFromPoolAsyncFn = cudaError_t (*)(void **, size_t, cudaMemPool_t,
-                                              cudaStream_t);
-
-static cudaError_t mallocAsync(MallocAsyncFn Orig, const char *Api,
-                               void **devPtr, size_t size,
-                               cudaStream_t hStream) {
-  auto ret = Orig(devPtr, size, hStream);
-  if (ret == cudaSuccess)
-    trackAlloc(*devPtr, size, Api);
-  return ret;
-}
-
-static cudaError_t mallocFromPoolAsync(MallocFromPoolAsyncFn Orig,
-                                       const char *Api, void **ptr, size_t size,
-                                       cudaMemPool_t memPool,
-                                       cudaStream_t stream) {
-  auto ret = Orig(ptr, size, memPool, stream);
-  if (ret == cudaSuccess)
-    trackAlloc(*ptr, size, Api);
-  return ret;
-}
+using Recorder = MnemeRecorderCUDAPreload;
 
 extern "C" {
 cudaError_t cudaMalloc(void **ptr, size_t size) {
@@ -87,69 +60,54 @@ cudaError_t cudaHostAlloc(void **ptr, size_t size, unsigned int flags) {
 }
 
 cudaError_t cudaMallocHost(void **ptr, size_t size) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::CUDA, cudaError_t (*)(void **, size_t)>(
-          "cudaMallocHost");
-  auto ret = Orig(ptr, size);
-  if (ret == cudaSuccess)
-    trackAlloc(*ptr, size, "cudaMallocHost");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "cudaMallocHost", [&] { return std::pair{*ptr, size}; }, ptr, size);
 }
 
 cudaError_t cudaMallocPitch(void **devPtr, size_t *pitch, size_t width,
                             size_t height) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::CUDA,
-                   cudaError_t (*)(void **, size_t *, size_t, size_t)>(
-          "cudaMallocPitch");
-  auto ret = Orig(devPtr, pitch, width, height);
-  if (ret == cudaSuccess)
-    trackAlloc(*devPtr, *pitch * height, "cudaMallocPitch");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "cudaMallocPitch", [&] { return std::pair{*devPtr, *pitch * height}; },
+      devPtr, pitch, width, height);
 }
 
 cudaError_t cudaMalloc3D(cudaPitchedPtr *pitchedDevPtr, cudaExtent extent) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::CUDA,
-                   cudaError_t (*)(cudaPitchedPtr *, cudaExtent)>(
-          "cudaMalloc3D");
-  auto ret = Orig(pitchedDevPtr, extent);
-  if (ret == cudaSuccess)
-    trackAlloc(pitchedDevPtr->ptr,
-               pitchedDevPtr->pitch * extent.height * extent.depth,
-               "cudaMalloc3D");
-  return ret;
+  return forwardAlloc<Recorder>(
+      "cudaMalloc3D",
+      [&] {
+        return std::pair{pitchedDevPtr->ptr,
+                         pitchedDevPtr->pitch * extent.height * extent.depth};
+      },
+      pitchedDevPtr, extent);
 }
 
 cudaError_t cudaMallocAsync(void **devPtr, size_t size, cudaStream_t hStream) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::CUDA, MallocAsyncFn>("cudaMallocAsync");
-  return mallocAsync(Orig, "cudaMallocAsync", devPtr, size, hStream);
+  return forwardAlloc<Recorder>(
+      "cudaMallocAsync", [&] { return std::pair{*devPtr, size}; }, devPtr,
+      size, hStream);
 }
 
 cudaError_t cudaMallocAsync_ptsz(void **devPtr, size_t size,
                                  cudaStream_t hStream) {
-  static auto Orig =
-      getRuntimeFn<DeviceVendors::CUDA, MallocAsyncFn>("cudaMallocAsync_ptsz");
-  return mallocAsync(Orig, "cudaMallocAsync", devPtr, size, hStream);
+  return forwardAlloc<Recorder>(
+      "cudaMallocAsync_ptsz", [&] { return std::pair{*devPtr, size}; }, devPtr,
+      size, hStream);
 }
 
 cudaError_t cudaMallocFromPoolAsync(void **ptr, size_t size,
                                     cudaMemPool_t memPool,
                                     cudaStream_t stream) {
-  static auto Orig = getRuntimeFn<DeviceVendors::CUDA, MallocFromPoolAsyncFn>(
-      "cudaMallocFromPoolAsync");
-  return mallocFromPoolAsync(Orig, "cudaMallocFromPoolAsync", ptr, size,
-                             memPool, stream);
+  return forwardAlloc<Recorder>(
+      "cudaMallocFromPoolAsync", [&] { return std::pair{*ptr, size}; }, ptr,
+      size, memPool, stream);
 }
 
 cudaError_t cudaMallocFromPoolAsync_ptsz(void **ptr, size_t size,
                                          cudaMemPool_t memPool,
                                          cudaStream_t stream) {
-  static auto Orig = getRuntimeFn<DeviceVendors::CUDA, MallocFromPoolAsyncFn>(
-      "cudaMallocFromPoolAsync_ptsz");
-  return mallocFromPoolAsync(Orig, "cudaMallocFromPoolAsync", ptr, size,
-                             memPool, stream);
+  return forwardAlloc<Recorder>(
+      "cudaMallocFromPoolAsync_ptsz", [&] { return std::pair{*ptr, size}; },
+      ptr, size, memPool, stream);
 }
 
 cudaError_t cudaFree(void *ptr) {
