@@ -394,6 +394,11 @@ class RecordDatabase {
   bool HasRegex;
   llvm::DenseMap<uint64_t, KernelInstancesCollection> KernelRecords;
   llvm::DenseMap<uint64_t, uint64_t> KernelLaunchCounts;
+  struct FilteredKernel {
+    std::string Name;
+    uint64_t Launches = 0;
+  };
+  llvm::DenseMap<uint64_t, FilteredKernel> FilteredKernels;
   uint64_t MaxRecordings;
   uint64_t SkipRecordings;
   EpilogueSnapshotType EpilogueType;
@@ -455,6 +460,24 @@ public:
     return true;
   }
 
+  // Matches the regex once per kernel because demangling on every launch is
+  // costly, and counts the launches of filtered kernels.
+  bool filterLaunch(uint64_t StaticHash, const std::string &KernelName) {
+    if (KernelLaunchCounts.contains(StaticHash))
+      return false;
+
+    auto It = FilteredKernels.find(StaticHash);
+    if (It == FilteredKernels.end()) {
+      if (shouldRecord(KernelName))
+        return false;
+      LOG_INFO("Skip record of Kernel {}", KernelName);
+      It = FilteredKernels.try_emplace(StaticHash, FilteredKernel{KernelName})
+               .first;
+    }
+    It->second.Launches++;
+    return true;
+  }
+
   template <DeviceVendors VendorTypes>
   std::optional<std::function<
       void(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &, void **,
@@ -465,12 +488,10 @@ public:
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
-    if (!shouldRecord(KInfo.getName())) {
-      LOG_INFO("Skip record of Kernel");
-      return std::nullopt;
-    }
-
     auto StaticHash = KInfo.getStaticHash();
+    if (filterLaunch(StaticHash, KInfo.getName()))
+      return std::nullopt;
+
     uint64_t &LaunchCount = KernelLaunchCounts[StaticHash];
     LaunchCount++;
     if (LaunchCount <= SkipRecordings) {
