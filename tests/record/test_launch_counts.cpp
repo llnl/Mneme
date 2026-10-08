@@ -4,8 +4,7 @@
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-MAX
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_SKIP_RECORDINGS=10 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext | %FILECHECK %s --check-prefixes=CHECK
-// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP
-// RUN: ls "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP-LS
+// RUN: ls "%t.$$.mneme" | %FILECHECK %s --allow-empty --check-prefix=CHECK-SKIP
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_SKIP_RECORDINGS=1 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP-ONE
@@ -37,16 +36,7 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-MAX: Occurrences: 3
 // CHECK-MAX: Unrecorded: Grid:(2, 1, 1) Block:(64, 1, 1) SharedMem:0 Occurrences:2
 
-// CHECK-SKIP: DemangledName: count_kernel()
-// CHECK-SKIP: NumInstances: 0
-// CHECK-SKIP: TotalLaunches: 5
-// CHECK-SKIP: NumUnrecordedInstances: 2
-// CHECK-SKIP-DAG: Unrecorded: Grid:(1, 1, 1) Block:(32, 1, 1) SharedMem:0 Occurrences:3
-// CHECK-SKIP-DAG: Unrecorded: Grid:(2, 1, 1) Block:(64, 1, 1) SharedMem:0 Occurrences:2
-
-// CHECK-SKIP-LS-NOT: DeviceState
-// CHECK-SKIP-LS: RecordedIR_
-// CHECK-SKIP-LS-NOT: DeviceState
+// CHECK-SKIP-NOT: {{RecordedIR_|DeviceState|\.json}}
 
 // CHECK-SKIP-ONE: NumInstances: 2
 // CHECK-SKIP-ONE: TotalLaunches: 5

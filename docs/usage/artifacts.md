@@ -36,10 +36,9 @@ The database describes:
 - the recorded execution instances of that kernel, and
 - how often each launch configuration of the kernel was launched.
 
-Every launched kernel that `MNEME_RR_KERNELS` does not filter out gets a database,
-even if none of its launches were recorded, for example because
-`MNEME_SKIP_RECORDINGS` exceeds its number of launches.
-Its `instances` map is then empty.
+A kernel gets a database once at least one of its launches is recorded.
+A kernel that is never recorded, for example because
+`MNEME_SKIP_RECORDINGS` exceeds its number of launches, leaves no files.
 The databases are written after each recorded launch and once more when the application exits,
 so the launch counts cover the whole run.
 If the application crashes, the databases keep the counts from the last recorded launch.

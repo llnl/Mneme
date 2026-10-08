@@ -515,23 +515,3 @@ def test_recorded_execution_loads_record_without_launch_counts(tmp_path):
     d = r.to_dict()
     assert "TotalLaunches" not in d
     assert d["UnrecordedInstances"] == {}
-
-
-def test_recorded_execution_loads_record_without_instances(tmp_path):
-    unrecorded = {
-        "U": {
-            "BlockDims": {"x": 64, "y": 1, "z": 1},
-            "GridDims": {"x": 2, "y": 1, "z": 1},
-            "Occurrences": 5,
-            "SharedMem": 0,
-        }
-    }
-    json_path = _write_counted_record(
-        tmp_path, instances={}, TotalLaunches=5, UnrecordedInstances=unrecorded
-    )
-
-    r = RecordedExecution.from_json(str(json_path))
-
-    assert len(r) == 0
-    assert r.total_launches == 5
-    assert r.unrecorded_instances["U"].occ == 5
