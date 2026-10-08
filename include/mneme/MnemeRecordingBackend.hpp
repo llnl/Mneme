@@ -170,13 +170,13 @@ public:
       }
       return rtFree(ptr);
     }
-    if (ptr == nullptr || PassthroughAllocs.erase(ptr)) {
+    if (ptr == nullptr || PassthroughAllocs.erase(ptr))
       LOG_DEBUG("Forwarding async free of vendor runtime allocation PTR:{}",
                 ptr);
-      return Runtime.origFreeAsync(ptr, stream);
-    }
-    // Reports the unknown address.
-    return rtFree(ptr);
+    else
+      // Allocated by a function Mneme does not hook; let the runtime decide.
+      LOG_WARN("Forwarding async free of unknown address PTR:{}", ptr);
+    return Runtime.origFreeAsync(ptr, stream);
   }
 
   DeviceError_t rtHostFree(void *ptr) override {
