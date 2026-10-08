@@ -50,7 +50,7 @@ struct KernelInstance {
   dim3 BlockDim;
   dim3 GridDim;
   llvm::SmallVector<double> ArgValues;
-  int NumOccurrences;
+  uint64_t NumOccurrences = 0;
   uint64_t SharedMem;
   static llvm::json::Object toJSON(const dim3 &Dim) {
     llvm::json::Object JSONDim;
@@ -59,20 +59,24 @@ struct KernelInstance {
     JSONDim["z"] = Dim.z;
     return JSONDim;
   }
+  bool isRecorded() const { return !PrologueFn.empty(); }
+  llvm::json::Object launchToJSON() const {
+    llvm::json::Object Launch;
+    Launch["BlockDims"] = KernelInstance::toJSON(BlockDim);
+    Launch["GridDims"] = KernelInstance::toJSON(GridDim);
+    Launch["SharedMem"] = SharedMem;
+    Launch["Occurrences"] = NumOccurrences;
+    return Launch;
+  }
   llvm::json::Object toJSON() const {
-    llvm::json::Object instance;
+    llvm::json::Object instance = launchToJSON();
     instance["Prologue"] = PrologueFn;
     instance["Epilogue"] = EpilogueFn;
-    instance["BlockDims"] = KernelInstance::toJSON(BlockDim);
-    instance["GridDims"] = KernelInstance::toJSON(GridDim);
-    instance["SharedMem"] = SharedMem;
     instance["Args"] = llvm::json::Array(ArgValues);
-    instance["Occurrences"] = NumOccurrences;
     return instance;
   }
-  KernelInstance(dim3 &GridDim, dim3 &BlockDim, uint64_t SharedMem, void **Args)
-      : GridDim(GridDim), BlockDim(BlockDim), SharedMem(SharedMem),
-        NumOccurrences(1) {}
+  KernelInstance(const dim3 &GridDim, const dim3 &BlockDim, uint64_t SharedMem)
+      : BlockDim(BlockDim), GridDim(GridDim), SharedMem(SharedMem) {}
   KernelInstance() = default;
 };
 
@@ -207,7 +211,9 @@ class KernelInstancesCollection {
   uint64_t VASize;
   llvm::DenseMap<uint64_t, KernelInstance> Instances;
   uint64_t NumRecords;
+  uint64_t TotalLaunches = 0;
   int MaxRecordings;
+  uint64_t SkipRecordings;
   llvm::SmallVector<size_t> KernelArgSizes;
   llvm::SmallVector<std::string> KernelArgNames;
   llvm::SmallVector<bool> KernelSpecializations;
@@ -279,20 +285,27 @@ public:
     Collection["ArgNames"] = llvm::json::Array(KernelArgNames);
     Collection["Specializations"] = llvm::json::Array(KernelSpecializations);
     Source.addToJSON(Collection);
+    Collection["TotalLaunches"] = TotalLaunches;
     llvm::json::Object JSONInstances;
+    llvm::json::Object JSONUnrecorded;
     for (auto &[hash, KI] : Instances) {
-      JSONInstances[std::to_string(hash)] = KI.toJSON();
+      if (KI.isRecorded())
+        JSONInstances[std::to_string(hash)] = KI.toJSON();
+      else
+        JSONUnrecorded[std::to_string(hash)] = KI.launchToJSON();
     }
     Collection["instances"] = std::move(JSONInstances);
+    Collection["UnrecordedInstances"] = std::move(JSONUnrecorded);
     return Collection;
   }
 
   KernelInstancesCollection(const std::string &MnemeDirectory, void *VAddr,
                             uint64_t VASize,
                             const proteus::runtime::KernelMetadata &KInfo,
-                            int MaxRecordings, bool CopySource)
+                            int MaxRecordings, uint64_t SkipRecordings,
+                            bool CopySource)
       : VAddr(VAddr), VASize(VASize), MaxRecordings(MaxRecordings),
-        NumRecords(0), KName(KInfo.getName()) {
+        SkipRecordings(SkipRecordings), NumRecords(0), KName(KInfo.getName()) {
     const auto &BitcodeBytes = KInfo.getBitcode();
     llvm::StringRef Bitcode(BitcodeBytes.data(), BitcodeBytes.size());
     if (Bitcode.empty())
@@ -329,26 +342,34 @@ public:
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream,
       uint64_t StaticHash, EpilogueSnapshotType EpilogueType) {
 
-    if (NumRecords >= MaxRecordings)
-      return std::nullopt;
-
     auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem, Args);
+    KernelInstance &Instance =
+        Instances.try_emplace(DynamicHash, GridDim, BlockDim, SharedMem)
+            .first->second;
+    Instance.NumOccurrences++;
+    TotalLaunches++;
 
-    if (Instances.contains(DynamicHash)) {
-      Instances[DynamicHash].NumOccurrences++;
+    if (TotalLaunches <= SkipRecordings) {
+      LOG_DEBUG("Skipping recording {} of {} for kernel {}", TotalLaunches,
+                SkipRecordings, KName);
+      return std::nullopt;
+    }
+
+    if (Instance.isRecorded()) {
       LOG_DEBUG(
           "Kernel {} with DynamicHash {} is already recorded, skipping ...",
           StaticHash, DynamicHash);
       return std::nullopt;
     }
 
+    if (NumRecords >= MaxRecordings)
+      return std::nullopt;
+
     NumRecords++;
 
     LOG_DEBUG("First Instance of Kernel {} with DynamicHash {}, recording ...",
               StaticHash, DynamicHash);
 
-    Instances.insert(
-        {DynamicHash, KernelInstance(GridDim, BlockDim, SharedMem, Args)});
     std::filesystem::path Filename(MnemeDir /
                                    (std::string("DeviceState.prologue.") +
                                     std::to_string(StaticHash) + "." +
@@ -357,7 +378,7 @@ public:
     auto PrologueGlobals = std::make_shared<GlobalSnapshotData>();
     SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory, KernelArgSizes,
                                   Args, Stream};
-    Instances[DynamicHash].PrologueFn =
+    Instance.PrologueFn =
         BytesWriter<VendorTypes>(PrologueGlobals).write(Filename, In).string();
 
     // std::function requires a copyable callable, so the writer is shared.
@@ -393,7 +414,6 @@ class RecordDatabase {
   std::string RegexStr;
   bool HasRegex;
   llvm::DenseMap<uint64_t, KernelInstancesCollection> KernelRecords;
-  llvm::DenseMap<uint64_t, uint64_t> KernelLaunchCounts;
   struct FilteredKernel {
     std::string Name;
     uint64_t Launches = 0;
@@ -418,6 +438,8 @@ public:
     SkipRecordings = Conf.SkipRecordings;
     EpilogueType = Conf.EpilogueType;
     CopySource = Conf.CopySource;
+    // Logging here constructs the logger first so it outlives flush() at exit.
+    LOG_DEBUG("Recording into {}", MnemeDirectory.string());
   }
 
   void writeKernelJSON(uint64_t StaticHash) {
@@ -447,6 +469,11 @@ public:
     }
   }
 
+  void flush() {
+    for (const auto &Entry : KernelRecords)
+      writeKernelJSON(Entry.first);
+  }
+
   bool shouldRecord(const std::string &KernelName) const {
     if (!HasRegex)
       return true;
@@ -460,12 +487,9 @@ public:
     return true;
   }
 
-  // Matches the regex once per kernel because demangling on every launch is
-  // costly, and counts the launches of filtered kernels.
+  // Only a kernel's first launch reaches the regex, because kernels that pass
+  // get a record and kernels that fail are counted here.
   bool filterLaunch(uint64_t StaticHash, const std::string &KernelName) {
-    if (KernelLaunchCounts.contains(StaticHash))
-      return false;
-
     auto It = FilteredKernels.find(StaticHash);
     if (It == FilteredKernels.end()) {
       if (shouldRecord(KernelName))
@@ -489,22 +513,17 @@ public:
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
     auto StaticHash = KInfo.getStaticHash();
-    if (filterLaunch(StaticHash, KInfo.getName()))
-      return std::nullopt;
-
-    uint64_t &LaunchCount = KernelLaunchCounts[StaticHash];
-    LaunchCount++;
-    if (LaunchCount <= SkipRecordings) {
-      LOG_DEBUG("Skipping recording {} of {} for kernel {}", LaunchCount,
-                SkipRecordings, KInfo.getName());
-      return std::nullopt;
-    }
-
-    auto IT = KernelRecords.try_emplace(StaticHash, getDir(), VAddr, VASize,
-                                        KInfo, MaxRecordings, CopySource);
-    if (IT.second)
+    auto It = KernelRecords.find(StaticHash);
+    if (It == KernelRecords.end()) {
+      if (filterLaunch(StaticHash, KInfo.getName()))
+        return std::nullopt;
+      It = KernelRecords
+               .try_emplace(StaticHash, getDir(), VAddr, VASize, KInfo,
+                            MaxRecordings, SkipRecordings, CopySource)
+               .first;
       LOG_INFO("Created instance");
-    return IT.first->second.takeSnapshot<VendorTypes>(
+    }
+    return It->second.takeSnapshot<VendorTypes>(
         MnemeDirectory, KInfo.getGlobals(), DeviceMemory, GridDim, BlockDim,
         Args, SharedMem, Stream, StaticHash, EpilogueType);
   }

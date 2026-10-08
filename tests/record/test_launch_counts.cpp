@@ -1,0 +1,70 @@
+// clang-format off
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: MNEME_MAX_RECORDINGS=1 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-MAX
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: MNEME_SKIP_RECORDINGS=10 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP
+// RUN: ls "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP-LS
+// RUN: rm -rf "%t.$$.mneme"
+// clang-format on
+
+#include <cstdio>
+#include <iostream>
+
+#include "mneme/DeviceTraits.hpp"
+using namespace mneme;
+
+#ifdef MNEME_ENABLE_HIP
+using MnemeDeviceRT = DeviceTraits<DeviceVendors::HIP>;
+#elif defined(MNEME_ENABLE_CUDA)
+using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
+#endif
+
+// clang-format off
+// CHECK-MAX: DemangledName: count_kernel()
+// CHECK-MAX: NumInstances: 1
+// CHECK-MAX: TotalLaunches: 5
+// CHECK-MAX: NumUnrecordedInstances: 1
+// CHECK-MAX: BlockDims:(32, 1, 1)
+// CHECK-MAX: GridDims:(1, 1, 1)
+// CHECK-MAX: Occurrences: 3
+// CHECK-MAX: Unrecorded: Grid:(2, 1, 1) Block:(64, 1, 1) SharedMem:0 Occurrences:2
+
+// CHECK-SKIP: DemangledName: count_kernel()
+// CHECK-SKIP: NumInstances: 0
+// CHECK-SKIP: TotalLaunches: 5
+// CHECK-SKIP: NumUnrecordedInstances: 2
+// CHECK-SKIP-DAG: Unrecorded: Grid:(1, 1, 1) Block:(32, 1, 1) SharedMem:0 Occurrences:3
+// CHECK-SKIP-DAG: Unrecorded: Grid:(2, 1, 1) Block:(64, 1, 1) SharedMem:0 Occurrences:2
+
+// CHECK-SKIP-LS-NOT: DeviceState
+// CHECK-SKIP-LS: RecordedIR_
+// CHECK-SKIP-LS-NOT: DeviceState
+// clang-format on
+__global__ void count_kernel() {}
+
+static bool launch(dim3 GridDim, dim3 BlockDim) {
+  count_kernel<<<GridDim, BlockDim>>>();
+  auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceSynchronize());
+  if (EC) {
+    std::cout << "Error when running benchmark " << EC.value() << "\n";
+    return false;
+  }
+  return true;
+}
+
+int main() {
+  dim3 SmallGrid(1, 1, 1), SmallBlock(32, 1, 1);
+  dim3 LargeGrid(2, 1, 1), LargeBlock(64, 1, 1);
+  for (int I = 0; I < 2; I++)
+    if (!launch(SmallGrid, SmallBlock) || !launch(LargeGrid, LargeBlock))
+      return -1;
+  if (!launch(SmallGrid, SmallBlock))
+    return -1;
+
+  printf("Launched count_kernel 5 times\n");
+  return 0;
+}
+
+// CHECK: Launched count_kernel 5 times
