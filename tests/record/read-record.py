@@ -140,7 +140,15 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
                 instance["GridDims"]["z"],
             )
         )
-        print("Occurrences:", instance["Occurrences"])
+        print(
+            "Recorded: Grid:({0}, {1}, {2}) Block:({3}, {4}, {5}) "
+            "SharedMem:{6} Occurrences:{7}".format(
+                instance["GridDims"]["x"], instance["GridDims"]["y"],
+                instance["GridDims"]["z"], instance["BlockDims"]["x"],
+                instance["BlockDims"]["y"], instance["BlockDims"]["z"],
+                instance["SharedMem"], instance["Occurrences"],
+            )
+        )
         prologue_path = base_dir / instance["Prologue"]
         epilogue_path = base_dir / instance["Epilogue"]
         if not prologue_path.exists():

@@ -514,4 +514,4 @@ def test_recorded_execution_loads_record_without_launch_counts(tmp_path):
     assert r["H"].occ == 3
     d = r.to_dict()
     assert "TotalLaunches" not in d
-    assert d["UnrecordedInstances"] == {}
+    assert "UnrecordedInstances" not in d
