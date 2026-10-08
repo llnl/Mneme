@@ -206,6 +206,12 @@ private:
   }
 };
 
+inline std::string demangleKernelName(const std::string &KName) {
+  std::size_t pos = KName.find("__intern__");
+  std::string Orig = (pos != std::string::npos) ? KName.substr(0, pos) : KName;
+  return llvm::demangle(Orig);
+}
+
 class KernelInstancesCollection {
   void *VAddr;
   uint64_t VASize;
@@ -276,10 +282,7 @@ public:
         util::pointerToHexString(reinterpret_cast<uint8_t *>(VAddr));
     Collection["VASize"] = VASize;
     Collection["KernelName"] = KName;
-    std::size_t pos = KName.find("__intern__");
-    std::string Orig =
-        (pos != std::string::npos) ? KName.substr(0, pos) : KName;
-    Collection["DemangledName"] = llvm::demangle(Orig);
+    Collection["DemangledName"] = demangleKernelName(KName);
     Collection["Modules"] = llvm::json::Array(ModuleFiles);
     Collection["BinaryBlobs"] = llvm::json::Array();
     Collection["ArgNames"] = llvm::json::Array(KernelArgNames);
@@ -469,9 +472,33 @@ public:
     }
   }
 
+  void writeFilteredKernels() const {
+    auto Filename = MnemeDirectory / "FilteredKernels.jsonl";
+    std::error_code EC;
+    llvm::raw_fd_ostream OS(Filename.string(), EC);
+    if (EC) {
+      LOG_WARN("Failed to open {}: {}", Filename.string(), EC.message());
+      return;
+    }
+
+    for (const auto &[StaticHash, Kernel] : FilteredKernels)
+      OS << llvm::json::Value(llvm::json::Object{
+                {"StaticHash", StaticHash},
+                {"KernelName", Kernel.Name},
+                {"DemangledName", demangleKernelName(Kernel.Name)},
+                {"Launches", Kernel.Launches}})
+         << "\n";
+    OS.close();
+    if (OS.has_error())
+      LOG_WARN("Failed to write {}: {}", Filename.string(),
+               OS.error().message());
+  }
+
   void flush() {
     for (const auto &Entry : KernelRecords)
       writeKernelJSON(Entry.first);
+    if (!FilteredKernels.empty())
+      writeFilteredKernels();
   }
 
   bool shouldRecord(const std::string &KernelName) const {

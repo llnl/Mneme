@@ -6,6 +6,10 @@
 // RUN: MNEME_SKIP_RECORDINGS=10 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP
 // RUN: ls "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP-LS
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext other | %FILECHECK %s --check-prefixes=CHECK,CHECK-OTHER
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-REGEX
+// RUN: cat "%t.$$.mneme/FilteredKernels.jsonl" | %FILECHECK %s --check-prefix=CHECK-FILTERED
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 
@@ -41,8 +45,20 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-SKIP-LS-NOT: DeviceState
 // CHECK-SKIP-LS: RecordedIR_
 // CHECK-SKIP-LS-NOT: DeviceState
+
+// CHECK-REGEX-NOT: other_kernel
+// CHECK-REGEX: DemangledName: count_kernel()
+// CHECK-REGEX: NumInstances: 2
+// CHECK-REGEX: TotalLaunches: 5
+// CHECK-REGEX: NumUnrecordedInstances: 0
+// CHECK-REGEX-NOT: other_kernel
+
+// CHECK-FILTERED-NOT: count_kernel
+// CHECK-FILTERED: "DemangledName":"other_kernel()",{{.*}}"Launches":4,
+// CHECK-FILTERED-NOT: count_kernel
 // clang-format on
 __global__ void count_kernel() {}
+__global__ void other_kernel() {}
 
 static bool launch(dim3 GridDim, dim3 BlockDim) {
   count_kernel<<<GridDim, BlockDim>>>();
@@ -54,7 +70,7 @@ static bool launch(dim3 GridDim, dim3 BlockDim) {
   return true;
 }
 
-int main() {
+int main(int argc, char **argv) {
   dim3 SmallGrid(1, 1, 1), SmallBlock(32, 1, 1);
   dim3 LargeGrid(2, 1, 1), LargeBlock(64, 1, 1);
   for (int I = 0; I < 2; I++)
@@ -64,7 +80,20 @@ int main() {
     return -1;
 
   printf("Launched count_kernel 5 times\n");
+
+  if (argc > 1) {
+    for (int I = 0; I < 4; I++)
+      other_kernel<<<1, 1>>>();
+    auto EC =
+        MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceSynchronize());
+    if (EC) {
+      std::cout << "Error when running benchmark " << EC.value() << "\n";
+      return -1;
+    }
+    printf("Launched other_kernel 4 times\n");
+  }
   return 0;
 }
 
 // CHECK: Launched count_kernel 5 times
+// CHECK-OTHER: Launched other_kernel 4 times
