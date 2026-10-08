@@ -299,6 +299,8 @@ public:
   }
 
   ~RecordingBackend() {
+    DB.flush();
+
     LOG_DEBUG("RecordingBackend destructor: releasing {} blobs", AllocatedBlobs.size());
 
     // Release all unreleased blobs before the DenseMap destructs
