@@ -409,7 +409,11 @@ public:
 class RecordDatabase {
   std::filesystem::path MnemeDirectory;
   llvm::DenseMap<uint64_t, KernelInstancesCollection> KernelRecords;
-  llvm::DenseSet<uint64_t> FilteredKernels;
+  struct FilteredKernel {
+    std::string Name;
+    uint64_t Launches = 0;
+  };
+  llvm::DenseMap<uint64_t, FilteredKernel> FilteredKernels;
   EpilogueSnapshotType EpilogueType;
   bool CopySource;
 
@@ -451,27 +455,52 @@ public:
     }
   }
 
+  void writeFilteredKernels() const {
+    auto Filename = MnemeDirectory / "FilteredKernels.jsonl";
+    std::error_code EC;
+    llvm::raw_fd_ostream OS(Filename.string(), EC);
+    if (EC) {
+      LOG_WARN("Failed to open {}: {}", Filename.string(), EC.message());
+      return;
+    }
+
+    for (const auto &[StaticHash, Kernel] : FilteredKernels)
+      OS << llvm::json::Value(llvm::json::Object{
+                {"StaticHash", StaticHash},
+                {"KernelName", Kernel.Name},
+                {"DemangledName", util::demangleKernelName(Kernel.Name)},
+                {"Launches", Kernel.Launches}})
+         << "\n";
+    OS.close();
+    if (OS.has_error())
+      LOG_WARN("Failed to write {}: {}", Filename.string(),
+               OS.error().message());
+  }
+
   void flush() {
     for (const auto &Entry : KernelRecords)
       writeKernelJSON(Entry.first);
+    if (!FilteredKernels.empty())
+      writeFilteredKernels();
   }
 
   // Only a kernel's first launch resolves its policy, because kernels that can
-  // record get a record and kernels that cannot are remembered here.
+  // record get a record and kernels that cannot are counted here.
   std::optional<KernelRecordingPolicy>
   filterLaunch(uint64_t StaticHash, const std::string &KernelName) {
-    if (FilteredKernels.contains(StaticHash))
-      return std::nullopt;
-
-    // Match the same original name displayed in the recording database.
-    auto Policy = RecordingPolicy::get().resolve(
-        util::demangleKernelName(KernelName), KernelName);
-    if (Policy.MaxRecords == 0) {
+    auto It = FilteredKernels.find(StaticHash);
+    if (It == FilteredKernels.end()) {
+      // Match the same original name displayed in the recording database.
+      auto Policy = RecordingPolicy::get().resolve(
+          util::demangleKernelName(KernelName), KernelName);
+      if (Policy.MaxRecords != 0)
+        return Policy;
       LOG_INFO("Skip record of Kernel {}", KernelName);
-      FilteredKernels.insert(StaticHash);
-      return std::nullopt;
+      It = FilteredKernels.try_emplace(StaticHash, FilteredKernel{KernelName})
+               .first;
     }
-    return Policy;
+    It->second.Launches++;
+    return std::nullopt;
   }
 
   template <DeviceVendors VendorTypes>
