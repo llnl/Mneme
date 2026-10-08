@@ -90,10 +90,12 @@ public:
   }
 
   DeviceError_t rtMalloc(void **ptr, size_t size) override {
-    // Like the vendor runtimes, return no memory for an empty allocation.
+    // The runtime still initializes the device for an empty allocation.
     if (size == 0) {
-      *ptr = nullptr;
-      return MnemeDeviceRT::DeviceSuccess;
+      auto ret = Runtime.origMallocDevice(ptr, 0);
+      if (ret == MnemeDeviceRT::DeviceSuccess)
+        trackPassthroughAlloc(*ptr, 0, MnemeDeviceRT::getDeviceMallocFnName());
+      return ret;
     }
 
     initializePageManagerIfNeeded();
