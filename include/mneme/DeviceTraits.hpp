@@ -68,6 +68,14 @@ enum FuncAttributes { REGISTER_USAGE, LOCALMEM_USAGE, CONSTMEM_USAGE };
 
 template <DeviceVendors Type> struct DeviceTraits;
 
+// A null handle would make dlsym resolve Mneme's own wrappers.
+inline void *loadRTLib(const char *Name) {
+  void *Lib = dlopen(Name, RTLD_NOW);
+  if (!Lib)
+    LOG_FATAL("Could not load {}: {}", Name, dlerror());
+  return Lib;
+}
+
 #if defined(MNEME_ENABLE_HIP)
 template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceError_t = hipError_t;
@@ -82,7 +90,7 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceEvent_t = hipEvent_t;
   static constexpr auto DeviceSuccess = hipSuccess;
 
-  static inline auto *getRTLib() { return dlopen("libamdhip64.so", RTLD_NOW); }
+  static inline void *getRTLib() { return loadRTLib("libamdhip64.so"); }
   static constexpr const char *getLaunchKernelFnName() {
     return "hipLaunchKernel";
   }
@@ -404,7 +412,7 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   static constexpr auto DeviceSuccess = cudaSuccess;
   static constexpr auto DeviceDriverSuccess = CUDA_SUCCESS;
 
-  static inline auto *getRTLib() { return dlopen("libcudart.so", RTLD_NOW); }
+  static inline void *getRTLib() { return loadRTLib("libcudart.so"); }
   static constexpr const char *getLaunchKernelFnName() {
     return "cudaLaunchKernel";
   }
