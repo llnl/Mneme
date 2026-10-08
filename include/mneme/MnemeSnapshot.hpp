@@ -213,6 +213,7 @@ class KernelInstancesCollection {
   llvm::SmallVector<std::string> ModuleFiles;
   const std::string KName;
   SourceFileInfo Source;
+  bool CopySource;
 
 private:
   // Parse Proteus's serialized bitcode in a Mneme-owned LLVMContext and
@@ -285,11 +286,17 @@ public:
     return Collection;
   }
 
-  KernelInstancesCollection(const std::string &MnemeDirectory,
-                            const proteus::runtime::KernelMetadata &KInfo,
+  KernelInstancesCollection(const proteus::runtime::KernelMetadata &KInfo,
                             const KernelRecordingPolicy &Policy,
                             bool CopySource)
-      : NumRecords(0), Policy(Policy), KName(KInfo.getName()) {
+      : NumRecords(0), Policy(Policy), KName(KInfo.getName()),
+        CopySource(CopySource) {}
+
+  bool hasRecords() const { return NumRecords > 0; }
+
+  // Deferred to the first recording so unrecorded kernels write nothing.
+  void storeModule(const std::string &MnemeDirectory,
+                   const proteus::runtime::KernelMetadata &KInfo) {
     const auto &BitcodeBytes = KInfo.getBitcode();
     llvm::StringRef Bitcode(BitcodeBytes.data(), BitcodeBytes.size());
     if (Bitcode.empty())
@@ -334,11 +341,13 @@ public:
            typename DeviceTraits<VendorTypes>::DeviceStream_t)>>
   takeSnapshot(
       std::filesystem::path &MnemeDir,
-      const proteus::runtime::GlobalMetadataMap &GlobalVars,
+      const proteus::runtime::KernelMetadata &KInfo,
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream,
-      uint64_t StaticHash, EpilogueSnapshotType EpilogueType) {
+      EpilogueSnapshotType EpilogueType) {
+    const auto &GlobalVars = KInfo.getGlobals();
+    uint64_t StaticHash = KInfo.getStaticHash();
 
     auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem, Args);
     KernelInstance &Instance =
@@ -363,6 +372,8 @@ public:
     if (NumRecords >= Policy.MaxRecords)
       return std::nullopt;
 
+    if (NumRecords == 0)
+      storeModule(MnemeDir.string(), KInfo);
     NumRecords++;
 
     LOG_DEBUG("First Instance of Kernel {} with DynamicHash {}, recording ...",
@@ -453,7 +464,8 @@ public:
 
   void flush() {
     for (const auto &Entry : KernelRecords)
-      writeKernelJSON(Entry.first);
+      if (Entry.second.hasRecords())
+        writeKernelJSON(Entry.first);
   }
 
   // Only a kernel's first launch resolves its policy, because kernels that can
@@ -490,13 +502,13 @@ public:
       if (!Policy)
         return std::nullopt;
       It = KernelRecords
-               .try_emplace(StaticHash, getDir(), KInfo, *Policy, CopySource)
+               .try_emplace(StaticHash, KInfo, *Policy, CopySource)
                .first;
       LOG_INFO("Created instance");
     }
     return It->second.takeSnapshot<VendorTypes>(
-        MnemeDirectory, KInfo.getGlobals(), DeviceMemory, GridDim, BlockDim,
-        Args, SharedMem, Stream, StaticHash, EpilogueType);
+        MnemeDirectory, KInfo, DeviceMemory, GridDim, BlockDim, Args, SharedMem,
+        Stream, EpilogueType);
   }
 
   const std::string getDir() const { return MnemeDirectory.string(); }
