@@ -130,10 +130,9 @@ public:
     if (!ptr)
       return;
     PassthroughAllocs.insert(ptr);
-    LOG_DEBUG("Intercepted {} PTR:{} SIZE:{}", api, ptr, size);
-    LOG_WARN(
-        "Will not be able to replay Kernels accessing:{} (allocated by {})",
-        ptr, api);
+    LOG_DEBUG("Intercepted {} PTR:{} SIZE:{}; will not be able to replay "
+              "Kernels accessing it",
+              api, ptr, size);
   }
 
   DeviceError_t rtFree(void *ptr) override {
@@ -162,8 +161,13 @@ public:
   DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
     if (AllocatedBlobs.contains(ptr)) {
       // Mneme releases its memory right away, so first wait for the work
-      // queued on the stream that may still use it.
-      MnemeDeviceRT::DeviceStreamSynchronize(stream);
+      // queued on the stream that may still use it. The sync fails during
+      // stream capture; keep the memory then.
+      auto ret = MnemeDeviceRT::DeviceStreamSynchronize(stream);
+      if (ret != MnemeDeviceRT::DeviceSuccess) {
+        LOG_WARN("Not freeing PTR:{}: stream synchronize failed", ptr);
+        return ret;
+      }
       return rtFree(ptr);
     }
     if (ptr == nullptr || PassthroughAllocs.erase(ptr)) {
