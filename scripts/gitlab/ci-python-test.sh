@@ -52,7 +52,7 @@ if [[ "$SYS_TYPE" == "toss_4_x86_64_ib" ]]; then
   unset CUDA_VISIBLE_DEVICES
   ml load cmake/3.30
   ml load cuda/12.2.2
-  setup_conda_env "${test_dir}/miniconda3" "${MNEME_CI_LLVM_VERSION}" "${MNEME_CI_PYTHON_VERSION}"
+  setup_conda_env "${test_dir}/miniforge3" "${MNEME_CI_LLVM_VERSION}" "${MNEME_CI_PYTHON_VERSION}"
   export LLVM_INSTALL_DIR=$(llvm-config --prefix)
   export MNEME_GPU_BACKEND=cuda
 elif [[ "$SYS_TYPE" == "toss_4_x86_64_ib_cray" ]]; then

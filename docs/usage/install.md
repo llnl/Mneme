@@ -144,16 +144,16 @@ MNEME_GPU_BACKEND=hip pip install -e .
 
 NVIDIA systems do not provide a proper LLVM installation. You can install one LLVM installation by using conda:
 ```bash
-export MINICONDA_DIR=miniconda
+export MINIFORGE_DIR=miniforge
 export LLVM_VERSION=22.1.0
 PYTHON_VERSION=3.10
-mkdir -p ${MINICONDA_DIR}
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-$(uname -m).sh -O ${MINICONDA_DIR}/miniconda.sh
-bash ${MINICONDA_DIR}/miniconda.sh -b -u -p ${MINICONDA_DIR}
-rm ${MINICONDA_DIR}/miniconda.sh
-source "${MINICONDA_DIR}/etc/profile.d/conda.sh"
+mkdir -p ${MINIFORGE_DIR}
+wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh -O ${MINIFORGE_DIR}/miniforge.sh
+bash ${MINIFORGE_DIR}/miniforge.sh -b -u -p ${MINIFORGE_DIR}
+rm ${MINIFORGE_DIR}/miniforge.sh
+source "${MINIFORGE_DIR}/etc/profile.d/conda.sh"
 conda activate base
-conda create -y -n mneme -c conda-forge \
+conda create -y -n mneme --override-channels -c conda-forge \
   python=${PYTHON_VERSION} clang=${LLVM_VERSION} clangxx=${LLVM_VERSION} \
   clangdev=${LLVM_VERSION} llvmdev=${LLVM_VERSION} lit=${LLVM_VERSION} \
   gcc=12 gxx=12
