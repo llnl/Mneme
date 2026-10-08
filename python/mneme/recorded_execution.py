@@ -387,6 +387,12 @@ class RecordedExecution:
         Virtual address space size in bytes (or recording-specific unit).
     kernel_instances : dict[str, KernelInstance]
         Mapping from dynamic hash to recorded launch instance descriptor.
+    total_launches : int, optional
+        Number of times the kernel was launched during recording, or ``None``
+        for records written before launches were counted.
+    unrecorded_instances : dict[str, UnrecordedInstance], optional
+        Mapping from dynamic hash to launch configurations that were launched
+        but never snapshotted, so they cannot be replayed.
     """
 
     class KernelInstance:
@@ -475,6 +481,29 @@ class RecordedExecution:
 
             return res
 
+    @dataclass
+    class UnrecordedInstance:
+        """
+        Launch configuration that was observed but never snapshotted.
+
+        Recording leaves a configuration unrecorded when the kernel already
+        reached its maximum number of recordings or every launch with that
+        configuration was skipped.
+        """
+
+        block_dim: dim3
+        grid_dim: dim3
+        shared_mem: int
+        occ: int
+
+        def to_dict(self):
+            return {
+                "BlockDims": self.block_dim.to_dict(),
+                "GridDims": self.grid_dim.to_dict(),
+                "Occurrences": self.occ,
+                "SharedMem": self.shared_mem,
+            }
+
     def __init__(
         self,
         static_hash: str,
@@ -491,6 +520,8 @@ class RecordedExecution:
         source_md5: Optional[str] = None,
         source_line: Optional[int] = None,
         source_end_line: Optional[int] = None,
+        total_launches: Optional[int] = None,
+        unrecorded_instances: Optional[Dict[str, UnrecordedInstance]] = None,
     ):
         self.static_hash = static_hash
         self.kernel_name = kernel_name
@@ -508,6 +539,10 @@ class RecordedExecution:
         self.source_md5 = source_md5
         self.source_line = source_line
         self.source_end_line = source_end_line
+        self.total_launches = total_launches
+        self.unrecorded_instances = (
+            {} if unrecorded_instances is None else unrecorded_instances
+        )
         self._link_mod = None
 
     def __str__(self):
@@ -632,6 +667,11 @@ class RecordedExecution:
             res["SourceLine"] = self.source_line
         if self.source_end_line is not None:
             res["SourceEndLine"] = self.source_end_line
+        if self.total_launches is not None:
+            res["TotalLaunches"] = self.total_launches
+        res["UnrecordedInstances"] = {
+            k: v.to_dict() for k, v in self.unrecorded_instances.items()
+        }
         res["VASize"] = self.va_size
         res["VAddr"] = self.va_addr
         res["instances"] = {}
@@ -718,6 +758,17 @@ class RecordedExecution:
                 _resolve(inst["Epilogue"]),
             )
 
+        # Records written before launches were counted have neither field.
+        unrecorded_instances = {
+            dhash: cls.UnrecordedInstance(
+                dim3.from_dict(inst["BlockDims"]),
+                dim3.from_dict(inst["GridDims"]),
+                inst["SharedMem"],
+                inst["Occurrences"],
+            )
+            for dhash, inst in record_db.get("UnrecordedInstances", {}).items()
+        }
+
         resolved_modules = [_resolve(m) for m in record_db["Modules"]]
         for llvm_fn in resolved_modules:
             if not Path(llvm_fn).exists():
@@ -743,4 +794,6 @@ class RecordedExecution:
             source_md5=record_db.get("SourceMD5"),
             source_line=record_db.get("SourceLine"),
             source_end_line=record_db.get("SourceEndLine"),
+            total_launches=record_db.get("TotalLaunches"),
+            unrecorded_instances=unrecorded_instances,
         )
