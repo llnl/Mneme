@@ -660,9 +660,9 @@ class RecordedExecution:
             res["SourceEndLine"] = self.source_end_line
         if self.total_launches is not None:
             res["TotalLaunches"] = self.total_launches
-        res["UnrecordedInstances"] = {
-            k: v.to_dict() for k, v in self.unrecorded_instances.items()
-        }
+            res["UnrecordedInstances"] = {
+                k: v.to_dict() for k, v in self.unrecorded_instances.items()
+            }
         res["instances"] = {}
         for k, v in self.items():
             res["instances"][k] = v.to_dict(base_dir)
