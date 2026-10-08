@@ -30,15 +30,14 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-MAX: DemangledName: count_kernel()
 // CHECK-MAX: NumInstances: 1
 // CHECK-MAX: TotalLaunches: 5
-// CHECK-MAX: NumUnrecordedInstances: 1
+// CHECK-MAX: UnrecordedLaunches: 2
 // CHECK-MAX: Recorded: Grid:(1, 1, 1) Block:(32, 1, 1) SharedMem:0 Occurrences:3
-// CHECK-MAX: Unrecorded: Grid:(2, 1, 1) Block:(64, 1, 1) SharedMem:0 Occurrences:2
 
 // CHECK-SKIP-NOT: {{RecordedIR_|DeviceState|\.json}}
 
 // CHECK-SKIP-ONE: NumInstances: 2
 // CHECK-SKIP-ONE: TotalLaunches: 5
-// CHECK-SKIP-ONE: NumUnrecordedInstances: 0
+// CHECK-SKIP-ONE: UnrecordedLaunches: 0
 // CHECK-SKIP-ONE-DAG: Recorded: Grid:(1, 1, 1) Block:(32, 1, 1) SharedMem:0 Occurrences:3
 // CHECK-SKIP-ONE-DAG: Recorded: Grid:(2, 1, 1) Block:(64, 1, 1) SharedMem:0 Occurrences:2
 
@@ -46,7 +45,7 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-REGEX: DemangledName: count_kernel()
 // CHECK-REGEX: NumInstances: 2
 // CHECK-REGEX: TotalLaunches: 5
-// CHECK-REGEX: NumUnrecordedInstances: 0
+// CHECK-REGEX: UnrecordedLaunches: 0
 // CHECK-REGEX-NOT: other_kernel
 // clang-format on
 __global__ void count_kernel() {}
