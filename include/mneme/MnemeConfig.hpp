@@ -21,6 +21,7 @@ namespace mneme {
 
 enum class LogLevel { Trace, Debug, Info, Warn, Error, Critical, Off };
 enum class EpilogueSnapshotType { Bytes, Diff, Best };
+enum class FilterMode { Default, Scoped, Config };
 
 namespace config_detail {
 
@@ -58,12 +59,6 @@ inline std::optional<std::string> getEnvOrDefaultString(const char *VarName) {
     return std::nullopt;
 
   return std::string(EnvValue);
-}
-
-inline uint64_t getEnvOrDefaultIntLenient(const char *VarName,
-                                          uint64_t Default) {
-  const char *EnvValue = std::getenv(VarName);
-  return EnvValue ? static_cast<uint64_t>(std::atoi(EnvValue)) : Default;
 }
 
 inline std::optional<long> getEnvOrDefaultPageSizeGiB(const char *VarName) {
@@ -134,6 +129,38 @@ getEnvOrDefaultEpilogueSnapshotType(const char *VarName,
                            "'. Expected 'bytes', 'diff', or 'best'.");
 }
 
+inline FilterMode getFilterMode() {
+  auto Value = getEnvOrDefaultString("MNEME_FILTER_MODE");
+  if (!Value || *Value == "default")
+    return FilterMode::Default;
+  if (*Value == "scoped")
+    return FilterMode::Scoped;
+  if (*Value == "config")
+    return FilterMode::Config;
+
+  throw std::runtime_error("Invalid MNEME_FILTER_MODE value '" + *Value +
+                           "'. Expected 'default', 'scoped', or 'config'.");
+}
+
+inline void rejectDeprecatedRecordingControls() {
+  std::string Controls;
+  for (const char *Name : {"MNEME_RR_KERNELS", "MNEME_SKIP_RECORDINGS",
+                           "MNEME_MAX_RECORDINGS"}) {
+    if (std::getenv(Name)) {
+      if (!Controls.empty())
+        Controls += ", ";
+      Controls += Name;
+    }
+  }
+  
+  if (!Controls.empty())
+    throw std::runtime_error(
+        Controls + " are deprecated and no longer supported. Unset them and "
+        "use --filter-config with recording.defaults.skip/max_records and "
+        "kernel_overrides (or MNEME_FILTER_MODE=config and MNEME_FILTER_CONFIG "
+        "for direct preloading).");
+}
+
 inline bool defaultRecordingPolicy(const std::optional<int> &DistributedRank) {
   if (!DistributedRank)
     return true;
@@ -197,9 +224,8 @@ public:
 
   static Config createFromEnvironment() { return Config(); }
 
-  const std::optional<std::string> KernelRegex;
-  const uint64_t MaxRecordings;
-  const uint64_t SkipRecordings;
+  const FilterMode RecordingFilterMode;
+  const std::optional<std::string> FilterConfigPath;
   const std::optional<long> PageSizeGiB;
   const LogLevel MnemeLogLevel;
   const EpilogueSnapshotType EpilogueType;
@@ -236,11 +262,8 @@ private:
   const bool RecordingEnabledThisRank;
 
   Config()
-      : KernelRegex(config_detail::getEnvOrDefaultString("MNEME_RR_KERNELS")),
-        MaxRecordings(config_detail::getEnvOrDefaultIntLenient(
-            "MNEME_MAX_RECORDINGS", 4)),
-        SkipRecordings(config_detail::getEnvOrDefaultIntLenient(
-            "MNEME_SKIP_RECORDINGS", 0)),
+      : RecordingFilterMode(config_detail::getFilterMode()),
+        FilterConfigPath(config_detail::getEnvOrDefaultString("MNEME_FILTER_CONFIG")),
         PageSizeGiB(
             config_detail::getEnvOrDefaultPageSizeGiB("MNEME_PAGE_SIZE")),
         MnemeLogLevel(config_detail::getEnvOrDefaultLogLevel(
@@ -252,7 +275,16 @@ private:
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")),
         RecordingEnabledThisRank(
-            config_detail::computeRecordingEnabledForCurrentRank()) {}
+            config_detail::computeRecordingEnabledForCurrentRank()) {
+    
+    config_detail::rejectDeprecatedRecordingControls();
+    if (RecordingFilterMode == FilterMode::Config &&
+        (!FilterConfigPath || FilterConfigPath->empty()))
+      throw std::runtime_error("MNEME_FILTER_MODE=config requires MNEME_FILTER_CONFIG");
+    
+    if (RecordingFilterMode != FilterMode::Config && FilterConfigPath)
+      throw std::runtime_error("MNEME_FILTER_CONFIG requires MNEME_FILTER_MODE=config");
+  }
 };
 
 } // namespace mneme

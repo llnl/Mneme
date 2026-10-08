@@ -17,7 +17,7 @@ function(add_mneme target)
       )
     endif()
 
-    # Always link the annotation/runtime library so users can call mneme::annotate().
+    # Link the user runtime for annotations and recording scopes.
     if(TARGET mnemert)
       target_link_libraries(${target} PUBLIC mnemert)
     elseif(TARGET Mneme::mnemert)

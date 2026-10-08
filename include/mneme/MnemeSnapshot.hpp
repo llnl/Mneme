@@ -37,6 +37,7 @@
 #include "mneme/MnemeLLVMUtils.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeMemory.hpp"
+#include "mneme/MnemeRecordingPolicy.hpp"
 #include "mneme/MnemeSnapshotFormat.hpp"
 #include "mneme/MnemeSnapshotRecords.hpp"
 #include "mneme/MnemeUtils.hpp"
@@ -207,7 +208,7 @@ class KernelInstancesCollection {
   uint64_t VASize;
   llvm::DenseMap<uint64_t, KernelInstance> Instances;
   uint64_t NumRecords;
-  int MaxRecordings;
+  uint64_t MaxRecordings;
   llvm::SmallVector<size_t> KernelArgSizes;
   llvm::SmallVector<std::string> KernelArgNames;
   llvm::SmallVector<bool> KernelSpecializations;
@@ -290,7 +291,7 @@ public:
   KernelInstancesCollection(const std::string &MnemeDirectory, void *VAddr,
                             uint64_t VASize,
                             const proteus::runtime::KernelMetadata &KInfo,
-                            int MaxRecordings, bool CopySource)
+                            uint64_t MaxRecordings, bool CopySource)
       : VAddr(VAddr), VASize(VASize), MaxRecordings(MaxRecordings),
         NumRecords(0), KName(KInfo.getName()) {
     const auto &BitcodeBytes = KInfo.getBitcode();
@@ -327,37 +328,40 @@ public:
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream,
-      uint64_t StaticHash, EpilogueSnapshotType EpilogueType) {
+      uint64_t StaticHash, EpilogueSnapshotType EpilogueType,
+      uint64_t LaunchNumber, Deduplication Dedup) {
 
     if (NumRecords >= MaxRecordings)
       return std::nullopt;
 
-    auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem, Args);
+    auto InstanceID = Dedup == Deduplication::Invocations
+                           ? LaunchNumber
+                           : computeHash(GridDim, BlockDim, SharedMem, Args);
 
-    if (Instances.contains(DynamicHash)) {
-      Instances[DynamicHash].NumOccurrences++;
+    if (Instances.contains(InstanceID)) {
+      Instances[InstanceID].NumOccurrences++;
       LOG_DEBUG(
-          "Kernel {} with DynamicHash {} is already recorded, skipping ...",
-          StaticHash, DynamicHash);
+          "Kernel {} with InstanceID {} is already recorded, skipping ...",
+          StaticHash, InstanceID);
       return std::nullopt;
     }
 
     NumRecords++;
 
-    LOG_DEBUG("First Instance of Kernel {} with DynamicHash {}, recording ...",
-              StaticHash, DynamicHash);
+    LOG_DEBUG("First Instance of Kernel {} with InstanceID {}, recording ...",
+              StaticHash, InstanceID);
 
     Instances.insert(
-        {DynamicHash, KernelInstance(GridDim, BlockDim, SharedMem, Args)});
+        {InstanceID, KernelInstance(GridDim, BlockDim, SharedMem, Args)});
     std::filesystem::path Filename(MnemeDir /
                                    (std::string("DeviceState.prologue.") +
                                     std::to_string(StaticHash) + "." +
-                                    std::to_string(DynamicHash) + ".mneme"));
+                                    std::to_string(InstanceID) + ".mneme"));
 
     auto PrologueGlobals = std::make_shared<GlobalSnapshotData>();
     SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory, KernelArgSizes,
                                   Args, Stream};
-    Instances[DynamicHash].PrologueFn =
+    Instances[InstanceID].PrologueFn =
         BytesWriter<VendorTypes>(PrologueGlobals).write(Filename, In).string();
 
     // std::function requires a copyable callable, so the writer is shared.
@@ -368,7 +372,7 @@ public:
                        void **,
                        typename DeviceTraits<VendorTypes>::DeviceStream_t)>
         CaptureEpilogue =
-            [this, DynamicHash, StaticHash, MnemeDir, GlobalVars, Writer](
+            [this, InstanceID, StaticHash, MnemeDir, GlobalVars, Writer](
                 llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>>
                     &DeviceMemory,
                 void **Args,
@@ -376,11 +380,11 @@ public:
               std::filesystem::path Filename(
                   MnemeDir / (std::string("DeviceState.epilogue.") +
                               std::to_string(StaticHash) + "." +
-                              std::to_string(DynamicHash) + ".mneme"));
+                              std::to_string(InstanceID) + ".mneme"));
 
               SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory,
                                             KernelArgSizes, Args, Stream};
-              Instances[DynamicHash].EpilogueFn =
+              Instances[InstanceID].EpilogueFn =
                   Writer->write(Filename, In).string();
             };
     return CaptureEpilogue;
@@ -389,28 +393,20 @@ public:
 
 class RecordDatabase {
   std::filesystem::path MnemeDirectory;
-  std::regex KernelWhiteList;
-  std::string RegexStr;
-  bool HasRegex;
   llvm::DenseMap<uint64_t, KernelInstancesCollection> KernelRecords;
-  llvm::DenseMap<uint64_t, uint64_t> KernelLaunchCounts;
-  uint64_t MaxRecordings;
-  uint64_t SkipRecordings;
+  struct KernelLaunchState {
+    KernelRecordingPolicy Policy;
+    uint64_t Count = 0;
+  };
+  llvm::DenseMap<uint64_t, KernelLaunchState> KernelLaunches;
   EpilogueSnapshotType EpilogueType;
   bool CopySource;
 
 public:
-  RecordDatabase() : KernelWhiteList(""), HasRegex(false) {
+  RecordDatabase() {
     const auto &Conf = Config::get();
-    if (Conf.KernelRegex) {
-      HasRegex = true;
-      RegexStr = *Conf.KernelRegex;
-      KernelWhiteList = RegexStr;
-    }
 
     MnemeDirectory = Conf.getDataDirectory();
-    MaxRecordings = Conf.MaxRecordings;
-    SkipRecordings = Conf.SkipRecordings;
     EpilogueType = Conf.EpilogueType;
     CopySource = Conf.CopySource;
   }
@@ -442,19 +438,6 @@ public:
     }
   }
 
-  bool shouldRecord(const std::string &KernelName) const {
-    if (!HasRegex)
-      return true;
-
-    try {
-      return std::regex_search(KernelName, KernelWhiteList) ||
-             std::regex_search(llvm::demangle(KernelName), KernelWhiteList);
-    } catch (const std::regex_error &e) {
-      LOG_WARN("Invalid regex: {}, ... falling back and recording everything");
-    }
-    return true;
-  }
-
   template <DeviceVendors VendorTypes>
   std::optional<std::function<
       void(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &, void **,
@@ -465,27 +448,30 @@ public:
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
-    if (!shouldRecord(KInfo.getName())) {
-      LOG_INFO("Skip record of Kernel");
-      return std::nullopt;
-    }
-
+    
     auto StaticHash = KInfo.getStaticHash();
-    uint64_t &LaunchCount = KernelLaunchCounts[StaticHash];
-    LaunchCount++;
-    if (LaunchCount <= SkipRecordings) {
-      LOG_DEBUG("Skipping recording {} of {} for kernel {}", LaunchCount,
-                SkipRecordings, KInfo.getName());
-      return std::nullopt;
+    auto [StateIt, Inserted] = KernelLaunches.try_emplace(StaticHash);
+    auto &State = StateIt->second;
+    if (Inserted) {
+      // Match the same original name displayed in the recording database.
+      auto Name = KInfo.getName();
+      auto Pos = Name.find("__intern__");
+      State.Policy = RecordingPolicy::get().resolve(
+          llvm::demangle(Name.substr(0, Pos)));
     }
+    
+    ++State.Count;
+    if (!State.Policy.selects(State.Count))
+      return std::nullopt;
 
     auto IT = KernelRecords.try_emplace(StaticHash, getDir(), VAddr, VASize,
-                                        KInfo, MaxRecordings, CopySource);
+                                        KInfo, State.Policy.MaxRecords, CopySource);
     if (IT.second)
       LOG_INFO("Created instance");
     return IT.first->second.takeSnapshot<VendorTypes>(
         MnemeDirectory, KInfo.getGlobals(), DeviceMemory, GridDim, BlockDim,
-        Args, SharedMem, Stream, StaticHash, EpilogueType);
+        Args, SharedMem, Stream, StaticHash, EpilogueType, State.Count,
+        RecordingPolicy::get().deduplication());
   }
 
   const std::string getDir() const { return MnemeDirectory.string(); }

@@ -33,7 +33,7 @@ public:
   MnemeRecorder& operator=(MnemeRecorder&&) = delete;
 
   MnemeRecorder() {
-    if (Config::get().isRecordingEnabledForCurrentRank())
+    if (RecordingPolicy::get().isRecordingEnabledForCurrentRank())
       Backend = new RecordingBackend<VendorTypes>();
     else
       Backend = &getStaticNullRecorder();

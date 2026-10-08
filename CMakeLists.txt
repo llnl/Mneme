@@ -183,6 +183,7 @@ install(TARGETS ${_mneme_targets}
   RUNTIME DESTINATION "${_mneme_libdir}"
   ARCHIVE DESTINATION "${_mneme_libdir}")
 install(FILES "${PROJECT_SOURCE_DIR}/include/mneme/MnemeAnnotation.hpp"
+  "${PROJECT_SOURCE_DIR}/include/mneme/MnemeRecordScope.hpp"
   DESTINATION "${_mneme_incdir}/mneme")
 install(EXPORT mnemeTargets
   FILE mnemeTargets.cmake

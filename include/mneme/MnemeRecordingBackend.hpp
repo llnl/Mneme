@@ -4,6 +4,7 @@
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeMemory.hpp"
 #include "mneme/MnemePageManager.hpp"
+#include "mneme/MnemeRecordScope.hpp"
 #include "mneme/MnemeRecorderBackend.hpp"
 #include "mneme/MnemeSnapshot.hpp"
 
@@ -142,6 +143,11 @@ public:
                                void **Args, size_t SharedMem,
                                DeviceStream_t Stream) override {
     initializePageManagerIfNeeded();
+
+    if (Config::get().RecordingFilterMode == FilterMode::Scoped &&
+        !detail::scopeAllowsRecording(func))
+      return Runtime.origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
+                                      Stream);
 
     // NOTE: Here we do something conceptually different. We no longer go
     // through proteus. We call immediately the vendor launcher. Thus we avoid

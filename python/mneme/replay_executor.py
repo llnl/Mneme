@@ -62,7 +62,7 @@ def noop_verifies_warning(record_id: str) -> str:
     return (
         f"Warning: the recorded input of record {record_id} already matches its "
         "recorded output, so a kernel that does nothing would pass verification. "
-        "Consider re-recording with --per-kernel-skip-recordings or using a "
+        "Consider re-recording with --filter-config and a skip policy, or using a "
         "different record id."
     )
 
