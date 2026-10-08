@@ -118,7 +118,7 @@ To override the default, pass `--record-ranks`:
 
 !!! note
     Mneme may record multiple instances of the same kernel if it is invoked with different dynamic execution contexts. The `--per-kernel-max-recordings` option can be used to limit this behavior.
-    Launches that are skipped or exceed the limit are still counted in the kernel's database, under `TotalLaunches` and the `Occurrences` of each launch configuration.
+    Launches that are skipped or exceed the limit are still counted in the kernel's database, under `TotalLaunches` and the `Occurrences` of each recorded launch configuration.
 
 !!! note
     The virtual address space size should be chosen large enough to accommodate all device allocations performed by the application during kernel execution

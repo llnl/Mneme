@@ -61,19 +61,15 @@ struct KernelInstance {
     return JSONDim;
   }
   bool isRecorded() const { return !PrologueFn.empty(); }
-  llvm::json::Object launchToJSON() const {
-    llvm::json::Object Launch;
-    Launch["BlockDims"] = KernelInstance::toJSON(BlockDim);
-    Launch["GridDims"] = KernelInstance::toJSON(GridDim);
-    Launch["SharedMem"] = SharedMem;
-    Launch["Occurrences"] = NumOccurrences;
-    return Launch;
-  }
   llvm::json::Object toJSON() const {
-    llvm::json::Object instance = launchToJSON();
+    llvm::json::Object instance;
     instance["Prologue"] = PrologueFn;
     instance["Epilogue"] = EpilogueFn;
+    instance["BlockDims"] = KernelInstance::toJSON(BlockDim);
+    instance["GridDims"] = KernelInstance::toJSON(GridDim);
+    instance["SharedMem"] = SharedMem;
     instance["Args"] = llvm::json::Array(ArgValues);
+    instance["Occurrences"] = NumOccurrences;
     return instance;
   }
   KernelInstance(const dim3 &GridDim, const dim3 &BlockDim, uint64_t SharedMem)
@@ -289,15 +285,10 @@ public:
     Source.addToJSON(Collection);
     Collection["TotalLaunches"] = TotalLaunches;
     llvm::json::Object JSONInstances;
-    llvm::json::Object JSONUnrecorded;
-    for (auto &[hash, KI] : Instances) {
+    for (auto &[hash, KI] : Instances)
       if (KI.isRecorded())
         JSONInstances[std::to_string(hash)] = KI.toJSON();
-      else
-        JSONUnrecorded[std::to_string(hash)] = KI.launchToJSON();
-    }
     Collection["instances"] = std::move(JSONInstances);
-    Collection["UnrecordedInstances"] = std::move(JSONUnrecorded);
     return Collection;
   }
 
@@ -353,13 +344,22 @@ public:
     uint64_t StaticHash = KInfo.getStaticHash();
 
     auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem, Args);
-    KernelInstance &Instance =
-        Instances.try_emplace(DynamicHash, GridDim, BlockDim, SharedMem)
-            .first->second;
-    Instance.NumOccurrences++;
     TotalLaunches++;
+    bool Skipping = TotalLaunches <= SkipRecordings;
 
-    if (TotalLaunches <= SkipRecordings) {
+    auto It = Instances.find(DynamicHash);
+    if (It == Instances.end()) {
+      // A new launch configuration past the limit can never be recorded, so
+      // it is only counted in TotalLaunches and the map stays bounded.
+      if (!Skipping && NumRecords >= MaxRecordings)
+        return std::nullopt;
+      It = Instances.try_emplace(DynamicHash, GridDim, BlockDim, SharedMem)
+               .first;
+    }
+    KernelInstance &Instance = It->second;
+    Instance.NumOccurrences++;
+
+    if (Skipping) {
       LOG_DEBUG("Skipping recording {} of {} for kernel {}", TotalLaunches,
                 SkipRecordings, KName);
       return std::nullopt;
