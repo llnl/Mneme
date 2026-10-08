@@ -747,4 +747,15 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
 #else
 #endif
 
+// The vendor runtime's own implementation of a function that Mneme intercepts.
+// Calling the function by name from Mneme would call Mneme's wrapper instead.
+template <DeviceVendors Vendor, typename FnT>
+FnT getRuntimeFn(const char *Name) {
+  static void *RTLib = DeviceTraits<Vendor>::getRTLib();
+  auto Fn = reinterpret_cast<FnT>(dlsym(RTLib, Name));
+  if (!Fn)
+    LOG_FATAL("Could not find {} in the device runtime", Name);
+  return Fn;
+}
+
 } // namespace mneme

@@ -37,15 +37,6 @@ public:
   }
 };
 
-// The CUDA runtime's own implementation of an intercepted function.
-template <typename FnT> static FnT getOrigFn(const char *Name) {
-  static void *RTLib = DeviceTraits<DeviceVendors::CUDA>::getRTLib();
-  auto Fn = reinterpret_cast<FnT>(dlsym(RTLib, Name));
-  if (!Fn)
-    LOG_FATAL("Could not find {} in the CUDA runtime", Name);
-  return Fn;
-}
-
 // Mneme serves only cudaMalloc. Other allocation functions go to the CUDA
 // runtime, and their pointers are tracked so that cudaFree forwards them.
 static void trackAlloc(void *Ptr, size_t Size, const char *Api) {
@@ -97,7 +88,8 @@ cudaError_t cudaHostAlloc(void **ptr, size_t size, unsigned int flags) {
 
 cudaError_t cudaMallocHost(void **ptr, size_t size) {
   static auto Orig =
-      getOrigFn<cudaError_t (*)(void **, size_t)>("cudaMallocHost");
+      getRuntimeFn<DeviceVendors::CUDA, cudaError_t (*)(void **, size_t)>(
+          "cudaMallocHost");
   auto ret = Orig(ptr, size);
   if (ret == cudaSuccess)
     trackAlloc(*ptr, size, "cudaMallocHost");
@@ -107,7 +99,8 @@ cudaError_t cudaMallocHost(void **ptr, size_t size) {
 cudaError_t cudaMallocPitch(void **devPtr, size_t *pitch, size_t width,
                             size_t height) {
   static auto Orig =
-      getOrigFn<cudaError_t (*)(void **, size_t *, size_t, size_t)>(
+      getRuntimeFn<DeviceVendors::CUDA,
+                   cudaError_t (*)(void **, size_t *, size_t, size_t)>(
           "cudaMallocPitch");
   auto ret = Orig(devPtr, pitch, width, height);
   if (ret == cudaSuccess)
@@ -117,7 +110,9 @@ cudaError_t cudaMallocPitch(void **devPtr, size_t *pitch, size_t width,
 
 cudaError_t cudaMalloc3D(cudaPitchedPtr *pitchedDevPtr, cudaExtent extent) {
   static auto Orig =
-      getOrigFn<cudaError_t (*)(cudaPitchedPtr *, cudaExtent)>("cudaMalloc3D");
+      getRuntimeFn<DeviceVendors::CUDA,
+                   cudaError_t (*)(cudaPitchedPtr *, cudaExtent)>(
+          "cudaMalloc3D");
   auto ret = Orig(pitchedDevPtr, extent);
   if (ret == cudaSuccess)
     trackAlloc(pitchedDevPtr->ptr,
@@ -127,21 +122,23 @@ cudaError_t cudaMalloc3D(cudaPitchedPtr *pitchedDevPtr, cudaExtent extent) {
 }
 
 cudaError_t cudaMallocAsync(void **devPtr, size_t size, cudaStream_t hStream) {
-  static auto Orig = getOrigFn<MallocAsyncFn>("cudaMallocAsync");
+  static auto Orig =
+      getRuntimeFn<DeviceVendors::CUDA, MallocAsyncFn>("cudaMallocAsync");
   return mallocAsync(Orig, "cudaMallocAsync", devPtr, size, hStream);
 }
 
 cudaError_t cudaMallocAsync_ptsz(void **devPtr, size_t size,
                                  cudaStream_t hStream) {
-  static auto Orig = getOrigFn<MallocAsyncFn>("cudaMallocAsync_ptsz");
+  static auto Orig =
+      getRuntimeFn<DeviceVendors::CUDA, MallocAsyncFn>("cudaMallocAsync_ptsz");
   return mallocAsync(Orig, "cudaMallocAsync", devPtr, size, hStream);
 }
 
 cudaError_t cudaMallocFromPoolAsync(void **ptr, size_t size,
                                     cudaMemPool_t memPool,
                                     cudaStream_t stream) {
-  static auto Orig =
-      getOrigFn<MallocFromPoolAsyncFn>("cudaMallocFromPoolAsync");
+  static auto Orig = getRuntimeFn<DeviceVendors::CUDA, MallocFromPoolAsyncFn>(
+      "cudaMallocFromPoolAsync");
   return mallocFromPoolAsync(Orig, "cudaMallocFromPoolAsync", ptr, size,
                              memPool, stream);
 }
@@ -149,8 +146,8 @@ cudaError_t cudaMallocFromPoolAsync(void **ptr, size_t size,
 cudaError_t cudaMallocFromPoolAsync_ptsz(void **ptr, size_t size,
                                          cudaMemPool_t memPool,
                                          cudaStream_t stream) {
-  static auto Orig =
-      getOrigFn<MallocFromPoolAsyncFn>("cudaMallocFromPoolAsync_ptsz");
+  static auto Orig = getRuntimeFn<DeviceVendors::CUDA, MallocFromPoolAsyncFn>(
+      "cudaMallocFromPoolAsync_ptsz");
   return mallocFromPoolAsync(Orig, "cudaMallocFromPoolAsync", ptr, size,
                              memPool, stream);
 }
