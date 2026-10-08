@@ -121,11 +121,6 @@ To override the default, pass `--record-ranks`:
     Launches that are skipped or exceed the limit are still counted in the kernel's database, under `TotalLaunches` and the `Occurrences` of each launch configuration.
 
 !!! note
-    To record only some kernels, set `MNEME_RR_KERNELS` to a regular expression before running `mneme record`.
-    Kernels for which neither the mangled nor the demangled name matches are not recorded; their launch counts are written to `FilteredKernels.jsonl` in the record directory.
-    See [Usage → Artifacts](artifacts.md#filtered-kernels).
-
-!!! note
     The virtual address space size should be chosen large enough to accommodate all device allocations performed by the application during kernel execution
 
 !!! note

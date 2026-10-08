@@ -18,7 +18,6 @@ Mneme generates files of the following types:
 1. *Record Database*: A JSON file describing the recorded kernel and associates metadata
 2. *GPU device memory state*: Binary blobs describing the memory state of the GPU
 3. *LLVM IR*: File(s) containing the LLVM IR of the recorded kernel(s).
-4. *Filtered kernels summary*: `FilteredKernels.jsonl`, written only when `MNEME_RR_KERNELS` excludes at least one launched kernel (see [Filtered kernels](#filtered-kernels)).
 
 ---
 
@@ -112,22 +111,6 @@ executions are identified by distinct *dynamic hashes*. Every *dynamic hash* is 
 
 These instance identifiers are used directly by the mneme replay command
 via the -rid option.
-
----
-
-## Filtered kernels
-
-When `MNEME_RR_KERNELS` is set, kernels for which neither the mangled nor the
-demangled name matches the regular expression are not recorded and get no database.
-Instead, Mneme writes `FilteredKernels.jsonl` to the record directory at exit,
-with one JSON object per filtered kernel:
-
-```json
-{"DemangledName":"other_kernel()","KernelName":"_Z12other_kernelv","Launches":4,"StaticHash":1689042410853448830}
-```
-
-The file uses the `.jsonl` extension so that it is not mistaken for a
-recording database by tools that look for `*.json` files.
 
 ---
 ## GPU Device Memory State
