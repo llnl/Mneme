@@ -223,11 +223,21 @@ class Record:
             help="Path to directory to store the recorded database(s) and memory snapshots",
         )
         parser.add_argument(
+            "--chunk-size",
+            default=None,
+            help=(
+                "Device memory Mneme maps at once and packs allocations into, "
+                "as bytes or with a suffix such as 64MB or 4GB, where MB "
+                "means MiB (a multiple of 2 MiB; default 4GB). Sets MNEME_CHUNK_SIZE."
+            ),
+        )
+        # Ignored; kept so existing scripts still parse.
+        parser.add_argument(
             "-vass",
             "--virtual-address-space-size",
             type=int,
-            default=4,
-            help="Size (in GigaBytes) of virtual address space to be allocatd by mneme.",
+            default=None,
+            help=argparse.SUPPRESS,
         )
 
         parser.add_argument(
@@ -288,8 +298,16 @@ class Record:
         librecord_path = utils.get_mneme_record_library_name()
         logger.debug(f"LD_PRELOAD={librecord_path}")
         record_env["LD_PRELOAD"] = librecord_path
-        logger.debug(f"MNEME_PAGE_SIZE={args.virtual_address_space_size}")
-        record_env["MNEME_PAGE_SIZE"] = str(args.virtual_address_space_size)
+        if args.virtual_address_space_size is not None:
+            print(
+                "mneme: warning: -vass is deprecated and ignored. Mneme no "
+                "longer reserves a fixed address space; it maps device memory "
+                "on demand in chunks. Use --chunk-size to set the chunk size.",
+                file=sys.stderr,
+            )
+        if args.chunk_size is not None:
+            logger.debug(f"MNEME_CHUNK_SIZE={args.chunk_size}")
+            record_env["MNEME_CHUNK_SIZE"] = args.chunk_size
         logger.debug(f"MNEME_MAX_RECORDINGS={args.per_kernel_max_recordings}")
         record_env["MNEME_MAX_RECORDINGS"] = str(args.per_kernel_max_recordings)
         logger.debug(f"MNEME_SKIP_RECORDINGS={args.per_kernel_skip_recordings}")

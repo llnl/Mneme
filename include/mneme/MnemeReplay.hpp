@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <cstdint>
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -7,13 +9,15 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeMemory.hpp"
-#include "mneme/MnemePageManager.hpp"
 #include "mneme/MnemeSnapshot.hpp"
 #include "mneme/MnemeUtils.hpp"
+#include "mneme/MnemeVASpace.hpp"
 
 namespace mneme {
 
@@ -159,25 +163,84 @@ public:
 // Replay state for the recorded kernel input.
 template <DeviceVendors VendorTypes>
 class PrologueState : public ReplayMemState<VendorTypes> {
+  using MnemeDeviceRT = DeviceTraits<VendorTypes>;
+  using Blob = MnemeMemoryBlob<VendorTypes>;
+
 public:
   PrologueState(const std::string &KernelName, const std::string &SnapshotFile)
       : ReplayMemState<VendorTypes>(
             BaseSnapshotSource<VendorTypes>(SnapshotFile).load(KernelName)) {}
 
+  // Maps every blob at its recorded address. Blobs closer than a large page
+  // share one mapping, owned by the lowest blob and rounded to whole driver VA
+  // blocks, or to pages if the blocks do not fit.
   void load() override {
-    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState) {
-      auto EC = DeviceTraits<VendorTypes>::DeviceErrorCheck(
-          MemBlob.map(DevAddr, MemBlob.getActualSize(), MemBlob.getSize()));
-      if (EC)
-        LOG_FATAL("Error raised during mapping prologue memeory:" + EC.value());
+    std::vector<std::pair<uintptr_t, Blob *>> Blobs;
+    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
+      Blobs.emplace_back(reinterpret_cast<uintptr_t>(DevAddr), &MemBlob);
+    llvm::sort(Blobs, llvm::less_first());
 
-      if (DevAddr != reinterpret_cast<void *>(MemBlob.getBlobAddr()))
-        LOG_FATAL("Could not map Record Address " +
-                  util::pointerToHexString(DevAddr) +
-                  " instead ReplayInstance got " +
-                  util::pointerToHexString(
-                      static_cast<uint8_t *>(MemBlob.getBlobAddr())) +
-                  "\n");
+    int DeviceID = 0;
+    MnemeDeviceRT::getDevice(DeviceID);
+    uint64_t PageSize = MnemeDeviceRT::getMinPageSize(DeviceID);
+    uint64_t BlockSize = std::max(PageSize, MnemeDeviceRT::VABlockSize);
+    uint64_t Unit = BlockSize;
+    auto StartOf = [&](size_t I) { return Blobs[I].first & ~(Unit - 1); };
+    auto EndOf = [&](size_t I) {
+      return util::roundUp(Blobs[I].first + Blobs[I].second->getActualSize(),
+                           Unit);
+    };
+    // Blobs [I, J) within Slack of each other's Unit-rounded ranges, and their
+    // rounded end.
+    auto Group = [&](size_t I, size_t Limit, uint64_t Slack) {
+      uintptr_t End = EndOf(I);
+      size_t J = I + 1;
+      for (; J < Limit && StartOf(J) <= End + Slack; ++J)
+        End = std::max(End, EndOf(J));
+      return std::make_pair(J, End);
+    };
+    auto MapGroup = [&](size_t I, size_t J, uintptr_t End) {
+      uintptr_t Start = StartOf(I);
+      if (End > Start) {
+        uint64_t Size = End - Start;
+        auto Status = Blobs[I].second->mapFixed(
+            reinterpret_cast<void *>(Blobs[I].first),
+            reinterpret_cast<void *>(Start), Size,
+            util::mapAlignment(Start, Size, PageSize), DeviceID);
+        if (Status != MapStatus::Mapped)
+          return Status;
+        ++I;
+      }
+      for (size_t K = I; K < J; ++K)
+        Blobs[K].second->mapInto(reinterpret_cast<void *>(Blobs[K].first));
+      return MapStatus::Mapped;
+    };
+
+    for (size_t I = 0, N = Blobs.size(); I < N;) {
+      auto [J, End] = Group(I, N, util::LargePageSize);
+      if (J - I > 1 && MapGroup(I, J, End) == MapStatus::Mapped) {
+        I = J;
+        continue;
+      }
+      // Something may live between the blobs; map only blobs sharing pages.
+      for (size_t K = I; K < J;) {
+        auto [L, E] = Group(K, J, 0);
+        auto Status = MapGroup(K, L, E);
+        if (Status != MapStatus::Mapped && Unit != PageSize) {
+          Unit = PageSize;
+          continue;
+        }
+        if (Status != MapStatus::Mapped)
+          LOG_FATAL("Cannot map recorded range {}-{}: {}\n{}",
+                    reinterpret_cast<void *>(StartOf(K)),
+                    reinterpret_cast<void *>(E),
+                    Status == MapStatus::Occupied ? "occupied"
+                                                  : "out of memory",
+                    util::getMappingsIn(StartOf(K), E));
+        K = L;
+        Unit = BlockSize;
+      }
+      I = J;
     }
 
     this->copyToDevice();

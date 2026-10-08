@@ -1,8 +1,9 @@
 #pragma once
 #include <dlfcn.h>
 #include <optional>
+#include <unordered_map>
+#include <vector>
 
-#include "mneme/MnemeConfig.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeUtils.hpp"
 
@@ -66,6 +67,8 @@ enum DeviceVendors { HIP, CUDA };
 
 enum FuncAttributes { REGISTER_USAGE, LOCALMEM_USAGE, CONSTMEM_USAGE };
 
+enum class MapStatus { Mapped, Occupied, OutOfMemory };
+
 template <DeviceVendors Type> struct DeviceTraits;
 
 #if defined(MNEME_ENABLE_HIP)
@@ -81,6 +84,9 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceFunction_t = hipFunction_t;
   using DeviceEvent_t = hipEvent_t;
   static constexpr auto DeviceSuccess = hipSuccess;
+  static constexpr auto DeviceOutOfMemory = hipErrorOutOfMemory;
+  // Unit that device address reservations should cover; none on HIP.
+  static constexpr uint64_t VABlockSize = 1;
 
   static inline auto *getRTLib() { return dlopen("libamdhip64.so", RTLD_NOW); }
   static constexpr const char *getLaunchKernelFnName() {
@@ -236,24 +242,6 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return hipMemcpyDeviceToHost;
   }
 
-  static void mmap(hipMemGenericAllocationHandle_t &MHandle, void *Addr,
-                   uint64_t Size, int DeviceID) {
-    hipMemAllocationProp Prop = {};
-    Prop.type = hipMemAllocationTypePinned;
-    Prop.location.type = hipMemLocationTypeDevice;
-    Prop.location.id = DeviceID;
-    hipErrCheck(hipMemCreate(&MHandle, Size, &Prop, 0));
-    hipErrCheck(hipMemMap((void *)Addr, Size, 0, MHandle, 0));
-
-    hipMemAccessDesc ADesc = {};
-    ADesc.location.type = hipMemLocationTypeDevice;
-    ADesc.location.id = DeviceID;
-    ADesc.flags = hipMemAccessFlagsProtReadWrite;
-
-    hipErrCheck(hipMemSetAccess(Addr, Size, &ADesc, 1));
-    grantHostAccess(Addr, Size, DeviceID);
-  }
-
   // On integrated GPUs, applications expect device memory to be
   // host-accessible, but VMM mappings are GPU-only by default. Grant the CPU
   // access through ROCr, since hipMemSetAccess may ignore host locations.
@@ -291,32 +279,79 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return getPageSize(DeviceID, hipMemAllocationGranularityMinimum);
   }
 
-  static void *getVirtualAddress(uint64_t Size, void *VA, uint64_t Alignment) {
-    hipDeviceptr_t devPtr = 0;
-
-    hipErrCheck(hipMemAddressReserve(&devPtr, Size, Alignment,
-                                     reinterpret_cast<hipDeviceptr_t>(VA), 0));
-    return (void *)devPtr;
+  // Before ROCm 6.4.2 (HIP 60443484) hipMemRelease never returns memory to the
+  // device, so there unmapped handles are kept and reused for the same size.
+  // Leaked so blobs released during static destruction can still use it.
+  static std::vector<hipMemGenericAllocationHandle_t> &
+  freeHandles(uint64_t Size) {
+    static auto *Pool = new std::unordered_map<
+        uint64_t, std::vector<hipMemGenericAllocationHandle_t>>();
+    return (*Pool)[Size];
   }
 
-  static void unmap(hipMemGenericAllocationHandle_t &MHandle, void *Addr,
-                    uintptr_t Size) {
-    LOG_DEBUG("Unmapping Addr:{} SIZE:{}", Addr, Size);
-    hipErrCheck(hipMemUnmap(Addr, Size));
-    hipErrCheck(hipMemRelease(MHandle));
+  static void releaseHandle(uint64_t Size, hipMemGenericAllocationHandle_t H) {
+    static const bool ReleaseLeaks = [] {
+      int Version = 0;
+      (void)hipRuntimeGetVersion(&Version);
+      return Version < 60443484;
+    }();
+    if (ReleaseLeaks)
+      freeHandles(Size).push_back(H);
+    else
+      (void)hipMemRelease(H);
   }
 
-  static size_t getFixedMemorySize() {
-    static uint64_t PageSize{Config::get().getPageSizeBytesOrDefault(64)};
-    return PageSize;
-  }
-
-  static void freeVirtualAddress(void *Addr, size_t Size) {
-    LOG_DEBUG("Releasing Device Virtual Address Pages:{} Size:{}", Addr, Size);
-    auto EC = DeviceErrorCheck(hipMemAddressFree(Addr, Size));
-    if (EC) {
-      LOG_FATAL("Could not release VA addresses " + EC.value());
+  // The driver treats Addr as a hint, so a reservation elsewhere is Occupied.
+  static MapStatus mapFixed(void *Addr, uint64_t Size, uint64_t Alignment,
+                            int DeviceID, hipMemGenericAllocationHandle_t &H) {
+    void *Got = nullptr;
+    if (hipMemAddressReserve(&Got, Size, Alignment, Addr, 0) != hipSuccess)
+      return MapStatus::Occupied;
+    if (Got != Addr) {
+      (void)hipMemAddressFree(Got, Size);
+      return MapStatus::Occupied;
     }
+
+    auto &Free = freeHandles(Size);
+    if (!Free.empty()) {
+      H = Free.back();
+      Free.pop_back();
+    } else {
+      hipMemAllocationProp Prop = {};
+      Prop.type = hipMemAllocationTypePinned;
+      Prop.location.type = hipMemLocationTypeDevice;
+      Prop.location.id = DeviceID;
+      if (hipMemCreate(&H, Size, &Prop, 0) != hipSuccess) {
+        (void)hipMemAddressFree(Addr, Size);
+        return MapStatus::OutOfMemory;
+      }
+    }
+
+    hipMemAccessDesc ADesc = {};
+    ADesc.location.type = hipMemLocationTypeDevice;
+    ADesc.location.id = DeviceID;
+    ADesc.flags = hipMemAccessFlagsProtReadWrite;
+    if (hipMemMap(Addr, Size, 0, H, 0) == hipSuccess) {
+      if (hipMemSetAccess(Addr, Size, &ADesc, 1) == hipSuccess) {
+        grantHostAccess(Addr, Size, DeviceID);
+        return MapStatus::Mapped;
+      }
+      (void)hipMemUnmap(Addr, Size);
+    }
+    releaseHandle(Size, H);
+    (void)hipMemAddressFree(Addr, Size);
+    return MapStatus::OutOfMemory;
+  }
+
+  static void unmapFixed(void *Addr, uint64_t Size,
+                         hipMemGenericAllocationHandle_t H) {
+    auto EC = DeviceErrorCheck(hipMemUnmap(Addr, Size));
+    if (!EC) {
+      releaseHandle(Size, H);
+      EC = DeviceErrorCheck(hipMemAddressFree(Addr, Size));
+    }
+    if (EC)
+      LOG_WARN("Could not unmap {}: {}", Addr, *EC);
   }
 
   static hipError_t DeviceStreamCreate(hipStream_t *Stream) {
@@ -402,6 +437,11 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   using DeviceEvent_t = cudaEvent_t;
   static constexpr auto DeviceSuccess = cudaSuccess;
   static constexpr auto DeviceDriverSuccess = CUDA_SUCCESS;
+  static constexpr auto DeviceOutOfMemory = cudaErrorMemoryAllocation;
+  // The driver reserves address space in 32 MiB blocks and puts its own
+  // allocations in the unreserved part of a block, which then stays reserved
+  // after we free ours. Reservations should cover whole blocks.
+  static constexpr uint64_t VABlockSize = 32ULL << 20;
 
   static inline auto *getRTLib() { return dlopen("libcudart.so", RTLD_NOW); }
   static constexpr const char *getLaunchKernelFnName() {
@@ -608,66 +648,55 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
     return cudaMemcpyDeviceToHost;
   }
 
-  static void mmap(MemoryAllocationHandle_t &MHandle, void *Addr,
-                   uintptr_t Size, int DeviceID) {
+  static uint64_t getMinPageSize(int DeviceID) {
+    return getPageSize(DeviceID, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+  }
+
+  // The driver treats Addr as a hint, so a reservation elsewhere is Occupied.
+  static MapStatus mapFixed(void *Addr, uint64_t Size, uint64_t Alignment,
+                            int DeviceID, MemoryAllocationHandle_t &H) {
+    DevicePtr_t Want = reinterpret_cast<DevicePtr_t>(Addr);
+    DevicePtr_t Got = 0;
+    if (cuMemAddressReserve(&Got, Size, Alignment, Want, 0) != CUDA_SUCCESS)
+      return MapStatus::Occupied;
+    if (Got != Want) {
+      (void)cuMemAddressFree(Got, Size);
+      return MapStatus::Occupied;
+    }
+
     CUmemAllocationProp Prop = {};
     Prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     Prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     Prop.location.id = DeviceID;
-    auto EC = DeviceErrorCheck(cuMemCreate(&MHandle, Size, &Prop, 0));
-    if (EC)
-      LOG_FATAL("Cannot create memory handle\nEC:" + EC.value());
-    EC = DeviceErrorCheck(cuMemMap((DevicePtr_t)Addr, Size, 0, MHandle, 0));
-    if (EC)
-      LOG_FATAL("Cannot map memory handle\nEC:" + EC.value());
+    if (cuMemCreate(&H, Size, &Prop, 0) != CUDA_SUCCESS) {
+      (void)cuMemAddressFree(Want, Size);
+      return MapStatus::OutOfMemory;
+    }
 
     CUmemAccessDesc ADesc = {};
     ADesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     ADesc.location.id = DeviceID;
     ADesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-
-    EC = DeviceErrorCheck(cuMemSetAccess((DevicePtr_t)Addr, Size, &ADesc, 1));
-    if (EC)
-      LOG_FATAL("Cannot set memory Access\nEC:" + EC.value());
-  }
-
-  static uint64_t getMinPageSize(int DeviceID) {
-    return getPageSize(DeviceID, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
-  }
-
-  static void *getVirtualAddress(uint64_t Size, void *VA, uint64_t Alignment) {
-    DevicePtr_t devPtr = 0;
-
-    cuErrCheck(cuMemAddressReserve(&devPtr, Size, Alignment,
-                                   reinterpret_cast<DevicePtr_t>(VA), 0));
-    return (void *)devPtr;
-  }
-
-  static void unmap(MemoryAllocationHandle_t &MHandle, void *Addr,
-                    uintptr_t Size) {
-    LOG_DEBUG("Unmapping Addr:{} SIZE:{}", Addr, Size);
-    auto EC = DeviceErrorCheck(cuMemUnmap((DevicePtr_t)Addr, Size));
-    if (EC)
-      LOG_FATAL("Cannot set unmap memory\nEC:" + EC.value());
-
-    EC = DeviceErrorCheck(cuMemRelease(MHandle));
-    if (EC)
-      LOG_FATAL("Cannot set cuMemRelease Handle\nEC:" + EC.value());
-  }
-
-  static size_t getFixedMemorySize() {
-    static uint64_t PageSize{Config::get().getPageSizeBytesOrDefault(2)};
-    return PageSize;
-  }
-
-  static void freeVirtualAddress(void *Addr, size_t Size) {
-    LOG_DEBUG("Releasing Device Virtual Address Pages:{} Size:{}", Addr, Size);
-    auto Ret = cuMemAddressFree((DevicePtr_t)Addr, Size);
-    LOG_DEBUG("Done from driver call ({} {})", Addr, Size);
-    auto EC = DeviceErrorCheck(Ret);
-    if (EC) {
-      LOG_FATAL("Could not release VA addresses " + EC.value());
+    if (cuMemMap(Want, Size, 0, H, 0) == CUDA_SUCCESS) {
+      if (cuMemSetAccess(Want, Size, &ADesc, 1) == CUDA_SUCCESS)
+        return MapStatus::Mapped;
+      (void)cuMemUnmap(Want, Size);
     }
+    (void)cuMemRelease(H);
+    (void)cuMemAddressFree(Want, Size);
+    return MapStatus::OutOfMemory;
+  }
+
+  static void unmapFixed(void *Addr, uint64_t Size,
+                         MemoryAllocationHandle_t H) {
+    DevicePtr_t Ptr = reinterpret_cast<DevicePtr_t>(Addr);
+    auto EC = DeviceErrorCheck(cuMemUnmap(Ptr, Size));
+    if (!EC)
+      EC = DeviceErrorCheck(cuMemRelease(H));
+    if (!EC)
+      EC = DeviceErrorCheck(cuMemAddressFree(Ptr, Size));
+    if (EC)
+      LOG_WARN("Could not unmap {}: {}", Addr, *EC);
   }
 
   static bool compareDeviceBlobs(const char *Blob1, const char *Blob2,

@@ -1,254 +1,241 @@
 #pragma once
-#include <llvm/ADT/StringRef.h>
-#include <llvm/Support/raw_ostream.h>
+#include <algorithm>
+#include <cstdint>
+#include <iterator>
+#include <map>
+#include <optional>
 #include <set>
-#include <sys/types.h>
-#include <vector>
+#include <utility>
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeUtils.hpp"
 #include "mneme/MnemeVASpace.hpp"
 
-struct ContiguousAddrBlock {
-  // Starting address of the free block
-  uintptr_t PageAddr;
-  // Size of the free block
-  uint64_t Size;
+// Free address ranges with best-fit allocation and coalescing release.
+class FreeRanges {
+  using AddrMap = std::map<uintptr_t, uint64_t>;
+  // Start -> size.
+  AddrMap ByAddr;
+  // (Size, start) of the same ranges.
+  std::set<std::pair<uint64_t, uintptr_t>> BySize;
 
-  ContiguousAddrBlock(uintptr_t start, uint64_t sz);
-
-  // Comparison operators for sorting blocks by address and size
-  bool operator<(const ContiguousAddrBlock &other) const;
-};
-
-template <mneme::DeviceVendors VendorTypes> class PageManager {
-
-protected:
-  std::set<ContiguousAddrBlock> FreeVARanges;
-  using MnemeDeviceRT = typename mneme::DeviceTraits<VendorTypes>;
-  typename MnemeDeviceRT::MemoryAllocationHandle_t MemHandle;
-  uintptr_t ReservedVA;
-  uint64_t TotalVASize;
-  uint64_t PageSize;
-  int32_t DeviceID;
-
-  // Erase a block from the set
-  bool EraseVirtualAddress(uintptr_t addr, size_t size);
-  // Function to coalesce contiguous blocks
-
-  // Function to coalesce contiguous blocks
-  void coalesce() {
-    if (FreeVARanges.size() < 2)
-      return; // Nothing to coalesce if less than two blocks
-
-    auto it = FreeVARanges.begin();
-    while (it != FreeVARanges.end()) {
-      auto next_it = std::next(it);
-
-      if (next_it == FreeVARanges.end())
-        break;
-
-      // Check if the current block is contiguous with the next block
-      if (it->PageAddr + it->Size == next_it->PageAddr) {
-        // Merge the two blocks
-        ContiguousAddrBlock mergedBlock = {it->PageAddr,
-                                           it->Size + next_it->Size};
-
-        // Remove the original two blocks
-        it = FreeVARanges.erase(it);
-        next_it = FreeVARanges.erase(next_it);
-
-        // Insert the merged block
-        FreeVARanges.insert(mergedBlock);
-
-        // Start over from the merged block (to ensure we handle multiple
-        // contiguous blocks)
-        it = FreeVARanges.find(mergedBlock);
-      } else {
-        ++it;
-      }
-    }
-  }
-  // Find a block that has a size >= requestedSize
-  std::set<ContiguousAddrBlock>::iterator findFreeBlock(size_t requestedSize) {
-    for (auto it = FreeVARanges.begin(); it != FreeVARanges.end(); ++it) {
-      auto size = it->Size;
-      if (size >= requestedSize) {
-        return it;
-      }
-    }
-    return FreeVARanges.end();
-  }
-  // Find a block that includes the range [Addr, Addr + size)
-
-  std::set<ContiguousAddrBlock>::iterator findInclusivePage(uintptr_t Addr,
-                                                            size_t Size) {
-    uintptr_t request_end = Addr + Size;
-    for (auto it = FreeVARanges.begin(); it != FreeVARanges.end(); ++it) {
-      uintptr_t block_end = it->PageAddr + it->Size;
-      if (it->PageAddr <= Addr && block_end >= request_end) {
-        return it;
-      }
-    }
-    return FreeVARanges.end();
+  void insert(uintptr_t Start, uint64_t Size) {
+    ByAddr.emplace(Start, Size);
+    BySize.emplace(Size, Start);
   }
 
-  std::pair<void *, uint64_t> reserveBestFitPage(uint64_t VASize) {
-    // We need to always reserve at least a single page
-    uint64_t ReqSize = mneme::util::roundUp(VASize, PageSize);
-    LOG_DEBUG("The requsted size is rounded up from {} to {}", VASize, ReqSize);
-    auto FreeNode = findFreeBlock(ReqSize);
-    if (FreeNode == FreeVARanges.end()) {
-      LOG_FATAL("We do not have any memory to give");
-      return std::make_pair(nullptr, 0);
-    }
-
-    auto Ptr = FreeNode->PageAddr;
-    auto NodePageSize = FreeNode->Size;
-
-    FreeVARanges.erase(FreeNode);
-
-    if (ReqSize == NodePageSize)
-      return std::make_pair((void *)Ptr, ReqSize);
-
-    auto NewPtr = Ptr + ReqSize;
-    auto RemainingSize = NodePageSize - ReqSize;
-
-    ContiguousAddrBlock block{NewPtr, RemainingSize};
-    FreeVARanges.insert(block);
-
-    // This can be expensive. Currently we coalesce in every request that
-    // modifies our free-pages.
-    coalesce();
-
-    return std::make_pair((void *)Ptr, ReqSize);
-  }
-
-  std::pair<void *, uint64_t> requestExactPage(uint64_t VASize, void *VA) {
-    uint64_t ReqSize = mneme::util::roundUp(VASize, PageSize);
-    auto FreeNode = findInclusivePage((uintptr_t)VA, ReqSize);
-    if (FreeNode == FreeVARanges.end())
-      return std::make_pair(nullptr, 0);
-
-    auto Ptr = FreeNode->PageAddr;
-    auto NodePageSize = FreeNode->Size;
-
-    FreeVARanges.erase(FreeNode);
-
-    // We found exactly the requested page.
-    if (ReqSize == NodePageSize && (uintptr_t)VA == Ptr)
-      return std::make_pair((void *)Ptr, ReqSize);
-
-    if (VA != nullptr) {
-      if ((uintptr_t)VA < Ptr ||
-          ((uintptr_t)VA + VASize) > (Ptr + NodePageSize)) {
-        std::ostringstream oss;
-        oss << "Unable to return requested address: " << std::hex
-            << reinterpret_cast<uintptr_t>(VA)
-            << " instead the returned address is " << std::hex
-            << reinterpret_cast<uintptr_t>(Ptr) << std::dec << "\n";
-        LOG_FATAL(oss.str());
-      }
-    }
-
-    // There are 'unused' addresses left from the requested one
-    // We add them back to the page manager
-    auto NewNodePageSize = (uintptr_t)VA - Ptr;
-    ContiguousAddrBlock block{Ptr, NewNodePageSize};
-    FreeVARanges.insert(block);
-
-    // There are 'unused' addresses right/higher than the end of
-    // the requested page addresses
-    auto NewPtr = (uintptr_t)VA + ReqSize;
-    if (NewPtr < Ptr + NodePageSize) {
-      ContiguousAddrBlock block{NewPtr, Ptr + NodePageSize - NewPtr};
-      FreeVARanges.insert(block);
-    }
-    // This can be expensive. Currently we coalesce in every request that
-    // modifies our free-pages.
-    coalesce();
-
-    return std::make_pair(VA, ReqSize);
+  AddrMap::iterator erase(AddrMap::iterator It) {
+    BySize.erase({It->second, It->first});
+    return ByAddr.erase(It);
   }
 
 public:
-  PageManager() = default;
-  PageManager(uint64_t VASize, uint64_t PageSize, void *VA, int32_t DeviceID)
-      : TotalVASize(VASize), ReservedVA(reinterpret_cast<uintptr_t>(VA)),
-        PageSize(PageSize), DeviceID(DeviceID) {
-    FreeVARanges.insert(ContiguousAddrBlock{ReservedVA, TotalVASize});
-    MnemeDeviceRT::mmap(MemHandle, (void *)ReservedVA, VASize, DeviceID);
-  }
-
-  ~PageManager() {
-    MnemeDeviceRT::unmap(MemHandle, (void *)ReservedVA, TotalVASize);
-    MnemeDeviceRT::freeVirtualAddress((void *)ReservedVA, TotalVASize);
-  }
-
-  std::pair<void *, uint64_t> allocateAddr(uint64_t VASize, void *VA) {
-    if (VA == nullptr)
-      return reserveBestFitPage(VASize);
-    return requestExactPage(VASize, VA);
-  }
-
-  void releaseAddr(uint64_t VASize, void *VA) {
-    ContiguousAddrBlock AddrBlock{reinterpret_cast<uint64_t>(VA), VASize};
-    FreeVARanges.insert(AddrBlock);
-    coalesce();
-  }
-  void *getVAStart() const {
-    LOG_DEBUG("Returning address {}", ReservedVA);
-    return reinterpret_cast<void *>(ReservedVA);
-  }
-  uint64_t getTotalVASize() const { return TotalVASize; }
-  uint64_t getNumPages() const { return FreeVARanges.size(); }
-  uint64_t getUniqueNumPages() const {
-    std::set<ContiguousAddrBlock> s(FreeVARanges.begin(), FreeVARanges.end());
-    return s.size();
-  }
-
-  void dump() const {
-    for (auto V : FreeVARanges) {
-      LOG_INFO("Page Manager Start: {} Size {}", (void *)V.PageAddr, V.Size);
+  std::optional<uintptr_t> allocate(uint64_t Size, uint64_t Align) {
+    for (auto It = BySize.lower_bound({Size, 0}); It != BySize.end(); ++It) {
+      auto [RangeSize, Start] = *It;
+      uintptr_t Addr = mneme::util::roundUp(Start, Align);
+      uintptr_t End = Start + RangeSize;
+      if (Addr + Size > End)
+        continue;
+      BySize.erase(It);
+      ByAddr.erase(Start);
+      if (Addr > Start)
+        insert(Start, Addr - Start);
+      if (Addr + Size < End)
+        insert(Addr + Size, End - Addr - Size);
+      return Addr;
     }
+    return std::nullopt;
   }
 
-  typename MnemeDeviceRT::MemoryAllocationHandle_t &getMemHandle() {
-    return MemHandle;
+  // Merges only with free neighbors inside [Lo, Hi).
+  void release(uintptr_t Start, uint64_t Size, uintptr_t Lo = 0,
+               uintptr_t Hi = UINTPTR_MAX) {
+    uintptr_t End = Start + Size;
+    auto Next = ByAddr.lower_bound(Start);
+    if (Next != ByAddr.end() && Next->first == End && End < Hi) {
+      End += Next->second;
+      Next = erase(Next);
+    }
+    if (Next != ByAddr.begin()) {
+      auto Prev = std::prev(Next);
+      if (Prev->first + Prev->second == Start && Prev->first >= Lo) {
+        Start = Prev->first;
+        erase(Prev);
+      }
+    }
+    insert(Start, End - Start);
+  }
+
+  // Drops the free range that starts at Start.
+  void remove(uintptr_t Start) { erase(ByAddr.find(Start)); }
+};
+
+// Picks device addresses for recorded allocations: first fit above one anchor
+// address, using /proc/self/maps as the free list.
+template <mneme::DeviceVendors VendorTypes> class PageManager {
+  using DT = mneme::DeviceTraits<VendorTypes>;
+  static constexpr uintptr_t MaxAddr = 1ULL << 47;
+  static constexpr int MaxMapTries = 16;
+
+  uint64_t PageSize;
+  uintptr_t Anchor = 0;
+
+  void pickAnchor(uint64_t Size) {
+    auto Addrs = mneme::util::suggestVAddrs(Size, mneme::util::LargePageSize);
+    if (Addrs.empty())
+      LOG_FATAL("No device address range for {} bytes", Size);
+    Anchor = Addrs.front();
+    LOG_INFO("Device address anchor {}", reinterpret_cast<void *>(Anchor));
+  }
+
+public:
+  struct AddrRange {
+    void *Addr;
+    uint64_t Size;
+    uint64_t Align;
+  };
+
+  explicit PageManager(uint64_t PageSize) : PageSize(PageSize) {}
+
+  // Maps a range with Map(Range), skipping occupied addresses. Large sizes get
+  // large-page alignment so they can use big GPU fragments, and ranges cover
+  // whole driver VA blocks. Nullopt when the device is out of memory.
+  template <typename MapFn>
+  std::optional<AddrRange> mapAddr(uint64_t Size, MapFn Map) {
+    uint64_t Align = Size >= mneme::util::LargePageSize
+                         ? mneme::util::LargePageSize
+                         : PageSize;
+    Align = std::max(Align, DT::VABlockSize);
+    uint64_t ActualSize = std::max(mneme::util::roundUp(Size, Align), PageSize);
+
+    if (!Anchor)
+      pickAnchor(ActualSize);
+    uintptr_t From = Anchor;
+    int Tries = 0;
+    while (true) {
+      auto Addr = mneme::util::firstFreeVAddr(From, MaxAddr, ActualSize, Align);
+      if (!Addr)
+        LOG_FATAL("No device address range for {} bytes", Size);
+      AddrRange R{reinterpret_cast<void *>(*Addr), ActualSize, Align};
+      switch (Map(R)) {
+      case mneme::MapStatus::Mapped:
+        return R;
+      case mneme::MapStatus::OutOfMemory:
+        return std::nullopt;
+      case mneme::MapStatus::Occupied:
+        // Blocked by something /proc/self/maps does not show.
+        if (++Tries == MaxMapTries)
+          LOG_FATAL("Cannot map {} bytes at {}:\n{}", Size, R.Addr,
+                    mneme::util::getMappingsIn(*Addr - ActualSize,
+                                               *Addr + 2 * ActualSize));
+        LOG_DEBUG("Device address {} is occupied, retrying", R.Addr);
+        From = *Addr + ActualSize;
+        break;
+      }
+    }
   }
 };
 
-template <mneme::DeviceVendors VendorTypes>
-std::unique_ptr<PageManager<VendorTypes>>
-initializePageManager(int DeviceID, void *ReqAddr = nullptr,
-                      uint64_t ActualSize = -1) {
+// Packs allocations into shared ChunkSize-byte chunks, each one device mapping,
+// since mapping each allocation separately is slow. Chunks shrink when the
+// device is short on memory.
+template <mneme::DeviceVendors VendorTypes> class ChunkAllocator {
   using DT = mneme::DeviceTraits<VendorTypes>;
-  auto MinPageSize = DT::getMinPageSize(DeviceID);
-  if (ActualSize == -1)
-    ActualSize = mneme::util::roundUp(DT::getFixedMemorySize(), MinPageSize);
+  using Handle_t = typename DT::MemoryAllocationHandle_t;
 
-  // Replay must get the recorded address; record picks one.
-  std::vector<uintptr_t> Candidates;
-  if (ReqAddr)
-    Candidates.push_back(reinterpret_cast<uintptr_t>(ReqAddr));
-  else
-    Candidates = mneme::util::suggestVAddrs(ActualSize, MinPageSize);
-  if (Candidates.empty())
-    Candidates.push_back(0);
+  struct Chunk {
+    Handle_t Handle{};
+    uint64_t Size = 0;
+    uint64_t Used = 0;
+  };
+  using ChunkMap = std::map<uintptr_t, Chunk>;
 
-  void *VA = nullptr;
-  for (size_t I = 0; I < Candidates.size(); I++) {
-    void *Want = reinterpret_cast<void *>(Candidates[I]);
-    LOG_INFO("Trying {}/{} to Reserve Virtual Address {} space of size {}...",
-             I + 1, Candidates.size(), Want, ActualSize);
-    VA = DT::getVirtualAddress(ActualSize, Want, MinPageSize);
-    if (VA == Want || !Want || I + 1 == Candidates.size())
-      break;
-    LOG_INFO("... got {} instead", VA);
-    DT::freeVirtualAddress(VA, ActualSize);
+  PageManager<VendorTypes> &PM;
+  int DeviceID;
+  uint64_t ChunkSize;
+  // Start -> chunk.
+  ChunkMap Chunks;
+  // Chunks may be adjacent but are separate mappings, so ranges never span two.
+  FreeRanges Free;
+
+  typename ChunkMap::iterator chunkOf(uintptr_t Addr) {
+    return std::prev(Chunks.upper_bound(Addr));
   }
-  LOG_INFO("... Reserved Virtual Address {}", VA);
-  return std::make_unique<PageManager<VendorTypes>>(ActualSize, MinPageSize, VA,
-                                                    DeviceID);
-}
+
+  bool mapChunk(uint64_t Size) {
+    Handle_t H{};
+    auto R = PM.mapAddr(Size, [&](const auto &R) {
+      return DT::mapFixed(R.Addr, R.Size, R.Align, DeviceID, H);
+    });
+    if (!R)
+      return false;
+    uintptr_t Start = reinterpret_cast<uintptr_t>(R->Addr);
+    LOG_DEBUG("New {}-byte allocation chunk {}", R->Size, R->Addr);
+    Chunks[Start] = {H, R->Size, 0};
+    Free.release(Start, R->Size, Start, Start + R->Size);
+    return true;
+  }
+
+  // Halves the chunk while the device lacks memory, down to MinSize.
+  bool growFor(uint64_t MinSize) {
+    uint64_t Unit = std::max(mneme::util::LargePageSize, DT::VABlockSize);
+    uint64_t Min = mneme::util::roundUp(MinSize, Unit);
+    for (uint64_t Size = mneme::util::roundUp(ChunkSize, Unit);;
+         Size = std::max(Min, mneme::util::roundUp(Size / 2, Unit))) {
+      if (mapChunk(Size))
+        return true;
+      if (Size == Min)
+        return false;
+    }
+  }
+
+public:
+  // Matches the device malloc alignment guarantee.
+  static constexpr uint64_t Alignment = 256;
+
+  static uint64_t actualSize(uint64_t Size) {
+    return std::max(mneme::util::roundUp(Size, Alignment), Alignment);
+  }
+
+  ChunkAllocator(PageManager<VendorTypes> &PM, int DeviceID, uint64_t ChunkSize)
+      : PM(PM), DeviceID(DeviceID), ChunkSize(ChunkSize) {}
+
+  bool packs(uint64_t Size) const { return Size < ChunkSize; }
+
+  // Size must come from actualSize(). Nullptr when out of device memory.
+  void *allocate(uint64_t Size) {
+    auto Addr = Free.allocate(Size, Alignment);
+    if (!Addr) {
+      if (!growFor(Size))
+        return nullptr;
+      Addr = Free.allocate(Size, Alignment);
+    }
+    chunkOf(*Addr)->second.Used += Size;
+    return reinterpret_cast<void *>(*Addr);
+  }
+
+  void release(void *Addr, uint64_t Size) {
+    uintptr_t A = reinterpret_cast<uintptr_t>(Addr);
+    auto It = chunkOf(A);
+    auto &C = It->second;
+    uintptr_t Start = It->first;
+    Free.release(A, Size, Start, Start + C.Size);
+    C.Used -= Size;
+    // The last chunk stays mapped so malloc/free loops don't remap.
+    if (C.Used || Chunks.size() == 1)
+      return;
+    Free.remove(Start);
+    DT::unmapFixed(reinterpret_cast<void *>(Start), C.Size, C.Handle);
+    Chunks.erase(It);
+  }
+
+  ~ChunkAllocator() {
+    for (auto &[Start, C] : Chunks)
+      DT::unmapFixed(reinterpret_cast<void *>(Start), C.Size, C.Handle);
+  }
+
+  ChunkAllocator(const ChunkAllocator &) = delete;
+  ChunkAllocator &operator=(const ChunkAllocator &) = delete;
+};

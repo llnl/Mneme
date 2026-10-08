@@ -203,8 +203,6 @@ private:
 };
 
 class KernelInstancesCollection {
-  void *VAddr;
-  uint64_t VASize;
   llvm::DenseMap<uint64_t, KernelInstance> Instances;
   uint64_t NumRecords;
   int MaxRecordings;
@@ -266,9 +264,6 @@ public:
   llvm::json::Object toJSON(uint64_t StaticHash) const {
     llvm::json::Object Collection;
     Collection["StaticHash"] = StaticHash;
-    Collection["VAddr"] =
-        util::pointerToHexString(reinterpret_cast<uint8_t *>(VAddr));
-    Collection["VASize"] = VASize;
     Collection["KernelName"] = KName;
     std::size_t pos = KName.find("__intern__");
     std::string Orig =
@@ -287,12 +282,10 @@ public:
     return Collection;
   }
 
-  KernelInstancesCollection(const std::string &MnemeDirectory, void *VAddr,
-                            uint64_t VASize,
+  KernelInstancesCollection(const std::string &MnemeDirectory,
                             const proteus::runtime::KernelMetadata &KInfo,
                             int MaxRecordings, bool CopySource)
-      : VAddr(VAddr), VASize(VASize), MaxRecordings(MaxRecordings),
-        NumRecords(0), KName(KInfo.getName()) {
+      : NumRecords(0), MaxRecordings(MaxRecordings), KName(KInfo.getName()) {
     const auto &BitcodeBytes = KInfo.getBitcode();
     llvm::StringRef Bitcode(BitcodeBytes.data(), BitcodeBytes.size());
     if (Bitcode.empty())
@@ -460,7 +453,6 @@ public:
       void(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &, void **,
            typename DeviceTraits<VendorTypes>::DeviceStream_t)>>
   takeSnapshot(
-      void *VAddr, uint64_t VASize,
       const proteus::runtime::KernelMetadata &KInfo,
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
@@ -479,8 +471,8 @@ public:
       return std::nullopt;
     }
 
-    auto IT = KernelRecords.try_emplace(StaticHash, getDir(), VAddr, VASize,
-                                        KInfo, MaxRecordings, CopySource);
+    auto IT = KernelRecords.try_emplace(StaticHash, getDir(), KInfo,
+                                        MaxRecordings, CopySource);
     if (IT.second)
       LOG_INFO("Created instance");
     return IT.first->second.takeSnapshot<VendorTypes>(

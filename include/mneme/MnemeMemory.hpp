@@ -33,6 +33,10 @@ protected:
   uint64_t Size;
   std::unique_ptr<uint8_t[]> HostData;
   bool IsMapped;
+  // Non-zero when this blob owns the MappedSize-byte mapping at MapAddr.
+  uint64_t MappedSize = 0;
+  void *MapAddr = nullptr;
+  MemoryAllocationHandle_t Handle{};
 
 public:
   MnemeMemoryBlob(uint64_t ActualSize = 0, void *BlobAddr = nullptr,
@@ -40,15 +44,27 @@ public:
       : ActualSize(ActualSize), BlobAddr(BlobAddr), Size(Size),
         HostData(new uint8_t[Size]), IsMapped(false) {}
 
-  DeviceError_t map(void *VA, uint64_t ActualSize, uint64_t Size) {
-    this->Size = Size;
-    // We need to pass here "ActualSize". As device allocators depend on page
-    // aligned allocations
-    this->BlobAddr = VA;
-    this->IsMapped = true;
-    this->ActualSize = ActualSize;
-    return MnemeDeviceRT::DeviceSuccess;
-  };
+  // Maps MapSize bytes of new device memory at exactly MapVA, owned by this
+  // blob, and places the blob at VA inside it.
+  MapStatus mapFixed(void *VA, void *MapVA, uint64_t MapSize,
+                     uint64_t Alignment, int DeviceID) {
+    auto Status =
+        MnemeDeviceRT::mapFixed(MapVA, MapSize, Alignment, DeviceID, Handle);
+    if (Status == MapStatus::Mapped) {
+      BlobAddr = VA;
+      IsMapped = true;
+      MappedSize = MapSize;
+      MapAddr = MapVA;
+    }
+    return Status;
+  }
+
+  // Points this blob at VA inside a mapping it does not own.
+  void mapInto(void *VA) {
+    BlobAddr = VA;
+    IsMapped = true;
+    MappedSize = 0;
+  }
 
   DeviceError_t allocate(size_t Size) {
     int _device;
@@ -70,6 +86,9 @@ public:
       BlobAddr = 0;
       return ret;
     }
+    if (MappedSize)
+      MnemeDeviceRT::unmapFixed(MapAddr, MappedSize, Handle);
+    MappedSize = 0;
     BlobAddr = 0;
     return MnemeDeviceRT::DeviceSuccess;
   }
@@ -109,18 +128,25 @@ public:
       ActualSize = other.ActualSize;
       HostData = std::move(other.HostData);
       IsMapped = other.IsMapped;
+      MappedSize = other.MappedSize;
+      MapAddr = other.MapAddr;
+      Handle = other.Handle;
       PtrMD = other.PtrMD;
       other.BlobAddr = 0;
+      other.MappedSize = 0;
       other.HostData = nullptr;
     }
     return *this;
   }
 
   MnemeMemoryBlob(MnemeMemoryBlob &&other) noexcept
-      : BlobAddr(other.BlobAddr), Size(other.Size),
-        ActualSize(other.ActualSize), HostData(std::move(other.HostData)),
-        IsMapped(other.IsMapped), PtrMD(other.PtrMD) {
+      : PtrMD(other.PtrMD), ActualSize(other.ActualSize),
+        BlobAddr(other.BlobAddr), Size(other.Size),
+        HostData(std::move(other.HostData)), IsMapped(other.IsMapped),
+        MappedSize(other.MappedSize), MapAddr(other.MapAddr),
+        Handle(other.Handle) {
     other.BlobAddr = 0;
+    other.MappedSize = 0;
     other.HostData = nullptr;
   }
 

@@ -62,3 +62,6 @@ add_test(NAME Serialize::RWSnapshot COMMAND ReadWriteSnapshot)
 
 BUILD_DEVICE_UNIT_TEST("CompareMemoryBlob" DeviceKernels.cpp)
 add_test(NAME DeviceKernel::CompareMemory COMMAND CompareMemoryBlob)
+
+BUILD_UNIT_TEST("VASpace" VASpace.cpp)
+add_test(NAME VASpace::FirstFree COMMAND VASpace)

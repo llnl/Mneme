@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mneme/MnemeRank.hpp"
+#include "mneme/MnemeVASpace.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -66,16 +67,60 @@ inline uint64_t getEnvOrDefaultIntLenient(const char *VarName,
   return EnvValue ? static_cast<uint64_t>(std::atoi(EnvValue)) : Default;
 }
 
-inline std::optional<long> getEnvOrDefaultPageSizeGiB(const char *VarName) {
-  const char *EnvValue = std::getenv(VarName);
+inline uint64_t getEnvOrDefaultChunkSize(const char *VarName,
+                                         uint64_t Default) {
+  auto EnvValue = getEnvOrDefaultString(VarName);
   if (!EnvValue)
-    return std::nullopt;
+    return Default;
 
-  return std::atol(EnvValue);
-}
+  // Suffixes are binary: 8M, 8MB and 8MiB are all 8 MiB.
+  std::string Digits = *EnvValue;
+  auto EndsWith = [&](std::string_view S) {
+    return Digits.size() > S.size() &&
+           std::equal(S.rbegin(), S.rend(), Digits.rbegin(),
+                      [](char A, char B) {
+                        return A == std::tolower(static_cast<unsigned char>(B));
+                      });
+  };
+  bool HasIB = EndsWith("ib");
+  if (HasIB || EndsWith("b"))
+    Digits.resize(Digits.size() - (HasIB ? 2 : 1));
+  unsigned Shift = 0;
+  if (!Digits.empty()) {
+    switch (std::toupper(static_cast<unsigned char>(Digits.back()))) {
+    case 'K':
+      Shift = 10;
+      break;
+    case 'M':
+      Shift = 20;
+      break;
+    case 'G':
+      Shift = 30;
+      break;
+    case 'T':
+      Shift = 40;
+      break;
+    }
+  }
+  if (Shift)
+    Digits.pop_back();
 
-inline uint64_t pageSizeGiBToBytes(long PageSizeGiB) {
-  return static_cast<uint64_t>(PageSizeGiB * 1024L * 1024L * 1024L);
+  errno = 0;
+  char *End = nullptr;
+  unsigned long long Parsed = std::strtoull(Digits.c_str(), &End, 10);
+  bool Valid = (Shift || !HasIB) && !Digits.empty() &&
+               std::isdigit(static_cast<unsigned char>(Digits[0])) &&
+               errno != ERANGE && *End == '\0' &&
+               Parsed <= (ULLONG_MAX >> Shift);
+  Parsed <<= Shift;
+  if (!Valid || Parsed < util::LargePageSize ||
+      Parsed % util::LargePageSize != 0) {
+    warnMalformedEnvironmentValue(
+        "environment variable", VarName, *EnvValue,
+        "(expected a multiple of 2 MiB, such as 64MB or 4GB)");
+    return Default;
+  }
+  return Parsed;
 }
 
 inline LogLevel getEnvOrDefaultLogLevel(const char *VarName, LogLevel Default) {
@@ -200,10 +245,10 @@ public:
   const std::optional<std::string> KernelRegex;
   const uint64_t MaxRecordings;
   const uint64_t SkipRecordings;
-  const std::optional<long> PageSizeGiB;
   const LogLevel MnemeLogLevel;
   const EpilogueSnapshotType EpilogueType;
   const bool CopySource;
+  const uint64_t ChunkSize;
 
   bool isRecordingEnabledForCurrentRank() const {
     return RecordingEnabledThisRank;
@@ -216,11 +261,6 @@ public:
       throw std::runtime_error("Path :" + Path.string() + " does not exist.\n");
     }
     return std::filesystem::absolute(Path);
-  }
-
-  uint64_t getPageSizeBytesOrDefault(long DefaultPageSizeGiB) const {
-    return config_detail::pageSizeGiBToBytes(
-        PageSizeGiB.value_or(DefaultPageSizeGiB));
   }
 
   std::optional<std::string> getLogDirectory() const {
@@ -241,14 +281,14 @@ private:
             "MNEME_MAX_RECORDINGS", 4)),
         SkipRecordings(config_detail::getEnvOrDefaultIntLenient(
             "MNEME_SKIP_RECORDINGS", 0)),
-        PageSizeGiB(
-            config_detail::getEnvOrDefaultPageSizeGiB("MNEME_PAGE_SIZE")),
         MnemeLogLevel(config_detail::getEnvOrDefaultLogLevel(
             "MNEME_LOG_LEVEL", LogLevel::Critical)),
         EpilogueType(config_detail::getEnvOrDefaultEpilogueSnapshotType(
             "MNEME_EPILOGUE_TYPE", EpilogueSnapshotType::Diff)),
         CopySource(
             config_detail::getEnvOrDefaultBool("MNEME_COPY_SOURCE", false)),
+        ChunkSize(config_detail::getEnvOrDefaultChunkSize("MNEME_CHUNK_SIZE",
+                                                          4ULL << 30)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")),
         RecordingEnabledThisRank(

@@ -17,7 +17,7 @@ function(CREATE_GPU_TEST exe check_source)
   add_dependencies(${exe} record)
   add_mneme(${exe})
 
-add_test(NAME ${exe} COMMAND ${LIT} -a -vv -DFILECHECK=${FILECHECK} -D ext='' -D PG=1 -D RR=${RECORD_READ_JSON} ${check_source})
+add_test(NAME ${exe} COMMAND ${LIT} -a -vv -DFILECHECK=${FILECHECK} -D ext='' -D RR=${RECORD_READ_JSON} ${check_source})
   set_tests_properties(${exe} PROPERTIES LABELS "MnemeRecord::Link")
 endfunction()
 
@@ -62,7 +62,7 @@ function(CREATE_RDC_GPU_TEST exe check_source)
   endif()
   add_mneme(${exe}.rdc)
 
-  add_test(NAME ${exe}.rdc COMMAND ${LIT} -a -vv -DFILECHECK=${FILECHECK} -D ext=.rdc -D PG=1 -D RR=${RECORD_READ_JSON} ${check_source})
+  add_test(NAME ${exe}.rdc COMMAND ${LIT} -a -vv -DFILECHECK=${FILECHECK} -D ext=.rdc -D RR=${RECORD_READ_JSON} ${check_source})
   set_tests_properties(${exe}.rdc PROPERTIES LABELS "MnemeRecord::RDC")
 endfunction()
 
@@ -94,12 +94,10 @@ config.test_exec_root = exec_root
 atexit.register(lambda: shutil.rmtree(exec_root, ignore_errors=False))
 
 MNEME_PRELOAD_LIB='${CMAKE_BINARY_DIR}/src/librecord.so'
-PAGE_SIZE = lit_config.params['PG']
 RR = lit_config.params['RR']
 EXT = lit_config.params['ext']
 FILECHECK = lit_config.params['FILECHECK']
 config.substitutions.append(('MNEME_PRELOAD_LIB', MNEME_PRELOAD_LIB))
-config.substitutions.append(('%PG', PAGE_SIZE))
 config.substitutions.append(('%RR', RR))
 config.substitutions.append(('%ext', EXT))
 config.substitutions.append(('%FILECHECK', FILECHECK))

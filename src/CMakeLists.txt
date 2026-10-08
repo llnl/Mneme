@@ -4,9 +4,9 @@ set(AnnotationRuntimeSRC MnemeAnnotation.cpp)
 set(RecordLibSRC MnemeAnnotationInternal.cpp MnemeCrashHandler.cpp)
 
 if (MNEME_ENABLE_HIP)
-  list(APPEND RecordLibSRC MnemeRecordPreloadHIP.cpp MnemePageManager.cpp)
+  list(APPEND RecordLibSRC MnemeRecordPreloadHIP.cpp)
 elseif(MNEME_ENABLE_CUDA)
-  list(APPEND RecordLibSRC MnemeRecordPreloadCUDA.cpp MnemePageManager.cpp)
+  list(APPEND RecordLibSRC MnemeRecordPreloadCUDA.cpp)
 endif()
 
 add_library(mnemert SHARED ${AnnotationRuntimeSRC})

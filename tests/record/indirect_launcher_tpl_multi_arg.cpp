@@ -1,8 +1,9 @@
 // clang-format off
-// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/indirect_launcher_tpl_multi_arg%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: rm -rf "%t.$$.mneme" "%t.$$.log" && mkdir -p "%t.$$.mneme" "%t.$$.log"
+// Logs go to a file so they cannot split the device printf lines on stdout.
+// RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_LOG_DIR="%t.$$.log" MNEME_DATA_DIR="%t.$$.mneme" %build/indirect_launcher_tpl_multi_arg%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR
-// RUN: rm -rf "%t.$$.mneme"
+// RUN: rm -rf "%t.$$.mneme" "%t.$$.log"
 // clang-format on
 
 #include <climits>
