@@ -478,31 +478,18 @@ def _write_counted_record(tmp_path, **fields):
 
 
 def test_recorded_execution_loads_launch_counts(tmp_path):
-    unrecorded = {
-        "U": {
-            "BlockDims": {"x": 64, "y": 1, "z": 1},
-            "GridDims": {"x": 2, "y": 1, "z": 1},
-            "Occurrences": 4,
-            "SharedMem": 16,
-        }
-    }
-    json_path = _write_counted_record(
-        tmp_path, TotalLaunches=7, UnrecordedInstances=unrecorded
-    )
+    json_path = _write_counted_record(tmp_path, TotalLaunches=7)
 
     r = RecordedExecution.from_json(str(json_path))
 
     assert r.total_launches == 7
     assert list(r) == ["H"]
     assert r["H"].occ == 3
-    u = r.unrecorded_instances["U"]
-    assert (u.block_dim.x, u.grid_dim.x, u.shared_mem, u.occ) == (64, 2, 16, 4)
 
     out_path = tmp_path / "out.json"
     r.to_json(str(out_path))
     written = json.loads(out_path.read_text())
     assert written["TotalLaunches"] == 7
-    assert written["UnrecordedInstances"] == unrecorded
     assert written["instances"]["H"]["Occurrences"] == 3
 
 
@@ -510,8 +497,6 @@ def test_recorded_execution_loads_record_without_launch_counts(tmp_path):
     r = RecordedExecution.from_json(str(_write_counted_record(tmp_path)))
 
     assert r.total_launches is None
-    assert r.unrecorded_instances == {}
     assert r["H"].occ == 3
     d = r.to_dict()
     assert "TotalLaunches" not in d
-    assert "UnrecordedInstances" not in d

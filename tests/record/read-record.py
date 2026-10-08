@@ -105,7 +105,8 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
     print("NumModules:", len(rr_data["Modules"]))
     print("NumInstances:", len(rr_data["instances"]))
     print("TotalLaunches:", rr_data["TotalLaunches"])
-    print("NumUnrecordedInstances:", len(rr_data["UnrecordedInstances"]))
+    recorded_launches = sum(i["Occurrences"] for i in rr_data["instances"].values())
+    print("UnrecordedLaunches:", rr_data["TotalLaunches"] - recorded_launches)
     if "SourceFile" in rr_data:
         print("SourceFile:", rr_data["SourceFile"])
     if "SourceLine" in rr_data:
@@ -177,17 +178,6 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
         except Exception as e:
             print(f"Warning: could not parse prologue metadata: {e}",
                   file=sys.stderr)
-    for instance in rr_data["UnrecordedInstances"].values():
-        grid = instance["GridDims"]
-        block = instance["BlockDims"]
-        print(
-            "Unrecorded: Grid:({0}, {1}, {2}) Block:({3}, {4}, {5}) "
-            "SharedMem:{6} Occurrences:{7}".format(
-                grid["x"], grid["y"], grid["z"],
-                block["x"], block["y"], block["z"],
-                instance["SharedMem"], instance["Occurrences"],
-            )
-        )
 
 
 sys.exit(0)
