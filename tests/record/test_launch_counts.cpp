@@ -12,7 +12,6 @@
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_PAGE_SIZE=%PG MNEME_DATA_DIR="%t.$$.mneme" %build/test_launch_counts%ext other | %FILECHECK %s --check-prefixes=CHECK,CHECK-OTHER
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-REGEX
-// RUN: cat "%t.$$.mneme/FilteredKernels.jsonl" | %FILECHECK %s --check-prefix=CHECK-FILTERED
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 
@@ -63,10 +62,6 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-REGEX: TotalLaunches: 5
 // CHECK-REGEX: NumUnrecordedInstances: 0
 // CHECK-REGEX-NOT: other_kernel
-
-// CHECK-FILTERED-NOT: count_kernel
-// CHECK-FILTERED: "DemangledName":"other_kernel()",{{.*}}"Launches":4,
-// CHECK-FILTERED-NOT: count_kernel
 // clang-format on
 __global__ void count_kernel() {}
 __global__ void other_kernel() {}

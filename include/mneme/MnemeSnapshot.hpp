@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <llvm/ADT/ArrayRef.h>
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MD5.h>
@@ -206,12 +207,6 @@ private:
   }
 };
 
-inline std::string demangleKernelName(const std::string &KName) {
-  std::size_t pos = KName.find("__intern__");
-  std::string Orig = (pos != std::string::npos) ? KName.substr(0, pos) : KName;
-  return llvm::demangle(Orig);
-}
-
 class KernelInstancesCollection {
   void *VAddr;
   uint64_t VASize;
@@ -282,7 +277,10 @@ public:
         util::pointerToHexString(reinterpret_cast<uint8_t *>(VAddr));
     Collection["VASize"] = VASize;
     Collection["KernelName"] = KName;
-    Collection["DemangledName"] = demangleKernelName(KName);
+    std::size_t pos = KName.find("__intern__");
+    std::string Orig =
+        (pos != std::string::npos) ? KName.substr(0, pos) : KName;
+    Collection["DemangledName"] = llvm::demangle(Orig);
     Collection["Modules"] = llvm::json::Array(ModuleFiles);
     Collection["BinaryBlobs"] = llvm::json::Array();
     Collection["ArgNames"] = llvm::json::Array(KernelArgNames);
@@ -417,11 +415,7 @@ class RecordDatabase {
   std::string RegexStr;
   bool HasRegex;
   llvm::DenseMap<uint64_t, KernelInstancesCollection> KernelRecords;
-  struct FilteredKernel {
-    std::string Name;
-    uint64_t Launches = 0;
-  };
-  llvm::DenseMap<uint64_t, FilteredKernel> FilteredKernels;
+  llvm::DenseSet<uint64_t> FilteredKernels;
   uint64_t MaxRecordings;
   uint64_t SkipRecordings;
   EpilogueSnapshotType EpilogueType;
@@ -472,33 +466,9 @@ public:
     }
   }
 
-  void writeFilteredKernels() const {
-    auto Filename = MnemeDirectory / "FilteredKernels.jsonl";
-    std::error_code EC;
-    llvm::raw_fd_ostream OS(Filename.string(), EC);
-    if (EC) {
-      LOG_WARN("Failed to open {}: {}", Filename.string(), EC.message());
-      return;
-    }
-
-    for (const auto &[StaticHash, Kernel] : FilteredKernels)
-      OS << llvm::json::Value(llvm::json::Object{
-                {"StaticHash", StaticHash},
-                {"KernelName", Kernel.Name},
-                {"DemangledName", demangleKernelName(Kernel.Name)},
-                {"Launches", Kernel.Launches}})
-         << "\n";
-    OS.close();
-    if (OS.has_error())
-      LOG_WARN("Failed to write {}: {}", Filename.string(),
-               OS.error().message());
-  }
-
   void flush() {
     for (const auto &Entry : KernelRecords)
       writeKernelJSON(Entry.first);
-    if (!FilteredKernels.empty())
-      writeFilteredKernels();
   }
 
   bool shouldRecord(const std::string &KernelName) const {
@@ -515,17 +485,14 @@ public:
   }
 
   // Only a kernel's first launch reaches the regex, because kernels that pass
-  // get a record and kernels that fail are counted here.
+  // get a record and kernels that fail are remembered here.
   bool filterLaunch(uint64_t StaticHash, const std::string &KernelName) {
-    auto It = FilteredKernels.find(StaticHash);
-    if (It == FilteredKernels.end()) {
-      if (shouldRecord(KernelName))
-        return false;
-      LOG_INFO("Skip record of Kernel {}", KernelName);
-      It = FilteredKernels.try_emplace(StaticHash, FilteredKernel{KernelName})
-               .first;
-    }
-    It->second.Launches++;
+    if (FilteredKernels.contains(StaticHash))
+      return true;
+    if (shouldRecord(KernelName))
+      return false;
+    LOG_INFO("Skip record of Kernel {}", KernelName);
+    FilteredKernels.insert(StaticHash);
     return true;
   }
 
