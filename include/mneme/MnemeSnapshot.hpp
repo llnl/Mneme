@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <llvm/ADT/ArrayRef.h>
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MD5.h>
@@ -393,6 +394,7 @@ class RecordDatabase {
     uint64_t Count = 0;
   };
   llvm::DenseMap<uint64_t, KernelLaunchState> KernelLaunches;
+  llvm::DenseSet<uint64_t> FilteredKernels;
   EpilogueSnapshotType EpilogueType;
   bool CopySource;
 
@@ -432,6 +434,29 @@ public:
     }
   }
 
+  // Resolves the policy once per kernel because demangling on every launch is
+  // costly, and remembers kernels whose policy never records.
+  KernelLaunchState *filterLaunch(uint64_t StaticHash,
+                                  const std::string &KernelName) {
+    if (FilteredKernels.contains(StaticHash))
+      return nullptr;
+
+    auto It = KernelLaunches.find(StaticHash);
+    if (It != KernelLaunches.end())
+      return &It->second;
+
+    // Match the same original name displayed in the recording database.
+    auto Policy = RecordingPolicy::get().resolve(
+        util::demangleKernelName(KernelName), KernelName);
+    if (Policy.MaxRecords == 0) {
+      LOG_INFO("Skip record of Kernel {}", KernelName);
+      FilteredKernels.insert(StaticHash);
+      return nullptr;
+    }
+    return &KernelLaunches.try_emplace(StaticHash, KernelLaunchState{Policy})
+                .first->second;
+  }
+
   template <DeviceVendors VendorTypes>
   std::optional<std::function<
       void(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &, void **,
@@ -441,23 +466,17 @@ public:
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
-
     auto StaticHash = KInfo.getStaticHash();
-    auto [StateIt, Inserted] = KernelLaunches.try_emplace(StaticHash);
-    auto &State = StateIt->second;
-    if (Inserted) {
-      // Match the same original name displayed in the recording database.
-      auto Name = KInfo.getName();
-      State.Policy = RecordingPolicy::get().resolve(
-          util::demangleKernelName(Name), Name);
-    }
+    auto *State = filterLaunch(StaticHash, KInfo.getName());
+    if (!State)
+      return std::nullopt;
 
-    ++State.Count;
-    if (!State.Policy.selects(State.Count))
+    ++State->Count;
+    if (!State->Policy.selects(State->Count))
       return std::nullopt;
 
     auto IT = KernelRecords.try_emplace(StaticHash, getDir(), KInfo,
-                                        State.Policy.MaxRecords, CopySource);
+                                        State->Policy.MaxRecords, CopySource);
     if (IT.second)
       LOG_INFO("Created instance");
     return IT.first->second.takeSnapshot<VendorTypes>(
