@@ -100,13 +100,14 @@ public:
   explicit PageManager(uint64_t PageSize) : PageSize(PageSize) {}
 
   // Maps a range with Map(Range), skipping occupied addresses. Large sizes get
-  // large-page alignment so they can use big GPU fragments. Nullopt when the
-  // device is out of memory.
+  // large-page alignment so they can use big GPU fragments, and ranges cover
+  // whole driver VA blocks. Nullopt when the device is out of memory.
   template <typename MapFn>
   std::optional<AddrRange> mapAddr(uint64_t Size, MapFn Map) {
     uint64_t Align = Size >= mneme::util::LargePageSize
                          ? mneme::util::LargePageSize
                          : PageSize;
+    Align = std::max(Align, DT::VABlockSize);
     uint64_t ActualSize = std::max(mneme::util::roundUp(Size, Align), PageSize);
 
     if (!Anchor)
@@ -171,18 +172,18 @@ template <mneme::DeviceVendors VendorTypes> class ChunkAllocator {
     if (!R)
       return false;
     uintptr_t Start = reinterpret_cast<uintptr_t>(R->Addr);
-    LOG_DEBUG("New {}-byte allocation chunk {}", Size, R->Addr);
-    Chunks[Start] = {H, Size, 0};
-    Free.release(Start, Size, Start, Start + Size);
+    LOG_DEBUG("New {}-byte allocation chunk {}", R->Size, R->Addr);
+    Chunks[Start] = {H, R->Size, 0};
+    Free.release(Start, R->Size, Start, Start + R->Size);
     return true;
   }
 
   // Halves the chunk while the device lacks memory, down to MinSize.
   bool growFor(uint64_t MinSize) {
-    uint64_t Min = mneme::util::roundUp(MinSize, mneme::util::LargePageSize);
-    for (uint64_t Size = ChunkSize;;
-         Size = std::max(Min, mneme::util::roundUp(
-                                  Size / 2, mneme::util::LargePageSize))) {
+    uint64_t Unit = std::max(mneme::util::LargePageSize, DT::VABlockSize);
+    uint64_t Min = mneme::util::roundUp(MinSize, Unit);
+    for (uint64_t Size = mneme::util::roundUp(ChunkSize, Unit);;
+         Size = std::max(Min, mneme::util::roundUp(Size / 2, Unit))) {
       if (mapChunk(Size))
         return true;
       if (Size == Min)

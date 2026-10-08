@@ -96,7 +96,12 @@ MALLOC_LOG = re.compile(r"Intercepted Device Malloc PTR:(0x[0-9a-f]+) SIZE:(\d+)
 
 @pytest.mark.parametrize("chunk_size", [None, 8 * MiB])
 def test_replay_chunked_allocations(
-    build_chunked_allocs_program, tmp_path, capsys, monkeypatch, chunk_size
+    build_chunked_allocs_program,
+    tmp_path,
+    capsys,
+    monkeypatch,
+    has_nvidia_gpu,
+    chunk_size,
 ):
     binary = build_chunked_allocs_program["binary"]
     out_dir = tmp_path / "record_out"
@@ -114,13 +119,16 @@ def test_replay_chunked_allocations(
 
     (log,) = [p.read_text() for p in log_dir.glob("*.log")]
     large = chunk_size or 4096 * MiB
+    # CUDA mappings cover whole 32 MiB driver blocks.
+    block = 32 * MiB if has_nvidia_gpu else 1
+    chunk = -(-large // block) * block
     chunks = {}
     for line in log.splitlines():
         if m := CHUNK_LOG.search(line):
             chunks[int(m[2], 16)] = int(m[1])
         elif m := MALLOC_LOG.search(line):
             ptr, size = int(m[1], 16), int(m[2])
-            expected = [large] if size < large else []
+            expected = [chunk] if size < large else []
             owner = [s for c, s in chunks.items() if c <= ptr < c + s]
             assert owner == expected, f"{size}-byte allocation at {ptr:#x}"
     if chunk_size:

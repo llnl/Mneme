@@ -172,7 +172,8 @@ public:
             BaseSnapshotSource<VendorTypes>(SnapshotFile).load(KernelName)) {}
 
   // Maps every blob at its recorded address. Blobs closer than a large page
-  // share one page-rounded mapping, owned by the lowest blob.
+  // share one mapping, owned by the lowest blob and rounded to whole driver VA
+  // blocks, or to pages if the blocks do not fit.
   void load() override {
     std::vector<std::pair<uintptr_t, Blob *>> Blobs;
     for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
@@ -182,12 +183,15 @@ public:
     int DeviceID = 0;
     MnemeDeviceRT::getDevice(DeviceID);
     uint64_t PageSize = MnemeDeviceRT::getMinPageSize(DeviceID);
-    auto StartOf = [&](size_t I) { return Blobs[I].first & ~(PageSize - 1); };
+    uint64_t BlockSize = std::max(PageSize, MnemeDeviceRT::VABlockSize);
+    uint64_t Unit = BlockSize;
+    auto StartOf = [&](size_t I) { return Blobs[I].first & ~(Unit - 1); };
     auto EndOf = [&](size_t I) {
       return util::roundUp(Blobs[I].first + Blobs[I].second->getActualSize(),
-                           PageSize);
+                           Unit);
     };
-    // Blobs [I, J) within Slack of each other's pages, and their page end.
+    // Blobs [I, J) within Slack of each other's Unit-rounded ranges, and their
+    // rounded end.
     auto Group = [&](size_t I, size_t Limit, uint64_t Slack) {
       uintptr_t End = EndOf(I);
       size_t J = I + 1;
@@ -222,6 +226,10 @@ public:
       for (size_t K = I; K < J;) {
         auto [L, E] = Group(K, J, 0);
         auto Status = MapGroup(K, L, E);
+        if (Status != MapStatus::Mapped && Unit != PageSize) {
+          Unit = PageSize;
+          continue;
+        }
         if (Status != MapStatus::Mapped)
           LOG_FATAL("Cannot map recorded range {}-{}: {}\n{}",
                     reinterpret_cast<void *>(StartOf(K)),
@@ -230,6 +238,7 @@ public:
                                                   : "out of memory",
                     util::getMappingsIn(StartOf(K), E));
         K = L;
+        Unit = BlockSize;
       }
       I = J;
     }

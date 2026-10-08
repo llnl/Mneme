@@ -85,6 +85,8 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceEvent_t = hipEvent_t;
   static constexpr auto DeviceSuccess = hipSuccess;
   static constexpr auto DeviceOutOfMemory = hipErrorOutOfMemory;
+  // Unit that device address reservations should cover; none on HIP.
+  static constexpr uint64_t VABlockSize = 1;
 
   static inline auto *getRTLib() { return dlopen("libamdhip64.so", RTLD_NOW); }
   static constexpr const char *getLaunchKernelFnName() {
@@ -436,6 +438,10 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   static constexpr auto DeviceSuccess = cudaSuccess;
   static constexpr auto DeviceDriverSuccess = CUDA_SUCCESS;
   static constexpr auto DeviceOutOfMemory = cudaErrorMemoryAllocation;
+  // The driver reserves address space in 32 MiB blocks and puts its own
+  // allocations in the unreserved part of a block, which then stays reserved
+  // after we free ours. Reservations should cover whole blocks.
+  static constexpr uint64_t VABlockSize = 32ULL << 20;
 
   static inline auto *getRTLib() { return dlopen("libcudart.so", RTLD_NOW); }
   static constexpr const char *getLaunchKernelFnName() {
