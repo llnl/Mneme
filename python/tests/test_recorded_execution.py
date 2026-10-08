@@ -441,3 +441,62 @@ def test_to_json_relativizes_in_dir_files_only(tmp_path, layout):
         assert written["Modules"] == [str(mod_path)]
         assert written["instances"]["H"]["Prologue"] == str(pro_path)
         assert written["instances"]["H"]["Epilogue"] == str(epi_path)
+
+
+def _write_counted_record(tmp_path, **fields):
+    mod_path = tmp_path / "modA.ll"
+    pro_path = tmp_path / "file.pro"
+    epi_path = tmp_path / "file.epi"
+    for p in (mod_path, pro_path, epi_path):
+        p.touch()
+
+    data = {
+        "StaticHash": "S",
+        "KernelName": "K",
+        "DemangledName": "DK",
+        "Modules": [mod_path.name],
+        "ArgNames": ["x"],
+        "Specializations": [True],
+        "VAddr": "ADDR",
+        "VASize": 64,
+        "instances": {
+            "H": {
+                "Args": [],
+                "SharedMem": 0,
+                "BlockDims": {"x": 32, "y": 1, "z": 1},
+                "GridDims": {"x": 1, "y": 1, "z": 1},
+                "Occurrences": 3,
+                "Prologue": pro_path.name,
+                "Epilogue": epi_path.name,
+            }
+        },
+        **fields,
+    }
+    json_path = tmp_path / "db.json"
+    json_path.write_text(json.dumps(data))
+    return json_path
+
+
+def test_recorded_execution_loads_launch_counts(tmp_path):
+    json_path = _write_counted_record(tmp_path, TotalLaunches=7)
+
+    r = RecordedExecution.from_json(str(json_path))
+
+    assert r.total_launches == 7
+    assert list(r) == ["H"]
+    assert r["H"].occ == 3
+
+    out_path = tmp_path / "out.json"
+    r.to_json(str(out_path))
+    written = json.loads(out_path.read_text())
+    assert written["TotalLaunches"] == 7
+    assert written["instances"]["H"]["Occurrences"] == 3
+
+
+def test_recorded_execution_loads_record_without_launch_counts(tmp_path):
+    r = RecordedExecution.from_json(str(_write_counted_record(tmp_path)))
+
+    assert r.total_launches is None
+    assert r["H"].occ == 3
+    d = r.to_dict()
+    assert "TotalLaunches" not in d

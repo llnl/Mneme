@@ -387,6 +387,9 @@ class RecordedExecution:
         Virtual address space size in bytes (or recording-specific unit).
     kernel_instances : dict[str, KernelInstance]
         Mapping from dynamic hash to recorded launch instance descriptor.
+    total_launches : int, optional
+        Number of times the kernel was launched during recording, or ``None``
+        for records written before launches were counted.
     """
 
     class KernelInstance:
@@ -491,6 +494,7 @@ class RecordedExecution:
         source_md5: Optional[str] = None,
         source_line: Optional[int] = None,
         source_end_line: Optional[int] = None,
+        total_launches: Optional[int] = None,
     ):
         self.static_hash = static_hash
         self.kernel_name = kernel_name
@@ -508,6 +512,7 @@ class RecordedExecution:
         self.source_md5 = source_md5
         self.source_line = source_line
         self.source_end_line = source_end_line
+        self.total_launches = total_launches
         self._link_mod = None
 
     def __str__(self):
@@ -632,6 +637,8 @@ class RecordedExecution:
             res["SourceLine"] = self.source_line
         if self.source_end_line is not None:
             res["SourceEndLine"] = self.source_end_line
+        if self.total_launches is not None:
+            res["TotalLaunches"] = self.total_launches
         res["VASize"] = self.va_size
         res["VAddr"] = self.va_addr
         res["instances"] = {}
@@ -743,4 +750,5 @@ class RecordedExecution:
             source_md5=record_db.get("SourceMD5"),
             source_line=record_db.get("SourceLine"),
             source_end_line=record_db.get("SourceEndLine"),
+            total_launches=record_db.get("TotalLaunches"),
         )
