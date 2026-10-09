@@ -12,6 +12,7 @@
 #include <utility>
 
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DenseSet.h>
 
 #include <proteus/KernelMetadata.h>
 
@@ -27,6 +28,10 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   RecorderRuntimeFunctions<VendorTypes> Runtime;
   RecordDatabase DB;
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
+  // Allocations served by the vendor runtime (managed, pinned, pitched,
+  // stream-ordered, ...). They are not captured, but the application may
+  // release them with the device free, which must then be forwarded.
+  llvm::DenseSet<void *> PassthroughAllocs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
 
   // NOTE: We only keep track of the first time we set the device id. Once we
@@ -85,6 +90,14 @@ public:
   }
 
   DeviceError_t rtMalloc(void **ptr, size_t size) override {
+    // The runtime still initializes the device for an empty allocation.
+    if (size == 0) {
+      auto ret = Runtime.origMallocDevice(ptr, 0);
+      if (ret == MnemeDeviceRT::DeviceSuccess)
+        trackPassthroughAlloc(*ptr, 0, MnemeDeviceRT::getDeviceMallocFnName());
+      return ret;
+    }
+
     initializePageManagerIfNeeded();
 
     auto [Addr, ReservedSize] = PM->allocateAddr(size, nullptr);
@@ -101,16 +114,27 @@ public:
   DeviceError_t rtManagedMalloc(void **ptr, size_t size,
                                 unsigned int flags) override {
     auto ret = Runtime.origMallocManaged(ptr, size, flags);
-    LOG_DEBUG("Intercepted Managed Malloc PTR:{} SIZE:{}", *ptr, size);
-    LOG_WARN("Will not be able to replay Kernels acessing:{}", *ptr);
+    if (ret == MnemeDeviceRT::DeviceSuccess)
+      trackPassthroughAlloc(*ptr, size,
+                            MnemeDeviceRT::getManagedMallocFnName());
     return ret;
   }
 
   DeviceError_t rtHostMalloc(void **ptr, size_t size,
                              unsigned int flags) override {
     auto ret = Runtime.origMallocPinned(ptr, size, flags);
-    LOG_WARN("Intercepted Pinned|Host Malloc PTR:{} SIZE:{}", *ptr, size);
+    if (ret == MnemeDeviceRT::DeviceSuccess)
+      trackPassthroughAlloc(*ptr, size, MnemeDeviceRT::getPinnedMallocFnName());
     return ret;
+  }
+
+  void trackPassthroughAlloc(void *ptr, size_t size, const char *api) override {
+    if (!ptr)
+      return;
+    PassthroughAllocs.insert(ptr);
+    LOG_DEBUG("Intercepted {} PTR:{} SIZE:{}; will not be able to replay "
+              "Kernels accessing it",
+              api, ptr, size);
   }
 
   DeviceError_t rtFree(void *ptr) override {
@@ -119,6 +143,10 @@ public:
       return MnemeDeviceRT::DeviceSuccess;
     }
     if (!AllocatedBlobs.contains(ptr)) {
+      if (PassthroughAllocs.erase(ptr)) {
+        LOG_DEBUG("Forwarding free of vendor runtime allocation PTR:{}", ptr);
+        return Runtime.origFreeDevice(ptr);
+      }
       LOG_CRITICAL("Free address that is not being allocated through Mneme {}",
                    ptr);
       LOG_FATAL("Free address that is not being allocated through Mneme\n");
@@ -132,7 +160,29 @@ public:
     return ret;
   }
 
+  DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
+    if (AllocatedBlobs.contains(ptr)) {
+      // Mneme releases its memory right away, so first wait for the work
+      // queued on the stream that may still use it. The sync fails during
+      // stream capture; keep the memory then.
+      auto ret = MnemeDeviceRT::DeviceStreamSynchronize(stream);
+      if (ret != MnemeDeviceRT::DeviceSuccess) {
+        LOG_WARN("Not freeing PTR:{}: stream synchronize failed", ptr);
+        return ret;
+      }
+      return rtFree(ptr);
+    }
+    if (ptr == nullptr || PassthroughAllocs.erase(ptr))
+      LOG_DEBUG("Forwarding async free of vendor runtime allocation PTR:{}",
+                ptr);
+    else
+      // Allocated by a function Mneme does not hook; let the runtime decide.
+      LOG_WARN("Forwarding async free of unknown address PTR:{}", ptr);
+    return Runtime.origFreeAsync(ptr, stream);
+  }
+
   DeviceError_t rtHostFree(void *ptr) override {
+    PassthroughAllocs.erase(ptr);
     auto ret = Runtime.origFreeHost(ptr);
     LOG_DEBUG("Free pinned address:{}", ptr);
     return ret;

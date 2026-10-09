@@ -5,17 +5,15 @@ These are not fundamental design blockers, but they may affect certain applicati
 
 ---
 
-## 1. No Support for Managed Memory
+## 1. Only `cudaMalloc`/`hipMalloc` Memory Is Recorded
 
-Mneme does **not** currently support CUDA Unified / Managed Memory (`cudaMallocManaged`).
-
-**Implications:**
-- Kernels that rely on managed memory allocations may fail during replay.
-- Memory state reconstruction assumes explicit device memory allocations (`cudaMalloc`, `hipMalloc`).
+Mneme records only memory allocated with `cudaMalloc`/`hipMalloc`. Memory from
+other allocation functions, such as managed, pinned host, pitched, or
+stream-ordered memory, is not recorded, so kernels that access it may fail
+during replay.
 
 **Workaround:**
-- Replace managed memory with explicit host–device memory transfers.
-- Use pinned host memory and explicit `cudaMemcpy` where possible.
+- Allocate memory that recorded kernels access with `cudaMalloc`/`hipMalloc`.
 
 ---
 

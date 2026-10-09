@@ -68,6 +68,14 @@ enum FuncAttributes { REGISTER_USAGE, LOCALMEM_USAGE, CONSTMEM_USAGE };
 
 template <DeviceVendors Type> struct DeviceTraits;
 
+// A null handle would make dlsym resolve Mneme's own wrappers.
+inline void *loadRTLib(const char *Name) {
+  void *Lib = dlopen(Name, RTLD_NOW);
+  if (!Lib)
+    LOG_FATAL("Could not load {}: {}", Name, dlerror());
+  return Lib;
+}
+
 #if defined(MNEME_ENABLE_HIP)
 template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceError_t = hipError_t;
@@ -82,7 +90,10 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceEvent_t = hipEvent_t;
   static constexpr auto DeviceSuccess = hipSuccess;
 
-  static inline auto *getRTLib() { return dlopen("libamdhip64.so", RTLD_NOW); }
+  static inline void *getRTLib() {
+    static void *Lib = loadRTLib("libamdhip64.so");
+    return Lib;
+  }
   static constexpr const char *getLaunchKernelFnName() {
     return "hipLaunchKernel";
   }
@@ -94,6 +105,7 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return "hipMallocManaged";
   }
   static constexpr const char *getDeviceFreeFnName() { return "hipFree"; }
+  static constexpr const char *getAsyncFreeFnName() { return "hipFreeAsync"; }
   static constexpr const char *getPinnedFreeFnName() { return "hipHostFree"; }
 
   static const char *getDeviceGetIDFnName() { return "hipGetDevice"; }
@@ -403,18 +415,22 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   static constexpr auto DeviceSuccess = cudaSuccess;
   static constexpr auto DeviceDriverSuccess = CUDA_SUCCESS;
 
-  static inline auto *getRTLib() { return dlopen("libcudart.so", RTLD_NOW); }
+  static inline void *getRTLib() {
+    static void *Lib = loadRTLib("libcudart.so");
+    return Lib;
+  }
   static constexpr const char *getLaunchKernelFnName() {
     return "cudaLaunchKernel";
   }
   static constexpr const char *getDeviceMallocFnName() { return "cudaMalloc"; }
   static constexpr const char *getPinnedMallocFnName() {
-    return "cudaMallocHost";
+    return "cudaHostAlloc";
   }
   static constexpr const char *getManagedMallocFnName() {
     return "cudaMallocManaged";
   }
   static constexpr const char *getDeviceFreeFnName() { return "cudaFree"; }
+  static constexpr const char *getAsyncFreeFnName() { return "cudaFreeAsync"; }
   static constexpr const char *getPinnedFreeFnName() { return "cudaFreeHost"; }
   static constexpr const char *getUURegisterFunctionFnName() {
     return "__cudaRegisterFunction";
@@ -744,5 +760,16 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
 };
 #else
 #endif
+
+// The vendor runtime's own implementation of a function that Mneme intercepts.
+// Calling the function by name from Mneme would call Mneme's wrapper instead.
+template <DeviceVendors Vendor, typename FnT>
+FnT getRuntimeFn(const char *Name) {
+  auto Fn =
+      reinterpret_cast<FnT>(dlsym(DeviceTraits<Vendor>::getRTLib(), Name));
+  if (!Fn)
+    LOG_FATAL("Could not find {} in the device runtime", Name);
+  return Fn;
+}
 
 } // namespace mneme

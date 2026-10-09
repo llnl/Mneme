@@ -4,6 +4,7 @@
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeRecord.hpp"
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <utility>
 
 #ifdef __GNUC__
@@ -36,6 +37,8 @@ public:
   }
 };
 
+using Recorder = MnemeRecorderCUDAPreload;
+
 extern "C" {
 cudaError_t cudaMalloc(void **ptr, size_t size) {
   auto &mneme = MnemeRecorderCUDAPreload::instance();
@@ -49,11 +52,62 @@ cudaError_t cudaMallocManaged(void **ptr, size_t size, unsigned int flags) {
   return mneme.rtManagedMalloc(ptr, size, flags);
 };
 
-cudaError_t cudaHostMalloc(void **ptr, size_t size, unsigned int flags) {
+cudaError_t cudaHostAlloc(void **ptr, size_t size, unsigned int flags) {
   auto &mneme = MnemeRecorderCUDAPreload::instance();
   LOG_DEBUG("Entering Mneme to Malloc 'Host|Pinned' pointer of size : {}",
             size);
   return mneme.rtHostMalloc(ptr, size, flags);
+}
+
+cudaError_t cudaMallocHost(void **ptr, size_t size) {
+  return forwardAlloc<Recorder>(
+      "cudaMallocHost", [&] { return std::pair{*ptr, size}; }, ptr, size);
+}
+
+cudaError_t cudaMallocPitch(void **devPtr, size_t *pitch, size_t width,
+                            size_t height) {
+  return forwardAlloc<Recorder>(
+      "cudaMallocPitch", [&] { return std::pair{*devPtr, *pitch * height}; },
+      devPtr, pitch, width, height);
+}
+
+cudaError_t cudaMalloc3D(cudaPitchedPtr *pitchedDevPtr, cudaExtent extent) {
+  return forwardAlloc<Recorder>(
+      "cudaMalloc3D",
+      [&] {
+        return std::pair{pitchedDevPtr->ptr,
+                         pitchedDevPtr->pitch * extent.height * extent.depth};
+      },
+      pitchedDevPtr, extent);
+}
+
+cudaError_t cudaMallocAsync(void **devPtr, size_t size, cudaStream_t hStream) {
+  return forwardAlloc<Recorder>(
+      "cudaMallocAsync", [&] { return std::pair{*devPtr, size}; }, devPtr,
+      size, hStream);
+}
+
+cudaError_t cudaMallocAsync_ptsz(void **devPtr, size_t size,
+                                 cudaStream_t hStream) {
+  return forwardAlloc<Recorder>(
+      "cudaMallocAsync_ptsz", [&] { return std::pair{*devPtr, size}; }, devPtr,
+      size, hStream);
+}
+
+cudaError_t cudaMallocFromPoolAsync(void **ptr, size_t size,
+                                    cudaMemPool_t memPool,
+                                    cudaStream_t stream) {
+  return forwardAlloc<Recorder>(
+      "cudaMallocFromPoolAsync", [&] { return std::pair{*ptr, size}; }, ptr,
+      size, memPool, stream);
+}
+
+cudaError_t cudaMallocFromPoolAsync_ptsz(void **ptr, size_t size,
+                                         cudaMemPool_t memPool,
+                                         cudaStream_t stream) {
+  return forwardAlloc<Recorder>(
+      "cudaMallocFromPoolAsync_ptsz", [&] { return std::pair{*ptr, size}; },
+      ptr, size, memPool, stream);
 }
 
 cudaError_t cudaFree(void *ptr) {
@@ -62,9 +116,23 @@ cudaError_t cudaFree(void *ptr) {
   return mneme.rtFree(ptr);
 };
 
-cudaError_t cudaHostFree(void *ptr) {
+cudaError_t cudaFreeAsync(void *devPtr, cudaStream_t hStream) {
   auto &mneme = MnemeRecorderCUDAPreload::instance();
-  LOG_DEBUG("Entering Mneme to HostFree pointer");
+  LOG_DEBUG("Entering Mneme to FreeAsync pointer");
+  return mneme.rtFreeAsync(devPtr, hStream);
+}
+
+// Used instead of cudaFreeAsync when compiling with a per-thread default
+// stream, where stream 0 means the calling thread's stream.
+cudaError_t cudaFreeAsync_ptsz(void *devPtr, cudaStream_t hStream) {
+  auto &mneme = MnemeRecorderCUDAPreload::instance();
+  LOG_DEBUG("Entering Mneme to FreeAsync pointer");
+  return mneme.rtFreeAsync(devPtr, hStream ? hStream : cudaStreamPerThread);
+}
+
+cudaError_t cudaFreeHost(void *ptr) {
+  auto &mneme = MnemeRecorderCUDAPreload::instance();
+  LOG_DEBUG("Entering Mneme to FreeHost pointer");
   return mneme.rtHostFree(ptr);
 }
 
