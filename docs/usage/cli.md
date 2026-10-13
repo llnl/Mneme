@@ -47,7 +47,10 @@ artifact.
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------            |
 | `-rdb`, `--record-db-dir`               | Path to a **existing** directory where recorded artifacts (metadata, LLVM IR, and device memory snapshots) will be stored |
 | `-vass`, `--virtual-address-space-size` | Size (in **GB**) of the virtual address space allocated by Mneme for recording                                            |
-| `-mr`, `--per-kernel-max-recordings`    | Maximum number of times the same GPU kernel may be recorded with different dynamic hashes                                 |
+| `-mr`, `--per-kernel-max-recordings` | Maximum captures per kernel in default mode; explicit CLI values override `MNEME_MAX_RECORDINGS`, otherwise default 4. Ignored with a warning in scoped/config modes. |
+| `-sr`, `--per-kernel-skip-recordings` | Launches to skip per kernel in default mode; explicit CLI values override `MNEME_SKIP_RECORDINGS`, otherwise default 0. Ignored with a warning in scoped/config modes. |
+| `--filter-mode` | `default` (default), `scoped`, or `config`. Selected from CLI flags, ignoring inherited mode variables. |
+| `--filter-config` | YAML/JSON filter file; implies `config` when the mode is omitted. Required in config mode. |
 | `--epilogue-format`                     | Store epilogue snapshots as `diff`, `bytes`, or `best`; defaults to `diff`                                                        |
 | `-rr`, `--record-ranks`                 | Restrict recording to a comma-separated set of MPI ranks (e.g. `0`, `0,1,3`) or `all` for every rank. See *Multi-rank recording* below. |
 | `--copy-source`                         | Copy the source file that defines each recorded kernel into the record directory and record its MD5 checksum         |
@@ -72,9 +75,9 @@ See [Usage → Artifacts](artifacts.md) for a detailed description of the databa
 mneme record -rdb record-dir -- ./vecAdd 1024
 ```
 
-2. Limit the number of recordings per kernel:
+2. Apply a recording filter (for example, `recording: {defaults: {max_records: 1}}`):
 ```bash
-mneme record -rdb record-dir -mr 1 -- ./vecAdd 1024
+mneme record -rdb record-dir --filter-config filter.yaml -- ./vecAdd 1024
 ```
 
 3. Increase the virtual address space used during recording:
@@ -88,6 +91,11 @@ mneme record -rdb record-dir -vass 64 -- ./vecAdd 1024
 ```bash
 mneme record -rdb record-dir --record-ranks 0 -- mpirun -n 4 ./app
 ```
+
+For application-directed selection, use
+`mneme record --filter-mode scoped -- ./app`. See
+[Selecting launches with scopes](record.md#selecting-launches-with-scopes)
+for the C++ API, nesting rules, and interaction with existing controls.
 
 ### Multi-rank recording
 
@@ -111,7 +119,7 @@ To override the default, pass `--record-ranks`:
 ### Notes
 
 !!! note
-    Mneme may record multiple instances of the same kernel if it is invoked with different dynamic execution contexts. The `--per-kernel-max-recordings` option can be used to limit this behavior.
+    Mneme can save several instances of a kernel. Set `recording.defaults.max_records` in a filter file to limit distinct launch configurations. Repeated configurations remain deduplicated, even when their inputs change.
 
 !!! note
     The virtual address space size should be chosen large enough to accommodate all device allocations performed by the application during kernel execution
