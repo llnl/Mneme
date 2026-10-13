@@ -51,6 +51,15 @@ endfunction()
 BUILD_UNIT_TEST("Config" Config.cpp)
 add_test(NAME Config::Runtime COMMAND Config)
 
+BUILD_UNIT_TEST("RecordingPolicy" RecordingPolicy.cpp ${CMAKE_SOURCE_DIR}/src/MnemeRecordingPolicy.cpp)
+add_test(NAME RecordingPolicy::Runtime COMMAND RecordingPolicy)
+
+# Exercise the shared scope runtime without preloading the recorder or using a GPU.
+find_package(Threads REQUIRED)
+add_executable(RecordScope RecordScope.cpp)
+target_link_libraries(RecordScope PRIVATE mnemert Threads::Threads)
+add_test(NAME RecordScope::Runtime COMMAND RecordScope)
+
 BUILD_UNIT_TEST("SerializeGlobals" SerializeGlobals.cpp)
 add_test(NAME Serialize::Globals COMMAND SerializeGlobals)
 
