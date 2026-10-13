@@ -1,6 +1,7 @@
 # python/tests/test_record_cli.py
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -15,8 +16,17 @@ from mneme.commands import utils as utils_mod
 
 
 @pytest.fixture
-def record_parser():
+def record_parser(monkeypatch):
     """Create a parser with the Record CLI wired in."""
+    for name in (
+        "MNEME_FILTER_MODE",
+        "MNEME_FILTER_CONFIG",
+        "MNEME_MAX_RECORDINGS",
+        "MNEME_SKIP_RECORDINGS",
+        "MNEME_RR_KERNELS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     parser = argparse.ArgumentParser(prog="mneme record")
     Record.set_cli_args(parser)
     return parser
@@ -61,10 +71,6 @@ def test_record_happy_path(tmp_path, record_parser, monkeypatch):
             str(record_dir),
             "--virtual-address-space-size",
             "8",
-            "--per-kernel-max-recordings",
-            "3",
-            "--per-kernel-skip-recordings",
-            "2",
             "--",
             fake_binary,
             "42",
@@ -80,8 +86,8 @@ def test_record_happy_path(tmp_path, record_parser, monkeypatch):
     env = captured["env"]
     assert env["LD_PRELOAD"] == fake_lib
     assert env["MNEME_PAGE_SIZE"] == "8"
-    assert env["MNEME_MAX_RECORDINGS"] == "3"
-    assert env["MNEME_SKIP_RECORDINGS"] == "2"
+    assert "MNEME_MAX_RECORDINGS" not in env
+    assert "MNEME_SKIP_RECORDINGS" not in env
     assert env["MNEME_DATA_DIR"] == str(record_dir)
     assert env["MNEME_EPILOGUE_TYPE"] == "diff"
     assert env["MNEME_LOG_LEVEL"] == "DEBUG"
@@ -262,7 +268,9 @@ def test_record_default_page_size(record_parser, tmp_path, monkeypatch):
     Record.run(args, verbosity=None)
 
     assert captured["env"]["MNEME_PAGE_SIZE"] == "4"  # default from code
-    assert captured["env"]["MNEME_SKIP_RECORDINGS"] == "0"
+    assert "MNEME_SKIP_RECORDINGS" not in captured["env"]
+    assert "MNEME_MAX_RECORDINGS" not in captured["env"]
+    assert captured["env"]["MNEME_FILTER_MODE"] == "default"
 
 
 def _capture_env_with_args(record_parser, tmp_path, monkeypatch, extra_args):
@@ -318,3 +326,208 @@ def test_record_record_ranks_default_unset(record_parser, tmp_path, monkeypatch)
     monkeypatch.delenv("MNEME_RECORD_RANKS", raising=False)
     env = _capture_env_with_args(record_parser, tmp_path, monkeypatch, [])
     assert "MNEME_RECORD_RANKS" not in env
+
+
+@pytest.mark.parametrize("mode", [None, "default", "scoped"])
+def test_record_mode_ignores_environment(record_parser, tmp_path, monkeypatch, mode):
+    monkeypatch.setenv("MNEME_FILTER_MODE", "config")
+    monkeypatch.setenv("MNEME_FILTER_CONFIG", "/nonexistent/policy.json")
+
+    env = _capture_env_with_args(
+        record_parser, tmp_path, monkeypatch,
+        [] if mode is None else ["--filter-mode", mode],
+    )
+
+    assert env["MNEME_FILTER_MODE"] == (mode or "default")
+    assert "MNEME_FILTER_CONFIG" not in env
+    assert "MNEME_SKIP_RECORDINGS" not in env
+    assert "MNEME_MAX_RECORDINGS" not in env
+
+
+@pytest.mark.parametrize(
+    "flags, skip, max_records",
+    [
+        ([], 7, 8),
+        (["-sr", "0", "-mr", "4"], 0, 4),
+        (
+            ["--per-kernel-skip-recordings", "5", "--per-kernel-max-recordings", "2"],
+            5,
+            2,
+        ),
+    ],
+)
+def test_default_controls_json(
+    record_parser, tmp_path, monkeypatch, capsys, flags, skip, max_records
+):
+    monkeypatch.setenv("MNEME_SKIP_RECORDINGS", "7")
+    monkeypatch.setenv("MNEME_MAX_RECORDINGS", "8")
+    monkeypatch.setenv("MNEME_RR_KERNELS", "foo")
+    monkeypatch.setattr(utils_mod, "get_mneme_record_library_name", lambda: "/tmp/x.so")
+    paths = []
+
+    def run(cmd, env):
+        path = Path(env["MNEME_FILTER_CONFIG"])
+        paths.append(path)
+        policy = json.loads(path.read_text())["recording"]
+        assert env["MNEME_FILTER_MODE"] == "default"
+        assert policy["defaults"] == {"skip": skip, "max_records": max_records}
+        assert policy["kernel_overrides"] == [
+            {"match": {"demangled_regex": "foo"}},
+            {"match": {"demangled_regex": ".*"}, "max_records": 0},
+        ]
+        for name in (
+            "MNEME_SKIP_RECORDINGS",
+            "MNEME_MAX_RECORDINGS",
+            "MNEME_RR_KERNELS",
+        ):
+            assert name not in env
+        return record_mod.subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(record_mod.subprocess, "run", run)
+    args = record_parser.parse_args(["-rdb", str(tmp_path), *flags, "--", "/usr/bin/true"])
+    assert Record.run(args, None) == 0
+
+    assert not paths[0].parent.exists()
+    assert not capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["scoped", "config"])
+@pytest.mark.parametrize(
+    "flag", ["--per-kernel-skip-recordings", "--per-kernel-max-recordings"]
+)
+def test_controls_ignored(record_parser, tmp_path, monkeypatch, capsys, mode, flag):
+    for name in ("MNEME_SKIP_RECORDINGS", "MNEME_MAX_RECORDINGS", "MNEME_RR_KERNELS"):
+        monkeypatch.setenv(name, "invalid[")
+
+    policy = tmp_path / "filter.json"
+    policy.write_text('{"recording": {"defaults": {"skip": 5}}}')
+    extra = ["--filter-mode", mode, flag, "invalid"]
+    if mode == "config":
+        extra += ["--filter-config", str(policy)]
+
+    env = _capture_env_with_args(record_parser, tmp_path, monkeypatch, extra)
+
+    message = capsys.readouterr().err
+    assert message.count("Warning:") == 1
+    assert "ignored" in message
+    assert mode in message
+    assert "deprecated" not in message
+    assert flag in message
+    for name in ("MNEME_SKIP_RECORDINGS", "MNEME_MAX_RECORDINGS", "MNEME_RR_KERNELS"):
+        assert name not in env
+        assert name in message
+
+
+@pytest.mark.parametrize("value", ["-1", "1.5", "invalid", "", "18446744073709551616"])
+def test_invalid_default_counts(record_parser, monkeypatch, value):
+    monkeypatch.setenv("MNEME_SKIP_RECORDINGS", value)
+    monkeypatch.setattr(record_mod.subprocess, "run", lambda *a, **kw: pytest.fail("launched"))
+    args = record_parser.parse_args(["--", "/usr/bin/true"])
+    with pytest.raises(SystemExit):
+        Record.run(args, None)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--filter-mode", "config"],
+        ["--filter-mode", "default", "--filter-config", "filter.yaml"],
+        ["--filter-mode", "scoped", "--filter-config", "filter.yaml"],
+    ],
+)
+def test_filter_mode_conflicts(record_parser, monkeypatch, extra):
+    monkeypatch.setattr(record_mod.subprocess, "run", lambda *a, **kw: pytest.fail("launched"))
+    args = record_parser.parse_args([*extra, "--", "/usr/bin/true"])
+    with pytest.raises(SystemExit):
+        Record.run(args, verbosity=None)
+
+
+@pytest.mark.parametrize(
+    "explicit, outcome",
+    [(True, 0), (False, 0), (False, 7), (False, "missing"), (False, "interrupt")],
+)
+def test_filter_json_transport(record_parser, tmp_path, monkeypatch, explicit, outcome):
+    import yaml
+
+    document = {
+        "recording": {
+            "defaults": {"ranks": [0, 2]},
+            "kernel_overrides": [
+                {"match": {"demangled_regex": r"^foo\("}, "skip": 5}
+            ],
+        }
+    }
+    source = tmp_path / ("filter.json" if explicit else "filter.yaml")
+    source.write_text(json.dumps(document) if explicit else yaml.safe_dump(document))
+    records = tmp_path / "records"
+    monkeypatch.setenv("MNEME_RECORD_RANKS", "9")
+    monkeypatch.setenv("MNEME_FILTER_MODE", "scoped")
+    monkeypatch.setenv("MNEME_FILTER_CONFIG", "/old/config")
+    monkeypatch.setattr(utils_mod, "get_mneme_record_library_name", lambda: "/tmp/x.so")
+    observed = []
+
+    def run(cmd, env):
+        path = Path(env["MNEME_FILTER_CONFIG"])
+        observed.append(path)
+        assert path.is_absolute()
+        assert path.parent.parent == records
+        assert not list(records.glob("*.json"))
+        assert json.loads(path.read_text()) == document
+        assert env["MNEME_FILTER_MODE"] == "config"
+        assert env["MNEME_RECORD_RANKS"] == "1"
+
+        if outcome == "missing":
+            raise FileNotFoundError("missing executable")
+        if outcome == "interrupt":
+            raise KeyboardInterrupt()
+        return record_mod.subprocess.CompletedProcess([], outcome)
+
+    monkeypatch.setattr(record_mod.subprocess, "run", run)
+    args = record_parser.parse_args(
+        [
+            "-rdb", str(records),
+            "--filter-config", str(source),
+            "--record-ranks", "1",
+            *(["--filter-mode", "config"] if explicit else []),
+            "--", "/usr/bin/true",
+        ]
+    )
+    if outcome == "missing":
+        with pytest.raises(SystemExit):
+            Record.run(args, verbosity=None)
+    elif outcome == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            Record.run(args, verbosity=None)
+    else:
+        assert Record.run(args, verbosity=None) == outcome
+
+    assert len(observed) == 1
+    assert not observed[0].parent.exists()
+    assert source.exists()
+
+
+@pytest.mark.parametrize(
+    "contents", ["[", "[]", "null", "text", "recording: .nan", "recording: 2026-10-01"]
+)
+def test_invalid_yaml_transport(record_parser, tmp_path, monkeypatch, contents):
+    source = tmp_path / "filter.yaml"
+    source.write_text(contents)
+    monkeypatch.setattr(record_mod.subprocess, "run", lambda *a, **kw: pytest.fail("launched"))
+    args = record_parser.parse_args(["--filter-config", str(source), "--", "/usr/bin/true"])
+    with pytest.raises(SystemExit):
+        Record.run(args, verbosity=None)
+
+
+def test_missing_filter_file(record_parser, tmp_path, monkeypatch):
+    monkeypatch.setattr(record_mod.subprocess, "run", lambda *a, **kw: pytest.fail("launched"))
+    args = record_parser.parse_args(
+        ["--filter-config", str(tmp_path / "missing"), "--", "/usr/bin/true"]
+    )
+    with pytest.raises(SystemExit):
+        Record.run(args, verbosity=None)
+
+
+@pytest.mark.parametrize("mode", ["automatic", "file.yaml", "", "CONFIG"])
+def test_invalid_filter_mode(record_parser, mode):
+    with pytest.raises(SystemExit):
+        record_parser.parse_args(["--filter-mode", mode, "--", "/usr/bin/true"])

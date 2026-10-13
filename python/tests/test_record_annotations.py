@@ -107,6 +107,9 @@ def test_record_annotations_complex_cases(build_annotation_test_program, tmp_pat
     out_dir = tmp_path / "record_annotations_out"
     out_dir.mkdir()
 
+    policy = tmp_path / "filter.json"
+    policy.write_text(json.dumps({"recording": {"defaults": {"max_records": 8}}}))
+
     rc = mneme_main(
         [
             "record",
@@ -114,8 +117,8 @@ def test_record_annotations_complex_cases(build_annotation_test_program, tmp_pat
             str(out_dir),
             "-vass",
             "2",
-            "--per-kernel-max-recordings",
-            "8",
+            "--filter-config",
+            str(policy),
             "--",
             str(binary),
             "1024",
