@@ -98,11 +98,14 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
       } else if (auto *List = Ranks->getAsArray()) {
         // check if the current rank is included in the list of ranks
         int Rank = detectDistributedRank().value_or(0);
+
         for (const auto &Item : *List) {
           auto Number = Item.getAsUINT64();
+
           if (!Number || *Number > INT_MAX)
             invalid("recording.defaults.ranks",
                     "expected nonnegative integer ranks");
+          
           Enabled |= *Number == Rank;
         }
       } else {
@@ -168,6 +171,7 @@ RecordingPolicy RecordingPolicy::load(const Config &Conf) {
       Controls += Name;
     }
   }
+
   if (Conf.RecordingFilterMode != FilterMode::Default && !Controls.empty())
     std::cerr << "[mneme] Warning: " << Controls
               << " are ignored in "
@@ -181,9 +185,9 @@ RecordingPolicy RecordingPolicy::load(const Config &Conf) {
       throw std::runtime_error("Cannot read MNEME_FILTER_CONFIG '" +
                                *Conf.FilterConfigPath + "': " +
                                Buffer.getError().message());
+
     Result = fromJSON((*Buffer)->getBuffer().str());
   } else if (Conf.RecordingFilterMode == FilterMode::Default && !Controls.empty()) {
-    // Direct preloading uses the same document and parser as CLI transport.
     llvm::json::Object Defaults;
     for (auto Field : {std::pair{"MNEME_SKIP_RECORDINGS", "skip"},
                        std::pair{"MNEME_MAX_RECORDINGS", "max_records"}}) {
@@ -194,12 +198,14 @@ RecordingPolicy RecordingPolicy::load(const Config &Conf) {
         Defaults[Field.second] = Count;
       }
     }
+
     llvm::json::Object Recording{{"defaults", std::move(Defaults)}};
     if (const char *Pattern = std::getenv("MNEME_RR_KERNELS"))
       Recording["kernel_overrides"] = llvm::json::Array{
           llvm::json::Object{{"match", llvm::json::Object{{"demangled_regex", Pattern}}}},
           llvm::json::Object{{"match", llvm::json::Object{{"demangled_regex", ".*"}}},
                              {"max_records", 0}}};
+
     std::string JSON;
     llvm::raw_string_ostream Stream(JSON);
     Stream << llvm::json::Value(llvm::json::Object{{"recording", std::move(Recording)}});
@@ -207,6 +213,7 @@ RecordingPolicy RecordingPolicy::load(const Config &Conf) {
   } else {
     Result.EnabledThisRank = Conf.isRecordingEnabledForCurrentRank();
   }
+
   // Preserve the original environment regex's support for both name forms.
   Result.MatchMangledNames = Conf.RecordingFilterMode == FilterMode::Default;
   return Result;
@@ -228,6 +235,7 @@ KernelRecordingPolicy RecordingPolicy::resolve(const std::string &Name,
         (MatchMangledNames && !MangledName.empty() &&
          std::regex_search(MangledName, Rule.Pattern)))
       return Rule.Policy;
+      
   return Defaults;
 }
 
