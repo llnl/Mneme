@@ -104,6 +104,7 @@ config.substitutions.append(('%RR', RR))
 config.substitutions.append(('%ext', EXT))
 config.substitutions.append(('%FILECHECK', FILECHECK))
 config.substitutions.append(('%build', '${CMAKE_CURRENT_BINARY_DIR}'))
+config.substitutions.append(('%PYTHON', '${Python3_EXECUTABLE}'))
 "
 )
 
@@ -121,6 +122,9 @@ CREATE_RDC_GPU_TEST(test_block_grid_3d test_block_grid_3d.cpp)
 
 CREATE_GPU_TEST(test_skip_recordings test_skip_recordings.cpp)
 CREATE_RDC_GPU_TEST(test_skip_recordings test_skip_recordings.cpp)
+
+CREATE_GPU_TEST(test_record_scope test_record_scope.cpp)
+CREATE_RDC_GPU_TEST(test_record_scope test_record_scope.cpp)
 
 CREATE_GPU_TEST(test_multi_file multi_file1.cpp multi_file2.cpp)
 CREATE_RDC_GPU_TEST(test_multi_file multi_file1.cpp multi_file2.cpp)

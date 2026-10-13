@@ -1,0 +1,15 @@
+{
+  "recording": {
+    "defaults": {
+      "max_records": 0
+    },
+    "kernel_overrides": [
+      {
+        "match": {
+          "demangled_regex": "_two"
+        },
+        "max_records": 4
+      }
+    ]
+  }
+}

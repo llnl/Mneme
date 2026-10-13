@@ -1,0 +1,8 @@
+{
+  "recording": {
+    "defaults": {
+      "skip": 2,
+      "max_records": 2
+    }
+  }
+}
