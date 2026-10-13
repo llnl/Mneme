@@ -9,9 +9,6 @@ namespace mneme {
 
 class Config;
 
-/* for skips and max recordings how do we determine what a unique launch is */
-enum class Deduplication { Configuration, Invocations };
-
 struct KernelRecordingPolicy {
   uint64_t Skip = 0;
   uint64_t Every = 1;
@@ -32,7 +29,6 @@ public:
 
   KernelRecordingPolicy resolve(const std::string &DemangledName,
                                 const std::string &MangledName = "") const;
-  Deduplication deduplication() const { return Dedup; }
   bool isRecordingEnabledForCurrentRank() const { return EnabledThisRank; }
 
 private:
@@ -43,7 +39,6 @@ private:
 
   KernelRecordingPolicy Defaults;
   std::vector<Rule> Rules;
-  Deduplication Dedup = Deduplication::Configuration;
   bool EnabledThisRank = true;
   bool MatchMangledNames = false;
 

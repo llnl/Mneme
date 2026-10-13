@@ -69,20 +69,11 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
     invalid("recording", "required mapping is missing");
 
   const auto &Body = object(*Recording, "recording");
-  keys(Body, "recording", {"defaults", "kernel_overrides", "deduplication"});
+  keys(Body, "recording", {"defaults", "kernel_overrides"});
 
   RecordingPolicy Result;
   Result.EnabledThisRank =
       config_detail::computeRecordingEnabledForCurrentRank();
-
-  if (const auto *Value = Body.get("deduplication")) {
-    auto Name = Value->getAsString();
-    if (!Name || (*Name != "configuration" && *Name != "invocations"))
-      invalid("recording.deduplication",
-              "expected configuration or invocations");
-    Result.Dedup = *Name == "invocations" ? Deduplication::Invocations
-                                          : Deduplication::Configuration;
-  }
 
   if (const auto *Value = Body.get("defaults")) {
     const auto &Defaults = object(*Value, "recording.defaults");

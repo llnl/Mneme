@@ -361,7 +361,7 @@ class RecordedExecution:
       - Argument names and specialization availability
       - Virtual address space reservation information (VA base + size)
       - LLVM IR module file paths required for linking
-      - A mapping of **record ID → KernelInstance**, representing each observed
+      - A mapping of **dynamic hash → KernelInstance**, representing each observed
         launch instance (grid/block/shared-mem and snapshot paths)
 
     The class behaves like a mapping over kernel instances and supports JSON
@@ -386,7 +386,7 @@ class RecordedExecution:
     va_size : int
         Virtual address space size in bytes (or recording-specific unit).
     kernel_instances : dict[str, KernelInstance]
-        Mapping from opaque record ID to recorded launch instance descriptor.
+        Mapping from dynamic hash to recorded launch instance descriptor.
     """
 
     class KernelInstance:
@@ -398,8 +398,7 @@ class RecordedExecution:
         Each :class:`KernelInstance` stores:
 
           - Launch parameters (grid, block, shared memory)
-          - Record ID (configuration hash or invocation number, exposed through
-            the historical ``dynamic_hash`` attribute)
+          - Dynamic hash (the record ID, identifying the launch configuration)
           - Available specialization indices (derived from specialization flags)
           - Snapshot file paths for prologue and epilogue
 

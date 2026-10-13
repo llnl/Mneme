@@ -328,40 +328,37 @@ public:
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream,
-      uint64_t StaticHash, EpilogueSnapshotType EpilogueType,
-      uint64_t LaunchNumber, Deduplication Dedup) {
+      uint64_t StaticHash, EpilogueSnapshotType EpilogueType) {
 
     if (NumRecords >= MaxRecordings)
       return std::nullopt;
 
-    auto InstanceID = Dedup == Deduplication::Invocations
-                           ? LaunchNumber
-                           : computeHash(GridDim, BlockDim, SharedMem, Args);
+    auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem, Args);
 
-    if (Instances.contains(InstanceID)) {
-      Instances[InstanceID].NumOccurrences++;
+    if (Instances.contains(DynamicHash)) {
+      Instances[DynamicHash].NumOccurrences++;
       LOG_DEBUG(
-          "Kernel {} with InstanceID {} is already recorded, skipping ...",
-          StaticHash, InstanceID);
+          "Kernel {} with DynamicHash {} is already recorded, skipping ...",
+          StaticHash, DynamicHash);
       return std::nullopt;
     }
 
     NumRecords++;
 
-    LOG_DEBUG("First Instance of Kernel {} with InstanceID {}, recording ...",
-              StaticHash, InstanceID);
+    LOG_DEBUG("First Instance of Kernel {} with DynamicHash {}, recording ...",
+              StaticHash, DynamicHash);
 
     Instances.insert(
-        {InstanceID, KernelInstance(GridDim, BlockDim, SharedMem, Args)});
+        {DynamicHash, KernelInstance(GridDim, BlockDim, SharedMem, Args)});
     std::filesystem::path Filename(MnemeDir /
                                    (std::string("DeviceState.prologue.") +
                                     std::to_string(StaticHash) + "." +
-                                    std::to_string(InstanceID) + ".mneme"));
+                                    std::to_string(DynamicHash) + ".mneme"));
 
     auto PrologueGlobals = std::make_shared<GlobalSnapshotData>();
     SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory, KernelArgSizes,
                                   Args, Stream};
-    Instances[InstanceID].PrologueFn =
+    Instances[DynamicHash].PrologueFn =
         BytesWriter<VendorTypes>(PrologueGlobals).write(Filename, In).string();
 
     // std::function requires a copyable callable, so the writer is shared.
@@ -372,7 +369,7 @@ public:
                        void **,
                        typename DeviceTraits<VendorTypes>::DeviceStream_t)>
         CaptureEpilogue =
-            [this, InstanceID, StaticHash, MnemeDir, GlobalVars, Writer](
+            [this, DynamicHash, StaticHash, MnemeDir, GlobalVars, Writer](
                 llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>>
                     &DeviceMemory,
                 void **Args,
@@ -380,11 +377,11 @@ public:
               std::filesystem::path Filename(
                   MnemeDir / (std::string("DeviceState.epilogue.") +
                               std::to_string(StaticHash) + "." +
-                              std::to_string(InstanceID) + ".mneme"));
+                              std::to_string(DynamicHash) + ".mneme"));
 
               SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory,
                                             KernelArgSizes, Args, Stream};
-              Instances[InstanceID].EpilogueFn =
+              Instances[DynamicHash].EpilogueFn =
                   Writer->write(Filename, In).string();
             };
     return CaptureEpilogue;
@@ -470,8 +467,7 @@ public:
       LOG_INFO("Created instance");
     return IT.first->second.takeSnapshot<VendorTypes>(
         MnemeDirectory, KInfo.getGlobals(), DeviceMemory, GridDim, BlockDim,
-        Args, SharedMem, Stream, StaticHash, EpilogueType, State.Count,
-        RecordingPolicy::get().deduplication());
+        Args, SharedMem, Stream, StaticHash, EpilogueType);
   }
 
   const std::string getDir() const { return MnemeDirectory.string(); }
