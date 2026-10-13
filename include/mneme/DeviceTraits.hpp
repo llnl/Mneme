@@ -9,6 +9,8 @@
 #ifdef MNEME_ENABLE_HIP
 #include <hip/amd_detail/amd_hip_runtime.h>
 #include <hip/hip_runtime.h>
+#include <hsa/hsa.h>
+#include <hsa/hsa_ext_amd.h>
 
 #define hipErrCheck(CALL)                                                      \
   {                                                                            \
@@ -66,6 +68,14 @@ enum FuncAttributes { REGISTER_USAGE, LOCALMEM_USAGE, CONSTMEM_USAGE };
 
 template <DeviceVendors Type> struct DeviceTraits;
 
+// A null handle would make dlsym resolve Mneme's own wrappers.
+inline void *loadRTLib(const char *Name) {
+  void *Lib = dlopen(Name, RTLD_NOW);
+  if (!Lib)
+    LOG_FATAL("Could not load {}: {}", Name, dlerror());
+  return Lib;
+}
+
 #if defined(MNEME_ENABLE_HIP)
 template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceError_t = hipError_t;
@@ -80,7 +90,10 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   using DeviceEvent_t = hipEvent_t;
   static constexpr auto DeviceSuccess = hipSuccess;
 
-  static inline auto *getRTLib() { return dlopen("libamdhip64.so", RTLD_NOW); }
+  static inline void *getRTLib() {
+    static void *Lib = loadRTLib("libamdhip64.so");
+    return Lib;
+  }
   static constexpr const char *getLaunchKernelFnName() {
     return "hipLaunchKernel";
   }
@@ -92,6 +105,7 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return "hipMallocManaged";
   }
   static constexpr const char *getDeviceFreeFnName() { return "hipFree"; }
+  static constexpr const char *getAsyncFreeFnName() { return "hipFreeAsync"; }
   static constexpr const char *getPinnedFreeFnName() { return "hipHostFree"; }
 
   static const char *getDeviceGetIDFnName() { return "hipGetDevice"; }
@@ -249,6 +263,40 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     ADesc.flags = hipMemAccessFlagsProtReadWrite;
 
     hipErrCheck(hipMemSetAccess(Addr, Size, &ADesc, 1));
+    grantHostAccess(Addr, Size, DeviceID);
+  }
+
+  // On integrated GPUs, applications expect device memory to be
+  // host-accessible, but VMM mappings are GPU-only by default. Grant the CPU
+  // access through ROCr, since hipMemSetAccess may ignore host locations.
+  static void grantHostAccess(void *Addr, uint64_t Size, int DeviceID) {
+    int Integrated = 0;
+    hipErrCheck(hipDeviceGetAttribute(&Integrated, hipDeviceAttributeIntegrated,
+                                      DeviceID));
+    if (!Integrated)
+      return;
+
+    static hsa_agent_t CpuAgent = [] {
+      hsa_agent_t Agent{0};
+      hsa_iterate_agents(
+          [](hsa_agent_t A, void *Data) {
+            hsa_device_type_t Type;
+            hsa_agent_get_info(A, HSA_AGENT_INFO_DEVICE, &Type);
+            if (Type != HSA_DEVICE_TYPE_CPU)
+              return HSA_STATUS_SUCCESS;
+            *static_cast<hsa_agent_t *>(Data) = A;
+            return HSA_STATUS_INFO_BREAK;
+          },
+          &Agent);
+      return Agent;
+    }();
+    if (!CpuAgent.handle)
+      LOG_FATAL("Cannot find the HSA CPU agent to grant host access");
+
+    hsa_amd_memory_access_desc_t Desc{HSA_ACCESS_PERMISSION_RW, CpuAgent};
+    if (hsa_amd_vmem_set_access(Addr, Size, &Desc, 1) != HSA_STATUS_SUCCESS)
+      LOG_FATAL("Cannot grant host access to device memory at {} size {}", Addr,
+                Size);
   }
 
   static uint64_t getMinPageSize(int DeviceID) {
@@ -290,8 +338,6 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   static hipError_t deviceStreamDestroy(hipStream_t Stream) {
     return hipStreamDestroy(Stream);
   }
-
-  static constexpr uintptr_t getSuggestedAddr() { return 0x1534f7e00000; }
 
   static hipError_t deviceLaunchKernel(const void *function_address,
                                        dim3 numBlocks, dim3 dimBlocks,
@@ -369,18 +415,22 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   static constexpr auto DeviceSuccess = cudaSuccess;
   static constexpr auto DeviceDriverSuccess = CUDA_SUCCESS;
 
-  static inline auto *getRTLib() { return dlopen("libcudart.so", RTLD_NOW); }
+  static inline void *getRTLib() {
+    static void *Lib = loadRTLib("libcudart.so");
+    return Lib;
+  }
   static constexpr const char *getLaunchKernelFnName() {
     return "cudaLaunchKernel";
   }
   static constexpr const char *getDeviceMallocFnName() { return "cudaMalloc"; }
   static constexpr const char *getPinnedMallocFnName() {
-    return "cudaMallocHost";
+    return "cudaHostAlloc";
   }
   static constexpr const char *getManagedMallocFnName() {
     return "cudaMallocManaged";
   }
   static constexpr const char *getDeviceFreeFnName() { return "cudaFree"; }
+  static constexpr const char *getAsyncFreeFnName() { return "cudaFreeAsync"; }
   static constexpr const char *getPinnedFreeFnName() { return "cudaFreeHost"; }
   static constexpr const char *getUURegisterFunctionFnName() {
     return "__cudaRegisterFunction";
@@ -647,8 +697,6 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
     return cudaStreamDestroy(Stream);
   }
 
-  static constexpr uintptr_t getSuggestedAddr() { return 0x153940000000; }
-
   static DeviceError_t deviceLaunchKernel(const void *kernelFunc, dim3 gridDim,
                                           dim3 blockDim, void **kernelArgs,
                                           size_t sharedMemBytes,
@@ -712,5 +760,16 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
 };
 #else
 #endif
+
+// The vendor runtime's own implementation of a function that Mneme intercepts.
+// Calling the function by name from Mneme would call Mneme's wrapper instead.
+template <DeviceVendors Vendor, typename FnT>
+FnT getRuntimeFn(const char *Name) {
+  auto Fn =
+      reinterpret_cast<FnT>(dlsym(DeviceTraits<Vendor>::getRTLib(), Name));
+  if (!Fn)
+    LOG_FATAL("Could not find {} in the device runtime", Name);
+  return Fn;
+}
 
 } // namespace mneme

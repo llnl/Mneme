@@ -3,10 +3,12 @@
 #include <llvm/Support/raw_ostream.h>
 #include <set>
 #include <sys/types.h>
+#include <vector>
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeUtils.hpp"
+#include "mneme/MnemeVASpace.hpp"
 
 struct ContiguousAddrBlock {
   // Starting address of the free block
@@ -221,27 +223,30 @@ template <mneme::DeviceVendors VendorTypes>
 std::unique_ptr<PageManager<VendorTypes>>
 initializePageManager(int DeviceID, void *ReqAddr = nullptr,
                       uint64_t ActualSize = -1) {
-  const int MaxTries = 5;
-  auto MinPageSize = mneme::DeviceTraits<VendorTypes>::getMinPageSize(DeviceID);
+  using DT = mneme::DeviceTraits<VendorTypes>;
+  auto MinPageSize = DT::getMinPageSize(DeviceID);
   if (ActualSize == -1)
-    ActualSize = mneme::util::roundUp(
-        mneme::DeviceTraits<VendorTypes>::getFixedMemorySize(), MinPageSize);
+    ActualSize = mneme::util::roundUp(DT::getFixedMemorySize(), MinPageSize);
+
+  // Replay must get the recorded address; record picks one.
+  std::vector<uintptr_t> Candidates;
+  if (ReqAddr)
+    Candidates.push_back(reinterpret_cast<uintptr_t>(ReqAddr));
+  else
+    Candidates = mneme::util::suggestVAddrs(ActualSize, MinPageSize);
+  if (Candidates.empty())
+    Candidates.push_back(0);
+
   void *VA = nullptr;
-  int Try = 0;
-  if (!ReqAddr)
-    ReqAddr = reinterpret_cast<void *>(
-        mneme::DeviceTraits<VendorTypes>::getSuggestedAddr());
-
-  while (VA != ReqAddr && Try < MaxTries) {
+  for (size_t I = 0; I < Candidates.size(); I++) {
+    void *Want = reinterpret_cast<void *>(Candidates[I]);
     LOG_INFO("Trying {}/{} to Reserve Virtual Address {} space of size {}...",
-             Try, MaxTries, reinterpret_cast<void *>(ReqAddr), ActualSize);
-
-    if (VA)
-      mneme::DeviceTraits<VendorTypes>::freeVirtualAddress(VA, ActualSize);
-
-    VA = mneme::DeviceTraits<VendorTypes>::getVirtualAddress(
-        ActualSize, reinterpret_cast<void *>(ReqAddr), MinPageSize);
-    Try++;
+             I + 1, Candidates.size(), Want, ActualSize);
+    VA = DT::getVirtualAddress(ActualSize, Want, MinPageSize);
+    if (VA == Want || !Want || I + 1 == Candidates.size())
+      break;
+    LOG_INFO("... got {} instead", VA);
+    DT::freeVirtualAddress(VA, ActualSize);
   }
   LOG_INFO("... Reserved Virtual Address {}", VA);
   return std::make_unique<PageManager<VendorTypes>>(ActualSize, MinPageSize, VA,

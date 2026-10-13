@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <hip/hip_runtime.h>
@@ -58,10 +59,8 @@ private:
   std::unordered_map<int64_t, std::vector<int64_t>> profilesByToken;
   std::unordered_map<rocprofiler_kernel_id_t, std::string> rocrKernelNames;
 
-  std::mutex drainMutex;
-  std::condition_variable drainCv;
-  std::atomic<uint64_t> cbTotalRecords{0};
-  std::atomic<uint64_t> cbTotalBatches{0};
+  // Signaled when a target kernel's duration arrives.
+  std::condition_variable recordsCv;
 
   MnemeRocProfiler() {};
 
@@ -69,42 +68,6 @@ public:
   static MnemeRocProfiler &instance() {
     static MnemeRocProfiler Profiler;
     return Profiler;
-  }
-
-    // called from buffer_cb after processing a batch
-  void notifyBatch(unsigned long nrecs) {
-    cbTotalRecords.fetch_add(nrecs, std::memory_order_release);
-    cbTotalBatches.fetch_add(1, std::memory_order_release);
-    drainCv.notify_all();
-  }
-
-  // Flush + wait until callback thread drains buffered work.
-  // We drain until cbTotalRecords stops changing after a flush.
-  void flushDrain() {
-    // We may see unrelated activity; we only care that *everything currently
-    // buffered* has been delivered. Draining until stable achieves that.
-    uint64_t prev = cbTotalRecords.load(std::memory_order_acquire);
-
-    for (int iter = 0; iter < 32; ++iter) {
-      CHECK_ROCP(rocprofiler_flush_buffer(rocrGBuf));
-
-      // Wait until we observe at least one batch, or timeout.
-      // Timeout keeps us from deadlocking if flush produces no callbacks.
-      std::unique_lock<std::mutex> lk(drainMutex);
-      drainCv.wait_for(lk, std::chrono::milliseconds(10), [&] {
-        return cbTotalRecords.load(std::memory_order_acquire) != prev;
-      });
-
-      uint64_t now = cbTotalRecords.load(std::memory_order_acquire);
-      if (now == prev) {
-        // No new records observed after flush => stable => drained
-        return;
-      }
-      prev = now;
-    }
-    // If we get here, system is still producing records constantly.
-    // We still proceed, but counts may be non-deterministic.
-    LOG_WARN("rocprofiler flushDrain reached iteration limit; records still changing");
   }
 
   // Callback to get the kernel-id->Name mapping
@@ -165,6 +128,7 @@ public:
 
         LOG_DEBUG("Associating {} with token id {} and duration {}", KName, token2, dur);
         profilesByToken[token2].push_back(dur);
+        recordsCv.notify_all();
       }
     }
   }
@@ -187,28 +151,29 @@ public:
     return tok;
   }
 
-  int64_t numRecords(int64_t Token) {
-    rocprofiler_thread_id_t tid{};
-    CHECK_ROCP(rocprofiler_get_thread_id(&tid));
-
+  // Waits until Expected durations arrived for Token; returns how many did.
+  int64_t numRecords(int64_t Token, int64_t Expected) {
     auto EC = DeviceVendorTraits::DeviceErrorCheck(
         DeviceVendorTraits::DeviceSynchronize());
     if (EC)
       LOG_FATAL("Error When Launching Kernel: " + EC.value());
-    
-    flushDrain();
 
-    {
-      std::lock_guard<std::mutex> lk(rocrMutex);
-      if (auto it = profilesByToken.find(Token); it != profilesByToken.end()) {
-        return it->second.size();
-      }
+    auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::unique_lock<std::mutex> lk(rocrMutex);
+    auto Have = [&]() -> int64_t {
+      auto It = profilesByToken.find(Token);
+      return It == profilesByToken.end() ? 0 : It->second.size();
+    };
+    while (Have() < Expected &&
+           std::chrono::steady_clock::now() < Deadline) {
+      // Flush may run buffer_cb on this thread, which takes rocrMutex.
+      lk.unlock();
+      CHECK_ROCP(rocprofiler_flush_buffer(rocrGBuf));
+      lk.lock();
+      recordsCv.wait_for(lk, std::chrono::milliseconds(10),
+                         [&] { return Have() >= Expected; });
     }
-
-    LOG_DEBUG("Error Num Records could not be found Token {} assigned to "
-              "thread id {}",
-              Token, tid);
-    return -1;
+    return Have();
   }
 
   std::vector<int64_t> stop(int64_t Token) {
@@ -247,9 +212,6 @@ static void buffer_cb(rocprofiler_context_id_t, rocprofiler_buffer_id_t,
   auto &instance = mneme::MnemeRocProfiler::instance();
   LOG_DEBUG("Logging duration");
   instance.logDuration(headers, n);
-
-  // ---- NOTIFY FLUSH BARRIER (ADD) ----
-  instance.notifyBatch(n);
 }
 
 static void codeobj_cb(rocprofiler_callback_tracing_record_t rec,
@@ -331,10 +293,10 @@ MnemePy_stopProfile(int64_t Token, int64_t *ProfileData, int64_t Size) {
   }
 }
 
-API_EXPORT(int64_t) MnemePy_getNumRecords(int64_t token) {
+API_EXPORT(int64_t) MnemePy_getNumRecords(int64_t token, int64_t expected) {
   LOG_DEBUG("Requested to get number of profile records {}", token);
   auto &instance = mneme::MnemeRocProfiler::instance();
-  auto records = instance.numRecords(token);
+  auto records = instance.numRecords(token, expected);
   LOG_DEBUG("Record contains {} elements", records);
   return records;
 }

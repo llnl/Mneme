@@ -28,6 +28,9 @@
 # We define the following GitLab pipeline variables:
 variables:
 ##### LC GITLAB CONFIGURATION
+# Keep Mneme clones out of the default ~/.jacamar-ci/builds, which other
+# projects' CI jobs share and clean up.
+  CUSTOM_CI_BUILDS_DIR: "/usr/workspace/LExperts/mneme-gitlab-runner"
 # Tells Gitlab to recursively update the submodules when cloning the project.
 #  GIT_SUBMODULE_STRATEGY: recursive
 
@@ -131,7 +134,6 @@ meta-only:
   interruptible: true
   variables:
     PIPELINE_KIND: build-and-test
-    MACHINE_DOWN: $MACHINE_DOWN
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'
@@ -154,7 +156,6 @@ meta-only:
   interruptible: true
   variables:
     PIPELINE_KIND: test-spack
-    MACHINE_DOWN: $MACHINE_DOWN
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'
@@ -171,7 +172,6 @@ meta-only:
   interruptible: true
   variables:
     PIPELINE_KIND: test-python-cov
-    MACHINE_DOWN: $MACHINE_DOWN
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'

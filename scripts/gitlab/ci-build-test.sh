@@ -109,7 +109,7 @@ if [[ "$SYS_TYPE" == "toss_4_x86_64_ib" ]]; then
   PYTHON_VERSION=3.12
 
 # Install Clang/LLVM through conda.
-setup_conda_env "miniconda3" "${MNEME_CI_LLVM_VERSION}" "$PYTHON_VERSION"
+setup_conda_env "miniforge3" "${MNEME_CI_LLVM_VERSION}" "$PYTHON_VERSION"
 
 LLVM_INSTALL_DIR=$(llvm-config --prefix)
 export LLVM_INSTALL_DIR=$(llvm-config --prefix)

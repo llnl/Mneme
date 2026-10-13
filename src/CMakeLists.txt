@@ -45,7 +45,7 @@ if (MNEME_ENABLE_LOGGER)
 endif()
 
 if(MNEME_ENABLE_HIP)
-  target_link_libraries(record PRIVATE hip::host)
+  target_link_libraries(record PRIVATE hip::host hsa-runtime64::hsa-runtime64)
   target_link_libraries(record PRIVATE ${MNEME_LLVM_LIBS})
 elseif(MNEME_ENABLE_CUDA)
   target_link_libraries(record PRIVATE CUDA::cudart CUDA::cuda_driver)

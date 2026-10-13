@@ -5,17 +5,15 @@ These are not fundamental design blockers, but they may affect certain applicati
 
 ---
 
-## 1. No Support for Managed Memory
+## 1. Only `cudaMalloc`/`hipMalloc` Memory Is Recorded
 
-Mneme does **not** currently support CUDA Unified / Managed Memory (`cudaMallocManaged`).
-
-**Implications:**
-- Kernels that rely on managed memory allocations may fail during replay.
-- Memory state reconstruction assumes explicit device memory allocations (`cudaMalloc`, `hipMalloc`).
+Mneme records only memory allocated with `cudaMalloc`/`hipMalloc`. Memory from
+other allocation functions, such as managed, pinned host, pitched, or
+stream-ordered memory, is not recorded, so kernels that access it may fail
+during replay.
 
 **Workaround:**
-- Replace managed memory with explicit host–device memory transfers.
-- Use pinned host memory and explicit `cudaMemcpy` where possible.
+- Allocate memory that recorded kernels access with `cudaMalloc`/`hipMalloc`.
 
 ---
 
@@ -60,6 +58,31 @@ If you need this:
 
 - Please open a GitHub issue with a minimal reproducer.
 - RDC support is planned but not yet prioritized.
+
+## 4. GPU-Aware Cray MPICH on AMD APUs Needs `MPICH_SMP_SINGLE_COPY_MODE=NONE`
+
+During recording, Mneme serves device allocations from its own virtual address
+space, mapped with the HIP virtual memory API (`hipMemCreate`/`hipMemMap`).
+Cray MPICH's GPU transport layer does not recognize these mappings as GPU memory
+and treats them as host memory. On AMD APUs (e.g. MI300A), on-node messages
+between ranks then go through MPICH's default XPMEM single-copy path, which
+cannot attach these pages.
+
+**Symptoms:**
+- A recorded multi-rank run with `MPICH_GPU_SUPPORT_ENABLED=1` crashes with
+  `SIGBUS` in an MPI call when GPU buffers are exchanged between ranks on the
+  same node.
+- The same application runs correctly without `mneme record`.
+
+**Workaround:**
+Set the following variable for the recorded run:
+```bash
+export MPICH_SMP_SINGLE_COPY_MODE=NONE
+mneme record -rdb record-dir --record-ranks all -- flux run -n 2 ./app
+```
+On-node messages are then staged through MPICH's shared-memory buffers. They
+are correct but slower, and the setting also applies to buffers that Mneme does
+not manage. Replay does not use MPI and is unaffected.
 
 ## Reporting Issues or Requesting Support
 

@@ -35,8 +35,14 @@ public:
     return Runtime.origMallocPinned(ptr, size, flags);
   }
 
+  void trackPassthroughAlloc(void *, size_t, const char *) override {}
+
   DeviceError_t rtFree(void *ptr) override {
     return Runtime.origFreeDevice(ptr);
+  }
+
+  DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
+    return Runtime.origFreeAsync(ptr, stream);
   }
 
   DeviceError_t rtHostFree(void *ptr) override {

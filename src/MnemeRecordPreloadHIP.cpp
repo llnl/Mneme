@@ -4,6 +4,7 @@
 #include "mneme/MnemeLLVMUtils.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeRecord.hpp"
+#include <dlfcn.h>
 #include <hip/hip_runtime.h>
 #include <utility>
 
@@ -28,6 +29,8 @@ public:
   }
 };
 
+using Recorder = MnemeRecorderHIPPreload;
+
 extern "C" {
 hipError_t hipMalloc(void **ptr, size_t size) {
   LOG_DEBUG("Entering Mneme to Malloc pointer of size : {}", size);
@@ -48,14 +51,86 @@ hipError_t hipHostMalloc(void **ptr, size_t size, unsigned int flags) {
   return mneme.rtHostMalloc(ptr, size, flags);
 }
 
+hipError_t hipHostAlloc(void **ptr, size_t size, unsigned int flags) {
+  return forwardAlloc<Recorder>(
+      "hipHostAlloc", [&] { return std::pair{*ptr, size}; }, ptr, size, flags);
+}
+
+hipError_t hipMallocHost(void **ptr, size_t size) {
+  return forwardAlloc<Recorder>(
+      "hipMallocHost", [&] { return std::pair{*ptr, size}; }, ptr, size);
+}
+
+hipError_t hipMemAllocHost(void **ptr, size_t size) {
+  return forwardAlloc<Recorder>(
+      "hipMemAllocHost", [&] { return std::pair{*ptr, size}; }, ptr, size);
+}
+
+hipError_t hipExtMallocWithFlags(void **ptr, size_t sizeBytes,
+                                 unsigned int flags) {
+  return forwardAlloc<Recorder>(
+      "hipExtMallocWithFlags", [&] { return std::pair{*ptr, sizeBytes}; }, ptr,
+      sizeBytes, flags);
+}
+
+hipError_t hipMallocPitch(void **ptr, size_t *pitch, size_t width,
+                          size_t height) {
+  return forwardAlloc<Recorder>(
+      "hipMallocPitch", [&] { return std::pair{*ptr, *pitch * height}; }, ptr,
+      pitch, width, height);
+}
+
+hipError_t hipMemAllocPitch(hipDeviceptr_t *dptr, size_t *pitch,
+                            size_t widthInBytes, size_t height,
+                            unsigned int elementSizeBytes) {
+  return forwardAlloc<Recorder>(
+      "hipMemAllocPitch", [&] { return std::pair{*dptr, *pitch * height}; },
+      dptr, pitch, widthInBytes, height, elementSizeBytes);
+}
+
+hipError_t hipMalloc3D(hipPitchedPtr *pitchedDevPtr, hipExtent extent) {
+  return forwardAlloc<Recorder>(
+      "hipMalloc3D",
+      [&] {
+        return std::pair{pitchedDevPtr->ptr,
+                         pitchedDevPtr->pitch * extent.height * extent.depth};
+      },
+      pitchedDevPtr, extent);
+}
+
+hipError_t hipMallocAsync(void **dev_ptr, size_t size, hipStream_t stream) {
+  return forwardAlloc<Recorder>(
+      "hipMallocAsync", [&] { return std::pair{*dev_ptr, size}; }, dev_ptr,
+      size, stream);
+}
+
+hipError_t hipMallocFromPoolAsync(void **dev_ptr, size_t size,
+                                  hipMemPool_t mem_pool, hipStream_t stream) {
+  return forwardAlloc<Recorder>(
+      "hipMallocFromPoolAsync", [&] { return std::pair{*dev_ptr, size}; },
+      dev_ptr, size, mem_pool, stream);
+}
+
 hipError_t hipFree(void *ptr) {
   LOG_DEBUG("Entering Mneme to Free pointer");
   auto &mneme = MnemeRecorderHIPPreload::instance();
   return mneme.rtFree(ptr);
 };
 
+hipError_t hipFreeAsync(void *dev_ptr, hipStream_t stream) {
+  LOG_DEBUG("Entering Mneme to FreeAsync pointer");
+  auto &mneme = MnemeRecorderHIPPreload::instance();
+  return mneme.rtFreeAsync(dev_ptr, stream);
+}
+
 hipError_t hipHostFree(void *ptr) {
   LOG_DEBUG("Entering Mneme to HostFree pointer");
+  auto &mneme = MnemeRecorderHIPPreload::instance();
+  return mneme.rtHostFree(ptr);
+}
+
+hipError_t hipFreeHost(void *ptr) {
+  LOG_DEBUG("Entering Mneme to FreeHost pointer");
   auto &mneme = MnemeRecorderHIPPreload::instance();
   return mneme.rtHostFree(ptr);
 }

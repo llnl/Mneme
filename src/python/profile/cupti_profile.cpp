@@ -1,5 +1,7 @@
 // MnemeCuptiProfiler.cpp
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -96,6 +98,8 @@ private:
   std::unordered_map<u64, std::string> targetByToken_;
   // Token -> durations (ns)
   std::unordered_map<u64, std::vector<int64_t>> profilesByToken_;
+  // Signaled when a target kernel's duration arrives.
+  std::condition_variable recordsCv_;
 
   // CUPTI correlationId (uint32) -> our token (u64)
   // Filled by CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION records.
@@ -213,6 +217,7 @@ private:
       const std::string& want = tgtIt->second;
 
       inst.profilesByToken_[token].push_back(dur);
+      inst.recordsCv_.notify_all();
     }
 
     for (auto &PD : inst.profilesByToken_)
@@ -265,17 +270,26 @@ public:
     return tok;
   }
 
-  int64_t numRecords(u64 token) {
+  // Waits until expected durations arrived for token; returns how many did.
+  int64_t numRecords(u64 token, int64_t expected) {
     initIfNeeded();
-
-    // Ensure all kernels are done and activities are flushed into our buffers
     CHECK_CUDA(cudaDeviceSynchronize());
-    CHECK_CUPTI(cuptiActivityFlushAll(0));
 
-    std::lock_guard<std::mutex> lk(mtx_);
-    auto it = profilesByToken_.find(token);
-    if (it == profilesByToken_.end()) return static_cast<int64_t>(-1);
-    return static_cast<u64>(it->second.size());
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::unique_lock<std::mutex> lk(mtx_);
+    auto have = [&]() -> int64_t {
+      auto it = profilesByToken_.find(token);
+      return it == profilesByToken_.end() ? 0 : it->second.size();
+    };
+    while (have() < expected && std::chrono::steady_clock::now() < deadline) {
+      // Flush runs bufferCompleted, which takes mtx_.
+      lk.unlock();
+      CHECK_CUPTI(cuptiActivityFlushAll(0));
+      lk.lock();
+      recordsCv_.wait_for(lk, std::chrono::milliseconds(10),
+                          [&] { return have() >= expected; });
+    }
+    return have();
   }
 
   std::vector<int64_t> stop(u64 token) {
@@ -334,9 +348,9 @@ API_EXPORT(void) MnemePy_stopProfile(u64 Token, int64_t* ProfileData, u64 Size) 
   }
 }
 
-API_EXPORT(int64_t) MnemePy_getNumRecords(u64 token) {
+API_EXPORT(int64_t) MnemePy_getNumRecords(u64 token, int64_t expected) {
   auto& inst = mneme::MnemeCuptiProfiler::instance();
-  return inst.numRecords(token);
+  return inst.numRecords(token, expected);
 }
 
 API_EXPORT(void) MnemePy_initProfiler() {

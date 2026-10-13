@@ -35,7 +35,7 @@ if(MNEME_ENABLE_HIP)
   # Proteus's HIP impl headers (CoreLLVMHIP.h) call lld::elf::link inline,
   # so consumers that instantiate that code must link the LLD libraries
   # themselves — libproteus.so hides them via its version script.
-  target_link_libraries(mneme PRIVATE hip::host lldCommon lldELF)
+  target_link_libraries(mneme PRIVATE hip::host hsa-runtime64::hsa-runtime64 lldCommon lldELF)
 elseif(MNEME_ENABLE_CUDA)
   target_link_libraries(mneme PRIVATE CUDA::cudart CUDA::cuda_driver)
   if(MNEME_NVPTXCOMPILER_LIBRARY MATCHES "\\.a$")
