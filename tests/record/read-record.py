@@ -108,6 +108,12 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
         print("TotalLaunches:", rr_data["TotalLaunches"])
         recorded_launches = sum(i["Occurrences"] for i in rr_data["instances"].values())
         print("UnrecordedLaunches:", rr_data["TotalLaunches"] - recorded_launches)
+    if "TotalTimeNs" in rr_data:
+        recorded_time = sum(
+            i["TimeNs"]["Sum"] for i in rr_data["instances"].values() if "TimeNs" in i
+        )
+        print("TotalTimeNs:", rr_data["TotalTimeNs"])
+        print("UnrecordedTimeNs:", rr_data["TotalTimeNs"] - recorded_time)
     if "SourceFile" in rr_data:
         print("SourceFile:", rr_data["SourceFile"])
     if "SourceLine" in rr_data:
@@ -152,6 +158,22 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
                 instance["SharedMem"], instance["Occurrences"]
             )
         )
+        if "TimedLaunches" in instance:
+            line = "Timing: TimedLaunches:{0}".format(instance["TimedLaunches"])
+            t = instance.get("TimeNs")
+            if t is not None:
+                line += " SumNs:{0} MinNs:{1} MaxNs:{2}".format(t["Sum"], t["Min"], t["Max"])
+            recorded = instance.get("RecordedLaunchTimeNs")
+            if recorded is not None:
+                line += " RecordedNs:{0}".format(recorded)
+            print(line)
+            # FileCheck cannot compare numbers, so the ordering is checked here.
+            consistent = (
+                t is not None
+                and recorded is not None
+                and t["Min"] <= recorded <= t["Max"] <= t["Sum"]
+            )
+            print("TimingConsistent:", consistent)
         prologue_path = base_dir / instance["Prologue"]
         epilogue_path = base_dir / instance["Epilogue"]
         if not prologue_path.exists():

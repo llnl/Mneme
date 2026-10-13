@@ -266,6 +266,7 @@ public:
   const EpilogueSnapshotType EpilogueType;
   const bool CopySource;
   const uint64_t ChunkSize;
+  const bool KernelTiming;
 
   bool isRecordingEnabledForCurrentRank() const {
     return RankPolicy.isEnabled();
@@ -307,6 +308,8 @@ private:
             config_detail::getEnvOrDefaultBool("MNEME_COPY_SOURCE", false)),
         ChunkSize(config_detail::getEnvOrDefaultChunkSize("MNEME_CHUNK_SIZE",
                                                           4ULL << 30)),
+        KernelTiming(
+            config_detail::getEnvOrDefaultBool("MNEME_KERNEL_TIMING", false)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")) {
 

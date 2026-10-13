@@ -154,6 +154,14 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
 
   static hipError_t DeviceSynchronize() { return hipDeviceSynchronize(); }
 
+  // A failed query, e.g. on the null stream while another stream captures,
+  // leaves the status unknown, so it counts as capturing.
+  static bool deviceStreamIsCapturing(hipStream_t stream) {
+    hipStreamCaptureStatus Status;
+    return hipStreamIsCapturing(stream, &Status) != hipSuccess ||
+           Status != hipStreamCaptureStatusNone;
+  }
+
   static std::string GetDeviceArch() {
     DeviceHandle_t Dev;
     DeviceContext_t Ctx;
@@ -569,6 +577,14 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   }
 
   static DeviceError_t DeviceSynchronize() { return cudaDeviceSynchronize(); }
+
+  // A failed query, e.g. on the null stream while another stream captures,
+  // leaves the status unknown, so it counts as capturing.
+  static bool deviceStreamIsCapturing(DeviceStream_t stream) {
+    CUstreamCaptureStatus Status;
+    return cuStreamIsCapturing(stream, &Status) != CUDA_SUCCESS ||
+           Status != CU_STREAM_CAPTURE_STATUS_NONE;
+  }
 
   static std::string GetDeviceArch() {
     DeviceHandle_t Dev;
