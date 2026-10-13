@@ -47,6 +47,7 @@ variables:
   extends: .job_on_matrix
   interruptible: true
   before_script:
+    - !reference [.select-bank, before_script]
     - echo "=== Start CI Build and Test==="
   after_script:
     - !reference [.clean-slurm-allocation, after_script]

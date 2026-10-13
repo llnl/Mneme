@@ -19,7 +19,8 @@ variables:
   SLURM_JOB_NAME: ${CI_PROJECT_NAME}_ci_${CI_JOB_ID}
 # Standalone Flux batch jobs need a job-scoped unique name for cleanup.
   FLUX_JOB_NAME: ${CI_PROJECT_NAME}_ci_${CI_JOB_ID}
-  FLUX_BANK: "asccasc"
+# Bank charged when the pipeline user belongs to it; see .select-bank.
+  PREFERRED_BANK: "asccasc"
 
 # Ruby
 # Arguments for top level allocation
@@ -49,9 +50,9 @@ variables:
 # Tioga
 # Arguments for top level allocation
 # OPTIONAL: "-o per-resource.count=2" allows to get 2 jobs running on each node.
-  TIOGA_SHARED_ALLOC: "--bank=${FLUX_BANK} --queue=pci --exclusive --time-limit=1h --nodes=1 -o per-resource.count=4"
+  TIOGA_SHARED_ALLOC: "--queue=pci --exclusive --time-limit=1h --nodes=1 -o per-resource.count=4"
 # Arguments for job level allocation
-  TIOGA_JOB_ALLOC: "--bank=${FLUX_BANK} --nodes=1 --begin-time=+5s"
+  TIOGA_JOB_ALLOC: "--nodes=1 --begin-time=+5s"
 # Add variables that should apply to all the jobs on a machine:
 #  TIOGA_MY_VAR: "..."
 
@@ -59,16 +60,16 @@ variables:
 # Time in minutes.
 # Arguments for top level allocation
 # Note: can be set to "OFF" to prevent allocation sharing.
-  MATRIX_SHARED_ALLOC: "--account=${FLUX_BANK} --gpus=1 --nodes=1 --time=60 --partition=pdebug"
+  MATRIX_SHARED_ALLOC: "--gpus=1 --nodes=1 --time=60 --partition=pdebug"
 # Arguments for job level allocation
-  MATRIX_JOB_ALLOC: "--account=${FLUX_BANK} --gpus=1 --nodes=1"
+  MATRIX_JOB_ALLOC: "--gpus=1 --nodes=1"
 
 # Tuo
 # Arguments for top level allocation
 # OPTIONAL: "-o per-resource.count=2" allows to get 2 jobs running on each node.
-  TUOLUMNE_SHARED_ALLOC: "--bank=${FLUX_BANK} --queue=pci --exclusive --time-limit=1h --nodes=1 -o per-resource.count=4"
+  TUOLUMNE_SHARED_ALLOC: "--queue=pci --exclusive --time-limit=1h --nodes=1 -o per-resource.count=4"
 # Arguments for job level allocation
-  TUOLUMNE_JOB_ALLOC: "--bank=${FLUX_BANK} --nodes=1 --begin-time=+5s"
+  TUOLUMNE_JOB_ALLOC: "--nodes=1 --begin-time=+5s"
 # Add variables that should apply to all the jobs on a machine:
 #  TUOLUMNE_MY_VAR: "..."
 
@@ -79,6 +80,37 @@ variables:
 .custom_job:
   variables:
     JOB_TEMPLATE_CANNOT_BE_EMPTY: "True"
+
+# Hubcast runs pipelines as the PR author, who may not belong to
+# PREFERRED_BANK. Charge PREFERRED_BANK when the user belongs to it and the
+# user's default bank otherwise.
+.select-bank:
+  before_script:
+    - |
+      case "${CI_MACHINE}" in
+        matrix)
+          BANK_FLAG="--account=${PREFERRED_BANK}"
+          USER_BANKS="$(sacctmgr -nP show assoc where user="${USER}" cluster="${CI_MACHINE}" format=account)"
+          ;;
+        *)
+          BANK_FLAG="--bank=${PREFERRED_BANK}"
+          USER_BANKS="$(flux account view-user --list-banks "${USER}" 2>/dev/null)"
+          ;;
+      esac
+      if grep -qx "${PREFERRED_BANK}" <<< "${USER_BANKS}"; then
+        echo "### Charging bank ${PREFERRED_BANK}"
+        SHARED_ALLOC_VAR="${CI_MACHINE^^}_SHARED_ALLOC"
+        JOB_ALLOC_VAR="${CI_MACHINE^^}_JOB_ALLOC"
+        export "${SHARED_ALLOC_VAR}=${BANK_FLAG} ${!SHARED_ALLOC_VAR}"
+        export "${JOB_ALLOC_VAR}=${BANK_FLAG} ${!JOB_ALLOC_VAR}"
+      else
+        echo "### ${USER} is not in bank ${PREFERRED_BANK}; using the default bank"
+      fi
+
+# Extends the RADIUSS allocate_resources job, which has no before_script.
+allocate_resources:
+  before_script:
+    - !reference [.select-bank, before_script]
 
 # Remove only this job's clone; CI_BUILDS_DIR is shared with concurrent jobs.
 .remove-builds-dir:
