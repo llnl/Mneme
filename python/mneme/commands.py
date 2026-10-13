@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from contextlib import ExitStack
+from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
@@ -205,6 +205,143 @@ class Move:
         return _copy_or_move(sources, dest, move=True)
 
 
+_RECORDING_FILTER_ENV_VARS = (
+    "MNEME_SKIP_RECORDINGS",
+    "MNEME_MAX_RECORDINGS",
+    "MNEME_RR_KERNELS",
+)
+
+
+def _load_recording_filter(path, parser):
+    """ Convert YAML to JSON.
+        The Mneme rt validates, so we don't do it here. 
+    """
+    try:
+        with open(path) as stream:
+            document = yaml.safe_load(stream)
+
+        if not isinstance(document, dict):
+            parser.error("The recording filter document must be a mapping")
+
+        return json.dumps(document, allow_nan=False)
+    except (OSError, yaml.YAMLError, TypeError, ValueError) as exc:
+        parser.error(f"Cannot load filter config {path!r}: {exc}")
+
+
+def _parse_recording_count(value, flag, env_name, parser):
+    try:
+        if not value.isascii() or not value.isdecimal():
+            raise ValueError()
+
+        count = int(value)
+        if count > 2**64 - 1:
+            raise ValueError()
+
+        return count
+    except ValueError:
+        parser.error(f"{flag} / {env_name} requires a nonnegative 64-bit integer")
+
+
+def _default_recording_filter(args, record_env, mode):
+    """ Translate default-mode env vars and CLI args.
+        If mode is not 'default', then a warning is emitted and None is returned.
+    """
+    count_options = (
+        (
+            "--per-kernel-skip-recordings",
+            "MNEME_SKIP_RECORDINGS",
+            "skip",
+            args.per_kernel_skip_recordings,
+        ),
+        (
+            "--per-kernel-max-recordings",
+            "MNEME_MAX_RECORDINGS",
+            "max_records",
+            args.per_kernel_max_recordings,
+        ),
+    )
+    supplied = [name for name in _RECORDING_FILTER_ENV_VARS if name in record_env]
+    supplied.extend(flag for flag, _, _, value in count_options if value is not None)
+
+    if not supplied:
+        return None
+
+    if mode != "default":
+        print(
+            f"[mneme] Warning: {', '.join(supplied)} are ignored in "
+            f"{mode} filter mode; they apply only in default mode.",
+            file=sys.stderr,
+        )
+        return None
+
+    defaults = {}
+    for flag, env_name, field, value in count_options:
+        if value is None:
+            value = record_env.get(env_name)
+
+        if value is not None:
+            defaults[field] = _parse_recording_count(
+                value, flag, env_name, args.parser
+            )
+
+    recording = {"defaults": defaults}
+    if "MNEME_RR_KERNELS" in record_env:
+        recording["kernel_overrides"] = [
+            {"match": {"demangled_regex": record_env["MNEME_RR_KERNELS"]}},
+            {"match": {"demangled_regex": ".*"}, "max_records": 0},
+        ]
+
+    return json.dumps({"recording": recording})
+
+
+def _prepare_recording_filter(args, record_env):
+    """Resolve CLI filtering and prepare the environment and JSON."""
+    mode = args.filter_mode
+    if mode is None:
+        mode = "config" if args.filter_config is not None else "default"
+
+    # --filter-config is shorthand for setting --filter-mode config
+    # error if the user provided a different mode or omitted the config file
+    if args.filter_config is not None and mode != "config":
+        args.parser.error("--filter-config requires --filter-mode config")
+
+    if mode == "config" and not args.filter_config:
+        args.parser.error("--filter-mode config requires --filter-config")
+
+    filter_json = None
+    if args.filter_config:
+        filter_json = _load_recording_filter(args.filter_config, args.parser)
+
+    default_filter_json = _default_recording_filter(args, record_env, mode)
+    if mode == "default":
+        filter_json = default_filter_json
+
+    # remove irrelevant env vars
+    for name in _RECORDING_FILTER_ENV_VARS:
+        record_env.pop(name, None)
+
+    record_env.pop("MNEME_FILTER_CONFIG", None)
+    record_env["MNEME_FILTER_MODE"] = mode
+    return filter_json
+
+
+@contextmanager
+def _recording_filter_file(filter_json, record_db_dir):
+    """ keep the filter file around until the application exits.
+        helper is nice since file is optional.
+    """
+    if filter_json is None:
+        yield None
+        return
+
+    with tempfile.TemporaryDirectory(
+        prefix=".mneme-filter-", dir=record_db_dir
+    ) as directory:
+        path = Path(directory) / "policy.json"
+        path.write_text(filter_json)
+        yield path
+
+
 class Record:
     """
     Record GPU kernel executions using Mneme.
@@ -302,62 +439,8 @@ class Record:
         cmd = args.cmd[idx + 1 :]
         record_env = os.environ.copy()
 
-        # omitting --filter-mode and --filter-config goes to default
-        # just `filter-config cfg.yaml` is shorthand for `--filter-mode config --filter-config cfg.yaml` 
-        # when a mode is omitted.
-        filter_mode = args.filter_mode or ("config" if args.filter_config is not None else "default")
-        if args.filter_config is not None and filter_mode != "config":
-            parser.error("--filter-config requires --filter-mode config")
-        if filter_mode == "config" and not args.filter_config:
-            parser.error("--filter-mode config requires --filter-config")
-        
-        # read config yml and get json string
-        filter_json = None
-        if args.filter_config:
-            try:
-                with open(args.filter_config) as stream:
-                    document = yaml.safe_load(stream)
-                if not isinstance(document, dict):
-                    parser.error("The recording filter document must be a mapping")
-                filter_json = json.dumps(document, allow_nan=False)
-            except (OSError, yaml.YAMLError, TypeError, ValueError) as exc:
-                parser.error(f"Cannot load filter config {args.filter_config!r}: {exc}")
-        
-        controls = ("MNEME_SKIP_RECORDINGS", "MNEME_MAX_RECORDINGS", "MNEME_RR_KERNELS")
-        supplied = [name for name in controls if name in record_env]
-        defaults = {}
-        for flag, name, field, value in (
-            ("--per-kernel-skip-recordings", controls[0], "skip", args.per_kernel_skip_recordings),
-            ("--per-kernel-max-recordings", controls[1], "max_records", args.per_kernel_max_recordings),
-        ):
-            if value is not None:
-                supplied.append(flag)
-            else:
-                value = record_env.get(name)
-            if filter_mode == "default" and value is not None:
-                try:
-                    if not value.isascii() or not value.isdecimal() or int(value) > 2**64 - 1:
-                        raise ValueError()
-                    defaults[field] = int(value)
-                except ValueError:
-                    parser.error(f"{flag} / {name} requires a nonnegative 64-bit integer")
-        if filter_mode == "default" and supplied:
-            recording = {"defaults": defaults}
-            if "MNEME_RR_KERNELS" in record_env:
-                recording["kernel_overrides"] = [
-                    {"match": {"demangled_regex": record_env["MNEME_RR_KERNELS"]}},
-                    {"match": {"demangled_regex": ".*"}, "max_records": 0},
-                ]
-            filter_json = json.dumps({"recording": recording})
-        elif supplied:
-            print(f"[mneme] Warning: {', '.join(supplied)} are ignored in "
-                  f"{filter_mode} filter mode; they apply only in default mode.", file=sys.stderr)
-        # Consumed controls must not be reapplied or warned about in the child.
-        for name in controls:
-            record_env.pop(name, None)
+        filter_json = _prepare_recording_filter(args, record_env)
 
-        record_env.pop("MNEME_FILTER_CONFIG", None)
-        record_env["MNEME_FILTER_MODE"] = filter_mode
         librecord_path = utils.get_mneme_record_library_name()
         logger.debug(f"LD_PRELOAD={librecord_path}")
         record_env["LD_PRELOAD"] = librecord_path
@@ -387,15 +470,9 @@ class Record:
             record_env["MNEME_LOG_LEVEL"] = verbosity
 
         try:
-            with ExitStack() as cleanup: # use ExitStack since filter_json is conditionally available
-                # create temporary directory for config
-                if filter_json is not None:
-                    directory = cleanup.enter_context(tempfile.TemporaryDirectory(
-                        prefix=".mneme-filter-", dir=record_db_dir
-                    ))
-                    path = Path(directory) / "policy.json"
-                    path.write_text(filter_json)
-                    record_env["MNEME_FILTER_CONFIG"] = str(path)
+            with _recording_filter_file(filter_json, record_db_dir) as filter_path:
+                if filter_path is not None:
+                    record_env["MNEME_FILTER_CONFIG"] = str(filter_path)
 
                 result = subprocess.run(cmd, env=record_env)
                 return result.returncode
