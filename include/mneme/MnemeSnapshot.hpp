@@ -45,6 +45,14 @@
 
 namespace mneme {
 
+// The kernel and, when it has an instance entry, the launch configuration
+// that a launch's duration is added to.
+struct TimedLaunch {
+  uint64_t StaticHash;
+  std::optional<uint64_t> DynamicHash;
+  bool Recorded = false;
+};
+
 struct KernelInstance {
   std::string PrologueFn;
   std::string EpilogueFn;
@@ -53,6 +61,11 @@ struct KernelInstance {
   llvm::SmallVector<double> ArgValues;
   uint64_t NumOccurrences = 0;
   uint64_t SharedMem;
+  uint64_t TimedLaunches = 0;
+  uint64_t TimeSumNs = 0;
+  uint64_t TimeMinNs = 0;
+  uint64_t TimeMaxNs = 0;
+  std::optional<uint64_t> RecordedLaunchTimeNs;
   static llvm::json::Object toJSON(const dim3 &Dim) {
     llvm::json::Object JSONDim;
     JSONDim["x"] = Dim.x;
@@ -61,7 +74,15 @@ struct KernelInstance {
     return JSONDim;
   }
   bool isRecorded() const { return !PrologueFn.empty(); }
-  llvm::json::Object toJSON() const {
+  void addLaunchTime(uint64_t Ns, bool Recorded) {
+    TimeMinNs = TimedLaunches ? std::min(TimeMinNs, Ns) : Ns;
+    TimeMaxNs = std::max(TimeMaxNs, Ns);
+    TimeSumNs += Ns;
+    TimedLaunches++;
+    if (Recorded)
+      RecordedLaunchTimeNs = Ns;
+  }
+  llvm::json::Object toJSON(bool KernelTiming) const {
     llvm::json::Object instance;
     instance["Prologue"] = PrologueFn;
     instance["Epilogue"] = EpilogueFn;
@@ -70,6 +91,14 @@ struct KernelInstance {
     instance["SharedMem"] = SharedMem;
     instance["Args"] = llvm::json::Array(ArgValues);
     instance["Occurrences"] = NumOccurrences;
+    if (KernelTiming) {
+      instance["TimedLaunches"] = TimedLaunches;
+      if (TimedLaunches)
+        instance["TimeNs"] = llvm::json::Object{
+            {"Sum", TimeSumNs}, {"Min", TimeMinNs}, {"Max", TimeMaxNs}};
+      if (RecordedLaunchTimeNs)
+        instance["RecordedLaunchTimeNs"] = *RecordedLaunchTimeNs;
+    }
     return instance;
   }
   KernelInstance(const dim3 &GridDim, const dim3 &BlockDim, uint64_t SharedMem)
@@ -201,6 +230,7 @@ class KernelInstancesCollection {
   llvm::DenseMap<uint64_t, KernelInstance> Instances;
   uint64_t NumRecords;
   uint64_t TotalLaunches = 0;
+  uint64_t TotalTimeNs = 0;
   KernelRecordingPolicy Policy;
   llvm::SmallVector<size_t> KernelArgSizes;
   llvm::SmallVector<std::string> KernelArgNames;
@@ -210,6 +240,7 @@ class KernelInstancesCollection {
   const std::string KName;
   SourceFileInfo Source;
   bool CopySource;
+  bool KernelTiming;
 
 private:
   // Parse Proteus's serialized bitcode in a Mneme-owned LLVMContext and
@@ -269,21 +300,32 @@ public:
     Collection["Specializations"] = llvm::json::Array(KernelSpecializations);
     Source.addToJSON(Collection);
     Collection["TotalLaunches"] = TotalLaunches;
+    if (KernelTiming)
+      Collection["TotalTimeNs"] = TotalTimeNs;
     llvm::json::Object JSONInstances;
     for (auto &[hash, KI] : Instances)
       if (KI.isRecorded())
-        JSONInstances[std::to_string(hash)] = KI.toJSON();
+        JSONInstances[std::to_string(hash)] = KI.toJSON(KernelTiming);
     Collection["instances"] = std::move(JSONInstances);
     return Collection;
   }
 
   KernelInstancesCollection(const proteus::runtime::KernelMetadata &KInfo,
                             const KernelRecordingPolicy &Policy,
-                            bool CopySource)
+                            bool CopySource, bool KernelTiming)
       : NumRecords(0), Policy(Policy), KName(KInfo.getName()),
-        CopySource(CopySource) {}
+        CopySource(CopySource), KernelTiming(KernelTiming) {}
 
   bool hasRecords() const { return NumRecords > 0; }
+
+  void addLaunchTime(const TimedLaunch &Launch, uint64_t Ns) {
+    TotalTimeNs += Ns;
+    if (!Launch.DynamicHash)
+      return;
+    auto It = Instances.find(*Launch.DynamicHash);
+    if (It != Instances.end())
+      It->second.addLaunchTime(Ns, Launch.Recorded);
+  }
 
   // Deferred to the first recording so unrecorded kernels write nothing.
   void storeModule(const std::string &MnemeDirectory,
@@ -331,9 +373,11 @@ public:
     return &It->second;
   }
 
-  void countLaunch(dim3 &GridDim, dim3 &BlockDim, uint64_t SharedMem) {
-    countInstance(computeHash(GridDim, BlockDim, SharedMem, nullptr), GridDim,
-                  BlockDim, SharedMem);
+  void countLaunch(dim3 &GridDim, dim3 &BlockDim, uint64_t SharedMem,
+                   TimedLaunch &Launch) {
+    auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem, nullptr);
+    if (countInstance(DynamicHash, GridDim, BlockDim, SharedMem))
+      Launch.DynamicHash = DynamicHash;
   }
 
   llvm::stable_hash computeHash(dim3 &GridDim, dim3 &BlockDim,
@@ -358,7 +402,7 @@ public:
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream,
-      EpilogueSnapshotType EpilogueType) {
+      EpilogueSnapshotType EpilogueType, TimedLaunch &Launch) {
     const auto &GlobalVars = KInfo.getGlobals();
     uint64_t StaticHash = KInfo.getStaticHash();
 
@@ -367,6 +411,7 @@ public:
         countInstance(DynamicHash, GridDim, BlockDim, SharedMem);
     if (!Instance)
       return std::nullopt;
+    Launch.DynamicHash = DynamicHash;
 
     if (!Policy.selects(TotalLaunches)) {
       LOG_DEBUG("Launch {} of kernel {} is not selected for recording",
@@ -387,6 +432,7 @@ public:
     if (NumRecords == 0)
       storeModule(MnemeDir.string(), KInfo);
     NumRecords++;
+    Launch.Recorded = true;
 
     LOG_DEBUG("First Instance of Kernel {} with DynamicHash {}, recording ...",
               StaticHash, DynamicHash);
@@ -438,9 +484,10 @@ class RecordDatabase {
   llvm::DenseMap<const void *, std::optional<uint64_t>> CountedKernels;
   EpilogueSnapshotType EpilogueType;
   bool CopySource;
+  bool KernelTiming;
 
 public:
-  RecordDatabase() {
+  explicit RecordDatabase(bool KernelTiming) : KernelTiming(KernelTiming) {
     const auto &Conf = Config::get();
 
     MnemeDirectory = Conf.getDataDirectory();
@@ -509,14 +556,16 @@ public:
       auto Policy = filterLaunch(StaticHash, KInfo.getName());
       if (!Policy)
         return nullptr;
-      It = KernelRecords
-               .try_emplace(StaticHash, KInfo, *Policy, CopySource)
-               .first;
+      It =
+          KernelRecords
+              .try_emplace(StaticHash, KInfo, *Policy, CopySource, KernelTiming)
+              .first;
       LOG_INFO("Created instance");
     }
     return &It->second;
   }
 
+  // Sets Launch for every counted launch so its duration can be added later.
   template <DeviceVendors VendorTypes>
   std::optional<std::function<
       void(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &, void **,
@@ -525,26 +574,36 @@ public:
       const proteus::runtime::KernelMetadata &KInfo,
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
-      typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
+      typename DeviceTraits<VendorTypes>::DeviceStream_t Stream,
+      std::optional<TimedLaunch> &Launch) {
     auto *Record = findOrCreateRecord(KInfo);
     if (!Record)
       return std::nullopt;
+    Launch = TimedLaunch{KInfo.getStaticHash()};
     return Record->takeSnapshot<VendorTypes>(
         MnemeDirectory, KInfo, DeviceMemory, GridDim, BlockDim, Args, SharedMem,
-        Stream, EpilogueType);
+        Stream, EpilogueType, *Launch);
   }
 
   void countLaunch(const void *Kernel, dim3 &GridDim, dim3 &BlockDim,
-                   size_t SharedMem) {
+                   size_t SharedMem, std::optional<TimedLaunch> &Launch) {
     auto [It, Inserted] = CountedKernels.try_emplace(Kernel);
     if (Inserted) {
       auto KInfo = proteus::runtime::captureKernelMetadata(Kernel);
       if (KInfo && findOrCreateRecord(*KInfo))
         It->second = KInfo->getStaticHash();
     }
-    if (It->second)
-      KernelRecords.find(*It->second)
-          ->second.countLaunch(GridDim, BlockDim, SharedMem);
+    if (!It->second)
+      return;
+    Launch = TimedLaunch{*It->second};
+    KernelRecords.find(*It->second)
+        ->second.countLaunch(GridDim, BlockDim, SharedMem, *Launch);
+  }
+
+  void addLaunchTime(const TimedLaunch &Launch, uint64_t Ns) {
+    auto It = KernelRecords.find(Launch.StaticHash);
+    if (It != KernelRecords.end())
+      It->second.addLaunchTime(Launch, Ns);
   }
 };
 

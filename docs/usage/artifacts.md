@@ -100,6 +100,22 @@ executions are identified by distinct *dynamic hashes*. Every *dynamic hash* is 
 These instance identifiers are used directly by the mneme replay command
 via the -rid option.
 
+### Kernel timing
+
+Setting `MNEME_KERNEL_TIMING=1` for the recorded application measures the GPU duration of every launch counted in `TotalLaunches`.
+The durations come from the vendor profiler, rocprofiler-sdk on AMD and CUPTI on NVIDIA, which is also what replay uses to time kernels.
+Each duration spans the kernel's execution on the GPU, from the start to the end timestamp of its dispatch, so it excludes the host-side launch overhead and the time the launch waited in its stream.
+The database then gets these fields, all in nanoseconds:
+
+- `TotalTimeNs`: Summed duration of all counted launches of the kernel. `TotalTimeNs` minus the `TimeNs.Sum` of all instances is the time spent in launches whose configuration was never recorded.
+- `TimedLaunches` (per instance): Number of launches of the instance whose duration was measured. It equals `Occurrences` unless a measurement was lost.
+- `TimeNs` (per instance): `Sum`, `Min`, and `Max` of those durations. Absent when no launch of the instance was timed.
+- `RecordedLaunchTimeNs` (per instance): Duration of the launch whose device memory was recorded, which is also included in `TimeNs`. Absent when that duration was lost.
+
+Durations arrive asynchronously, so the databases written after each recorded launch can hold partial totals.
+The final write at exit waits for all outstanding durations.
+Without `MNEME_KERNEL_TIMING` none of these fields are written.
+
 ---
 ## GPU Device Memory State
 For each recorded kernel execution, Mneme captures the state of GPU device

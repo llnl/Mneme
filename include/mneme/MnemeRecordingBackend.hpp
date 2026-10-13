@@ -2,6 +2,7 @@
 
 #include "mneme/MnemeConfig.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
+#include "mneme/MnemeKernelTimer.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeMemory.hpp"
 #include "mneme/MnemePageManager.hpp"
@@ -28,7 +29,9 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   using DeviceStream_t = typename Base::DeviceStream_t;
 
   RecorderRuntimeFunctions<VendorTypes> Runtime;
-  RecordDatabase DB;
+  KernelTimer *Timer =
+      Config::get().KernelTiming ? KernelTimer::get() : nullptr;
+  RecordDatabase DB{Timer != nullptr};
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
   // Allocations served by the vendor runtime (managed, pinned, pitched,
   // stream-ordered, ...). They are not captured, but the application may
@@ -228,6 +231,28 @@ public:
     return ret;
   }
 
+  // Times the launch when Launch names the record its duration is added to.
+  DeviceError_t launchKernel(const void *func, dim3 &GridDim, dim3 &BlockDim,
+                             void **Args, size_t SharedMem,
+                             DeviceStream_t Stream,
+                             const std::optional<TimedLaunch> &Launch) {
+    // A captured launch dispatches nothing now, and its graph's later
+    // dispatches carry no token, so it would never get a duration.
+    bool Timed =
+        Timer && Launch && !MnemeDeviceRT::deviceStreamIsCapturing(Stream);
+    if (Timed) {
+      Timer->collect([this](const TimedLaunch &L, uint64_t Ns) {
+        DB.addLaunchTime(L, Ns);
+      });
+      Timer->begin(*Launch);
+    }
+    auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
+                                        SharedMem, Stream);
+    if (Timed)
+      Timer->end(ret == MnemeDeviceRT::DeviceSuccess);
+    return ret;
+  }
+
   DeviceError_t rtLaunchKernel(const void *func, dim3 &GridDim, dim3 &BlockDim,
                                void **Args, size_t SharedMem,
                                DeviceStream_t Stream) override {
@@ -235,9 +260,10 @@ public:
 
     if (Config::get().RecordingFilterMode == FilterMode::Scoped &&
         !detail::scopeAllowsRecording(func)) {
-      DB.countLaunch(func, GridDim, BlockDim, SharedMem);
-      return Runtime.origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
-                                      Stream);
+      std::optional<TimedLaunch> Launch;
+      DB.countLaunch(func, GridDim, BlockDim, SharedMem, Launch);
+      return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream,
+                          Launch);
     }
 
     // NOTE: Here we do something conceptually different. We no longer go
@@ -255,8 +281,10 @@ public:
     LOG_DEBUG("Continue with {}", KInfo.getName());
     LOG_INFO("Hash value is {}", KInfo.getStaticHash());
 
-    auto RecordAction = DB.takeSnapshot<VendorTypes>(
-        KInfo, AllocatedBlobs, GridDim, BlockDim, Args, SharedMem, Stream);
+    std::optional<TimedLaunch> Launch;
+    auto RecordAction =
+        DB.takeSnapshot<VendorTypes>(KInfo, AllocatedBlobs, GridDim, BlockDim,
+                                     Args, SharedMem, Stream, Launch);
     if (RecordAction)
       LOG_INFO("Successfully Recorded Prologue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
@@ -264,8 +292,8 @@ public:
                "{}) SHM_SIZE:{}",
                func, KInfo.getName(), GridDim.x, GridDim.y, GridDim.z,
                BlockDim.x, BlockDim.y, BlockDim.z, SharedMem);
-    auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
-                                        SharedMem, Stream);
+    auto ret =
+        launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream, Launch);
     if (RecordAction) {
       (*RecordAction)(AllocatedBlobs, Args, Stream);
       LOG_INFO("Successfully Recorded Epilogue of Kernel {} NAME:{} GRID:({}, "
@@ -301,6 +329,12 @@ public:
   }
 
   ~RecordingBackend() {
+    if (Timer) {
+      (void)MnemeDeviceRT::DeviceSynchronize();
+      Timer->drain([this](const TimedLaunch &L, uint64_t Ns) {
+        DB.addLaunchTime(L, Ns);
+      });
+    }
     DB.flush();
 
     LOG_DEBUG("RecordingBackend destructor: releasing {} blobs", AllocatedBlobs.size());

@@ -127,6 +127,9 @@ CREATE_RDC_GPU_TEST(test_record_scope test_record_scope.cpp)
 CREATE_GPU_TEST(test_launch_counts test_launch_counts.cpp)
 CREATE_RDC_GPU_TEST(test_launch_counts test_launch_counts.cpp)
 
+CREATE_GPU_TEST(test_kernel_timing test_kernel_timing.cpp)
+CREATE_RDC_GPU_TEST(test_kernel_timing test_kernel_timing.cpp)
+
 CREATE_GPU_TEST(test_multi_file multi_file1.cpp multi_file2.cpp)
 CREATE_RDC_GPU_TEST(test_multi_file multi_file1.cpp multi_file2.cpp)
 
