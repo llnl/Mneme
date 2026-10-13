@@ -457,7 +457,7 @@ public:
       auto Name = KInfo.getName();
       auto Pos = Name.find("__intern__");
       State.Policy = RecordingPolicy::get().resolve(
-          llvm::demangle(Name.substr(0, Pos)));
+          llvm::demangle(Name.substr(0, Pos)), Name);
     }
     
     ++State.Count;

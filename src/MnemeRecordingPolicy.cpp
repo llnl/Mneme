@@ -7,6 +7,7 @@
 
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/raw_ostream.h>
 
 namespace mneme {
 namespace {
@@ -158,22 +159,57 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
 }
 
 RecordingPolicy RecordingPolicy::load(const Config &Conf) {
-  if (Conf.RecordingFilterMode != FilterMode::Config) {
-    // If the recording filter mode is not Config, we create a default
-    // RecordingPolicy with the current rank's recording status.
-    RecordingPolicy Result;
-    Result.EnabledThisRank = Conf.isRecordingEnabledForCurrentRank();
-    return Result;
+  std::string Controls;
+  for (const char *Name : {"MNEME_SKIP_RECORDINGS", "MNEME_MAX_RECORDINGS",
+                           "MNEME_RR_KERNELS"}) {
+    if (std::getenv(Name)) {
+      if (!Controls.empty())
+        Controls += ", ";
+      Controls += Name;
+    }
   }
+  if (Conf.RecordingFilterMode != FilterMode::Default && !Controls.empty())
+    std::cerr << "[mneme] Warning: " << Controls
+              << " are ignored in "
+              << (Conf.RecordingFilterMode == FilterMode::Scoped ? "scoped" : "config")
+              << " filter mode; they apply only in default mode.\n";
 
-  // otherwise read teh config file
-  auto Buffer = llvm::MemoryBuffer::getFile(*Conf.FilterConfigPath);
-  if (!Buffer)
-    throw std::runtime_error("Cannot read MNEME_FILTER_CONFIG '" +
-                             *Conf.FilterConfigPath +
-                             "': " + Buffer.getError().message());
-
-  return fromJSON((*Buffer)->getBuffer().str());
+  RecordingPolicy Result;
+  if (Conf.FilterConfigPath) {
+    auto Buffer = llvm::MemoryBuffer::getFile(*Conf.FilterConfigPath);
+    if (!Buffer)
+      throw std::runtime_error("Cannot read MNEME_FILTER_CONFIG '" +
+                               *Conf.FilterConfigPath + "': " +
+                               Buffer.getError().message());
+    Result = fromJSON((*Buffer)->getBuffer().str());
+  } else if (Conf.RecordingFilterMode == FilterMode::Default && !Controls.empty()) {
+    // Direct preloading uses the same document and parser as CLI transport.
+    llvm::json::Object Defaults;
+    for (auto Field : {std::pair{"MNEME_SKIP_RECORDINGS", "skip"},
+                       std::pair{"MNEME_MAX_RECORDINGS", "max_records"}}) {
+      if (const char *Value = std::getenv(Field.first)) {
+        uint64_t Count;
+        if (llvm::StringRef(Value).getAsInteger(10, Count))
+          invalid(Field.first, "expected a nonnegative 64-bit integer");
+        Defaults[Field.second] = Count;
+      }
+    }
+    llvm::json::Object Recording{{"defaults", std::move(Defaults)}};
+    if (const char *Pattern = std::getenv("MNEME_RR_KERNELS"))
+      Recording["kernel_overrides"] = llvm::json::Array{
+          llvm::json::Object{{"match", llvm::json::Object{{"demangled_regex", Pattern}}}},
+          llvm::json::Object{{"match", llvm::json::Object{{"demangled_regex", ".*"}}},
+                             {"max_records", 0}}};
+    std::string JSON;
+    llvm::raw_string_ostream Stream(JSON);
+    Stream << llvm::json::Value(llvm::json::Object{{"recording", std::move(Recording)}});
+    Result = fromJSON(JSON);
+  } else {
+    Result.EnabledThisRank = Conf.isRecordingEnabledForCurrentRank();
+  }
+  // Preserve the original environment regex's support for both name forms.
+  Result.MatchMangledNames = Conf.RecordingFilterMode == FilterMode::Default;
+  return Result;
 }
 
 const RecordingPolicy &RecordingPolicy::get() {
@@ -185,9 +221,12 @@ RecordingPolicy RecordingPolicy::createFromEnvironment() {
   return load(Config::createFromEnvironment());
 }
 
-KernelRecordingPolicy RecordingPolicy::resolve(const std::string &Name) const {
+KernelRecordingPolicy RecordingPolicy::resolve(const std::string &Name,
+                                               const std::string &MangledName) const {
   for (const auto &Rule : Rules)
-    if (std::regex_search(Name, Rule.Pattern))
+    if (std::regex_search(Name, Rule.Pattern) ||
+        (MatchMangledNames && !MangledName.empty() &&
+         std::regex_search(MangledName, Rule.Pattern)))
       return Rule.Policy;
   return Defaults;
 }

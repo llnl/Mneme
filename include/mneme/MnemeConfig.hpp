@@ -142,25 +142,6 @@ inline FilterMode getFilterMode() {
                            "'. Expected 'default', 'scoped', or 'config'.");
 }
 
-inline void rejectDeprecatedRecordingControls() {
-  std::string Controls;
-  for (const char *Name : {"MNEME_RR_KERNELS", "MNEME_SKIP_RECORDINGS",
-                           "MNEME_MAX_RECORDINGS"}) {
-    if (std::getenv(Name)) {
-      if (!Controls.empty())
-        Controls += ", ";
-      Controls += Name;
-    }
-  }
-  
-  if (!Controls.empty())
-    throw std::runtime_error(
-        Controls + " are deprecated and no longer supported. Unset them and "
-        "use --filter-config with recording.defaults.skip/max_records and "
-        "kernel_overrides (or MNEME_FILTER_MODE=config and MNEME_FILTER_CONFIG "
-        "for direct preloading).");
-}
-
 inline bool defaultRecordingPolicy(const std::optional<int> &DistributedRank) {
   if (!DistributedRank)
     return true;
@@ -277,13 +258,12 @@ private:
         RecordingEnabledThisRank(
             config_detail::computeRecordingEnabledForCurrentRank()) {
     
-    config_detail::rejectDeprecatedRecordingControls();
     if (RecordingFilterMode == FilterMode::Config &&
         (!FilterConfigPath || FilterConfigPath->empty()))
       throw std::runtime_error("MNEME_FILTER_MODE=config requires MNEME_FILTER_CONFIG");
     
-    if (RecordingFilterMode != FilterMode::Config && FilterConfigPath)
-      throw std::runtime_error("MNEME_FILTER_CONFIG requires MNEME_FILTER_MODE=config");
+    if (RecordingFilterMode == FilterMode::Scoped && FilterConfigPath)
+      throw std::runtime_error("MNEME_FILTER_CONFIG is not supported in scoped mode");
   }
 };
 

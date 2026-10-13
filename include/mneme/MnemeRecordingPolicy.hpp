@@ -30,7 +30,8 @@ public:
   static RecordingPolicy createFromEnvironment();
   static RecordingPolicy fromJSON(const std::string &Text);
 
-  KernelRecordingPolicy resolve(const std::string &DemangledName) const;
+  KernelRecordingPolicy resolve(const std::string &DemangledName,
+                                const std::string &MangledName = "") const;
   Deduplication deduplication() const { return Dedup; }
   bool isRecordingEnabledForCurrentRank() const { return EnabledThisRank; }
 
@@ -44,6 +45,7 @@ private:
   std::vector<Rule> Rules;
   Deduplication Dedup = Deduplication::Configuration;
   bool EnabledThisRank = true;
+  bool MatchMangledNames = false;
 
   static RecordingPolicy load(const Config &Conf);
 };

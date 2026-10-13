@@ -205,15 +205,6 @@ class Move:
         return _copy_or_move(sources, dest, move=True)
 
 
-class _DeprecatedRecordingOption(argparse.Action):
-    def __call__(self, parser, namespace, values, option_string=None):
-        field = "skip" if self.dest == "per_kernel_skip_recordings" else "max_records"
-        parser.error(
-            f"{option_string} is deprecated and no longer supported; use "
-            f"--filter-config with recording.defaults.{field} or a kernel override"
-        )
-
-
 class Record:
     """
     Record GPU kernel executions using Mneme.
@@ -259,16 +250,14 @@ class Record:
         parser.add_argument(
             "-mr",
             "--per-kernel-max-recordings",
-            action=_DeprecatedRecordingOption,
             default=None,
-            help="Deprecated: use --filter-config with recording.defaults.max_records",
+            help="Maximum captures per kernel in default mode (environment or 4 if omitted)",
         )
         parser.add_argument(
             "-sr",
             "--per-kernel-skip-recordings",
-            action=_DeprecatedRecordingOption,
             default=None,
-            help="Deprecated: use --filter-config with recording.defaults.skip",
+            help="Launches to skip per kernel in default mode (environment or 0 if omitted)",
         )
         parser.add_argument(
             "--epilogue-format",
@@ -313,16 +302,6 @@ class Record:
         cmd = args.cmd[idx + 1 :]
         record_env = os.environ.copy()
 
-        # TODO(daniel): eventually remove this
-        deprecated_names = ("MNEME_SKIP_RECORDINGS", "MNEME_MAX_RECORDINGS", "MNEME_RR_KERNELS")
-        deprecated = [name for name in deprecated_names if name in record_env]
-        if deprecated:
-            parser.error(
-                f"{', '.join(deprecated)} are deprecated and no longer supported; "
-                "unset them and use --filter-config with recording.defaults.skip/max_records "
-                "and kernel_overrides"
-            )
-        
         # omitting --filter-mode and --filter-config goes to default
         # just `filter-config cfg.yaml` is shorthand for `--filter-mode config --filter-config cfg.yaml` 
         # when a mode is omitted.
@@ -344,6 +323,39 @@ class Record:
             except (OSError, yaml.YAMLError, TypeError, ValueError) as exc:
                 parser.error(f"Cannot load filter config {args.filter_config!r}: {exc}")
         
+        controls = ("MNEME_SKIP_RECORDINGS", "MNEME_MAX_RECORDINGS", "MNEME_RR_KERNELS")
+        supplied = [name for name in controls if name in record_env]
+        defaults = {}
+        for flag, name, field, value in (
+            ("--per-kernel-skip-recordings", controls[0], "skip", args.per_kernel_skip_recordings),
+            ("--per-kernel-max-recordings", controls[1], "max_records", args.per_kernel_max_recordings),
+        ):
+            if value is not None:
+                supplied.append(flag)
+            else:
+                value = record_env.get(name)
+            if filter_mode == "default" and value is not None:
+                try:
+                    if not value.isascii() or not value.isdecimal() or int(value) > 2**64 - 1:
+                        raise ValueError()
+                    defaults[field] = int(value)
+                except ValueError:
+                    parser.error(f"{flag} / {name} requires a nonnegative 64-bit integer")
+        if filter_mode == "default" and supplied:
+            recording = {"defaults": defaults}
+            if "MNEME_RR_KERNELS" in record_env:
+                recording["kernel_overrides"] = [
+                    {"match": {"demangled_regex": record_env["MNEME_RR_KERNELS"]}},
+                    {"match": {"demangled_regex": ".*"}, "max_records": 0},
+                ]
+            filter_json = json.dumps({"recording": recording})
+        elif supplied:
+            print(f"[mneme] Warning: {', '.join(supplied)} are ignored in "
+                  f"{filter_mode} filter mode; they apply only in default mode.", file=sys.stderr)
+        # Consumed controls must not be reapplied or warned about in the child.
+        for name in controls:
+            record_env.pop(name, None)
+
         record_env.pop("MNEME_FILTER_CONFIG", None)
         record_env["MNEME_FILTER_MODE"] = filter_mode
         librecord_path = utils.get_mneme_record_library_name()
