@@ -3,8 +3,6 @@ import re
 
 import pytest
 
-import pytest
-
 from mneme.recorded_execution import RecordedExecution
 from mneme.mneme_types import ExperimentConfiguration
 from mneme.async_executor import AsyncReplayExecutor
