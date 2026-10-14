@@ -79,7 +79,6 @@ template <mneme::DeviceVendors VendorTypes> class PageManager {
   static constexpr uintptr_t MaxAddr = 1ULL << 47;
   static constexpr int MaxMapTries = 16;
 
-  uint64_t PageSize;
   uintptr_t Anchor = 0;
 
   void pickAnchor(uint64_t Size) {
@@ -91,24 +90,22 @@ template <mneme::DeviceVendors VendorTypes> class PageManager {
   }
 
 public:
+  // Mapping granularity: large pages, and whole driver VA blocks on CUDA.
+  static constexpr uint64_t Align =
+      std::max(mneme::util::LargePageSize, DT::VABlockSize);
+
   struct AddrRange {
     void *Addr;
     uint64_t Size;
     uint64_t Align;
   };
 
-  explicit PageManager(uint64_t PageSize) : PageSize(PageSize) {}
-
-  // Maps a range with Map(Range), skipping occupied addresses. Large sizes get
-  // large-page alignment so they can use big GPU fragments, and ranges cover
-  // whole driver VA blocks. Nullopt when the device is out of memory.
+  // Maps a range with Map(Range), skipping occupied addresses. Ranges are
+  // large-page aligned so they can use big GPU fragments, and cover whole
+  // driver VA blocks. Nullopt when the device is out of memory.
   template <typename MapFn>
   std::optional<AddrRange> mapAddr(uint64_t Size, MapFn Map) {
-    uint64_t Align = Size >= mneme::util::LargePageSize
-                         ? mneme::util::LargePageSize
-                         : PageSize;
-    Align = std::max(Align, DT::VABlockSize);
-    uint64_t ActualSize = std::max(mneme::util::roundUp(Size, Align), PageSize);
+    uint64_t ActualSize = mneme::util::roundUp(Size, Align);
 
     if (!Anchor)
       pickAnchor(ActualSize);

@@ -53,8 +53,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     LOG_DEBUG("Initializing system {}", arch);
     if (DeviceID == -1)
       Runtime.origGetDeviceID(&DeviceID);
-    PM = std::make_unique<PageManager<VendorTypes>>(
-        MnemeDeviceRT::getMinPageSize(DeviceID));
+    PM = std::make_unique<PageManager<VendorTypes>>();
     Packer = std::make_unique<ChunkAllocator<VendorTypes>>(
         *PM, DeviceID, Config::get().ChunkSize);
     return *PM;
