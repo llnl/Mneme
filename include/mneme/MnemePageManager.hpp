@@ -77,7 +77,6 @@ public:
 template <mneme::DeviceVendors VendorTypes> class PageManager {
   using DT = mneme::DeviceTraits<VendorTypes>;
   static constexpr uintptr_t MaxAddr = 1ULL << 47;
-  static constexpr int MaxMapTries = 16;
 
   uintptr_t Anchor = 0;
 
@@ -100,38 +99,31 @@ public:
     uint64_t Align;
   };
 
-  // Maps a range with Map(Range), skipping occupied addresses. Ranges are
-  // large-page aligned so they can use big GPU fragments, and cover whole
-  // driver VA blocks. Nullopt when the device is out of memory.
+  // Maps a range with Map(Range) at the first free address above the anchor.
+  // Ranges are large-page aligned so they can use big GPU fragments, and cover
+  // whole driver VA blocks. Nullopt when the device is out of memory.
   template <typename MapFn>
   std::optional<AddrRange> mapAddr(uint64_t Size, MapFn Map) {
     uint64_t ActualSize = mneme::util::roundUp(Size, Align);
 
     if (!Anchor)
       pickAnchor(ActualSize);
-    uintptr_t From = Anchor;
-    int Tries = 0;
-    while (true) {
-      auto Addr = mneme::util::firstFreeVAddr(From, MaxAddr, ActualSize, Align);
-      if (!Addr)
-        LOG_FATAL("No device address range for {} bytes", Size);
-      AddrRange R{reinterpret_cast<void *>(*Addr), ActualSize, Align};
-      switch (Map(R)) {
-      case mneme::MapStatus::Mapped:
-        return R;
-      case mneme::MapStatus::OutOfMemory:
-        return std::nullopt;
-      case mneme::MapStatus::Occupied:
-        // Blocked by something /proc/self/maps does not show.
-        if (++Tries == MaxMapTries)
-          LOG_FATAL("Cannot map {} bytes at {}:\n{}", Size, R.Addr,
-                    mneme::util::getMappingsIn(*Addr - ActualSize,
-                                               *Addr + 2 * ActualSize));
-        LOG_DEBUG("Device address {} is occupied, retrying", R.Addr);
-        From = *Addr + ActualSize;
-        break;
-      }
+    auto Addr = mneme::util::firstFreeVAddr(Anchor, MaxAddr, ActualSize, Align);
+    if (!Addr)
+      LOG_FATAL("No device address range for {} bytes", Size);
+    AddrRange R{reinterpret_cast<void *>(*Addr), ActualSize, Align};
+    switch (Map(R)) {
+    case mneme::MapStatus::Mapped:
+      return R;
+    case mneme::MapStatus::OutOfMemory:
+      return std::nullopt;
+    case mneme::MapStatus::Occupied:
+      break;
     }
+    // Blocked by something /proc/self/maps does not show.
+    LOG_FATAL("Driver placed {} bytes away from {}:\n{}", Size, R.Addr,
+              mneme::util::getMappingsIn(*Addr - ActualSize,
+                                         *Addr + 2 * ActualSize));
   }
 };
 

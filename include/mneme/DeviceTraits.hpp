@@ -317,8 +317,12 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   static MapStatus mapFixed(void *Addr, uint64_t Size, uint64_t Alignment,
                             int DeviceID, hipMemGenericAllocationHandle_t &H) {
     void *Got = nullptr;
-    if (hipMemAddressReserve(&Got, Size, Alignment, Addr, 0) != hipSuccess)
-      return MapStatus::Occupied;
+    hipError_t Err = hipMemAddressReserve(&Got, Size, Alignment, Addr, 0);
+    if (Err == hipErrorOutOfMemory)
+      return MapStatus::OutOfMemory;
+    if (Err != hipSuccess)
+      LOG_FATAL("Cannot reserve {} bytes at {}: {}", Size, Addr,
+                hipGetErrorString(Err));
     if (Got != Addr) {
       (void)hipMemAddressFree(Got, Size);
       return MapStatus::Occupied;
@@ -673,8 +677,11 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
                             int DeviceID, MemoryAllocationHandle_t &H) {
     DevicePtr_t Want = reinterpret_cast<DevicePtr_t>(Addr);
     DevicePtr_t Got = 0;
-    if (cuMemAddressReserve(&Got, Size, Alignment, Want, 0) != CUDA_SUCCESS)
-      return MapStatus::Occupied;
+    CUresult Err = cuMemAddressReserve(&Got, Size, Alignment, Want, 0);
+    if (Err == CUDA_ERROR_OUT_OF_MEMORY)
+      return MapStatus::OutOfMemory;
+    if (auto EC = DeviceErrorCheck(Err))
+      LOG_FATAL("Cannot reserve {} bytes at {}: {}", Size, Addr, *EC);
     if (Got != Want) {
       (void)cuMemAddressFree(Got, Size);
       return MapStatus::Occupied;
