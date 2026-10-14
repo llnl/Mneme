@@ -221,13 +221,15 @@ public:
         }))
       return;
     Free.remove(Start);
-    DT::unmapFixed(reinterpret_cast<void *>(Start), C.Size, C.Handle);
+    DT::unmapFixed(reinterpret_cast<void *>(Start), C.Size, DeviceID,
+                   C.Handle);
     Chunks.erase(It);
   }
 
   ~ChunkAllocator() {
     for (auto &[Start, C] : Chunks)
-      DT::unmapFixed(reinterpret_cast<void *>(Start), C.Size, C.Handle);
+      DT::unmapFixed(reinterpret_cast<void *>(Start), C.Size, DeviceID,
+                     C.Handle);
   }
 
   ChunkAllocator(const ChunkAllocator &) = delete;

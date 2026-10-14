@@ -36,6 +36,7 @@ protected:
   // Non-zero when this blob owns the MappedSize-byte mapping at MapAddr.
   uint64_t MappedSize = 0;
   void *MapAddr = nullptr;
+  int DeviceID = 0;
   MemoryAllocationHandle_t Handle{};
 
 public:
@@ -55,6 +56,7 @@ public:
       IsMapped = true;
       MappedSize = MapSize;
       MapAddr = MapVA;
+      this->DeviceID = DeviceID;
     }
     return Status;
   }
@@ -87,7 +89,7 @@ public:
       return ret;
     }
     if (MappedSize)
-      MnemeDeviceRT::unmapFixed(MapAddr, MappedSize, Handle);
+      MnemeDeviceRT::unmapFixed(MapAddr, MappedSize, DeviceID, Handle);
     MappedSize = 0;
     BlobAddr = 0;
     return MnemeDeviceRT::DeviceSuccess;

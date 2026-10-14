@@ -1,7 +1,8 @@
 #pragma once
 #include <dlfcn.h>
+#include <map>
 #include <optional>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "mneme/MnemeLogger.hpp"
@@ -292,23 +293,26 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   }
 
   // Before ROCm 6.4.2 (HIP 60443484) hipMemRelease never returns memory to the
-  // device, so there unmapped handles are kept and reused for the same size.
-  // Leaked so blobs released during static destruction can still use it.
+  // device, so there unmapped handles are kept and reused for the same device
+  // and size. The pool is leaked so blobs released during static destruction
+  // can still use it.
   static std::vector<hipMemGenericAllocationHandle_t> &
-  freeHandles(uint64_t Size) {
-    static auto *Pool = new std::unordered_map<
-        uint64_t, std::vector<hipMemGenericAllocationHandle_t>>();
-    return (*Pool)[Size];
+  freeHandles(int DeviceID, uint64_t Size) {
+    static auto *Pool =
+        new std::map<std::pair<int, uint64_t>,
+                     std::vector<hipMemGenericAllocationHandle_t>>();
+    return (*Pool)[{DeviceID, Size}];
   }
 
-  static void releaseHandle(uint64_t Size, hipMemGenericAllocationHandle_t H) {
+  static void releaseHandle(int DeviceID, uint64_t Size,
+                            hipMemGenericAllocationHandle_t H) {
     static const bool ReleaseLeaks = [] {
       int Version = 0;
       (void)hipRuntimeGetVersion(&Version);
       return Version < 60443484;
     }();
     if (ReleaseLeaks)
-      freeHandles(Size).push_back(H);
+      freeHandles(DeviceID, Size).push_back(H);
     else
       (void)hipMemRelease(H);
   }
@@ -328,7 +332,7 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
       return MapStatus::Occupied;
     }
 
-    auto &Free = freeHandles(Size);
+    auto &Free = freeHandles(DeviceID, Size);
     if (!Free.empty()) {
       H = Free.back();
       Free.pop_back();
@@ -354,16 +358,16 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
       }
       (void)hipMemUnmap(Addr, Size);
     }
-    releaseHandle(Size, H);
+    releaseHandle(DeviceID, Size, H);
     (void)hipMemAddressFree(Addr, Size);
     return MapStatus::OutOfMemory;
   }
 
-  static void unmapFixed(void *Addr, uint64_t Size,
+  static void unmapFixed(void *Addr, uint64_t Size, int DeviceID,
                          hipMemGenericAllocationHandle_t H) {
     auto EC = DeviceErrorCheck(hipMemUnmap(Addr, Size));
     if (!EC) {
-      releaseHandle(Size, H);
+      releaseHandle(DeviceID, Size, H);
       EC = DeviceErrorCheck(hipMemAddressFree(Addr, Size));
     }
     if (EC)
@@ -710,7 +714,7 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
     return MapStatus::OutOfMemory;
   }
 
-  static void unmapFixed(void *Addr, uint64_t Size,
+  static void unmapFixed(void *Addr, uint64_t Size, int,
                          MemoryAllocationHandle_t H) {
     DevicePtr_t Ptr = reinterpret_cast<DevicePtr_t>(Addr);
     auto EC = DeviceErrorCheck(cuMemUnmap(Ptr, Size));
