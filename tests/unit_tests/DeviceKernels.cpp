@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -156,7 +157,7 @@ static void run_case(BuiltinDType dtype, ThresholdKind tk, Norm norm,
   double exp_linf = 0.0;
 
   int exp_any_fail = 0;
-  int exp_first_bad = (int)N;
+  uint64_t exp_first_bad = N;
 
   for (size_t i = 0; i < N; ++i) {
     double e = host_element_error<T>(hA[i], hB[i], tk);
@@ -165,7 +166,7 @@ static void run_case(BuiltinDType dtype, ThresholdKind tk, Norm norm,
     if (norm == Norm::None) {
       if (e > threshold) {
         exp_any_fail = 1;
-        exp_first_bad = std::min(exp_first_bad, (int)i);
+        exp_first_bad = std::min<uint64_t>(exp_first_bad, i);
       }
     } else {
       exp_l1 += e;
@@ -182,8 +183,7 @@ static void run_case(BuiltinDType dtype, ThresholdKind tk, Norm norm,
       assert(r.MaxErr >= exp_max - 1e-12);
     } else {
       assert(r.AnyFail == 0);
-      // FirstBadIdx may be N or INT_MAX depending on init choice; accept ">= N"
-      assert(r.FirstBadIdx >= (int)N);
+      assert(r.FirstBadIdx >= N);
       assert(approx(r.MaxErr, 0.0) || r.MaxErr <= 1e-12);
     }
   } else if (norm == Norm::Linf) {
@@ -342,8 +342,40 @@ static void run_all_for_dtype(BuiltinDType dt) {
   }
 }
 
+// Byte comparison of buffers larger than 2 GiB must still see a difference
+// past byte 2^31.
+static void run_large_u8_case() {
+  constexpr uint64_t NumBytes = (1ULL << 31) + 4096;
+  constexpr uint64_t BadIdx = (1ULL << 31) + 7;
+  char *dA = nullptr;
+  char *dB = nullptr;
+  if (MnemeDeviceRT::DeviceMalloc(reinterpret_cast<void **>(&dA), NumBytes) !=
+          MnemeDeviceRT::DeviceSuccess ||
+      MnemeDeviceRT::DeviceMalloc(reinterpret_cast<void **>(&dB), NumBytes) !=
+          MnemeDeviceRT::DeviceSuccess) {
+    std::cerr << "Large comparison test needs 4 GiB of device memory\n";
+    std::exit(1);
+  }
+  MnemeDeviceRT::DeviceMemset(dA, 0, NumBytes);
+  MnemeDeviceRT::DeviceMemset(dB, 0, NumBytes);
+  MnemeDeviceRT::DeviceMemset(dB + BadIdx, 1, 1);
+
+  Metadata md;
+  md.builtin = BuiltinDType::U8;
+  CompareResult r = compareDeviceBlobs(dA, dB, NumBytes, md);
+  if (r.AnyFail != 1 || r.FirstBadIdx != BadIdx) {
+    std::cerr << "Large comparison missed byte " << BadIdx << ": AnyFail "
+              << r.AnyFail << ", FirstBadIdx " << r.FirstBadIdx << "\n";
+    std::exit(1);
+  }
+  MnemeDeviceRT::DeviceFree(dA);
+  MnemeDeviceRT::DeviceFree(dB);
+}
+
 int main() {
   std::cout << "Running Mneme compareDeviceBlobs thorough tests...\n";
+
+  run_large_u8_case();
 
   run_all_for_dtype(BuiltinDType::U8);
   run_all_for_dtype(BuiltinDType::I8);
