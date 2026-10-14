@@ -59,6 +59,19 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return *PM;
   }
 
+  // The caller must first wait for work that may still use the memory.
+  DeviceError_t releaseBlob(void *ptr) {
+    auto It = AllocatedBlobs.find(ptr);
+    auto &Blob = It->second;
+    LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
+              Blob.getSize(), Blob.getActualSize());
+    auto ret = Blob.release();
+    if (Packer->packs(Blob.getSize()))
+      Packer->release(ptr, Blob.getActualSize());
+    AllocatedBlobs.erase(It);
+    return ret;
+  }
+
 public:
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
     if (!ptr)
@@ -168,8 +181,7 @@ public:
       LOG_WARN("Mneme was instructed to de-allocate nullptr..., skipping");
       return MnemeDeviceRT::DeviceSuccess;
     }
-    auto It = AllocatedBlobs.find(ptr);
-    if (It == AllocatedBlobs.end()) {
+    if (!AllocatedBlobs.contains(ptr)) {
       if (PassthroughAllocs.erase(ptr)) {
         LOG_DEBUG("Forwarding free of vendor runtime allocation PTR:{}", ptr);
         return Runtime.origFreeDevice(ptr);
@@ -178,16 +190,9 @@ public:
                    ptr);
       LOG_FATAL("Free address that is not being allocated through Mneme\n");
     }
-    auto &Blob = It->second;
-    LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
-              Blob.getSize(), Blob.getActualSize());
     // Like hipFree, wait for kernels that may still use the memory.
     MnemeDeviceRT::DeviceSynchronize();
-    auto ret = Blob.release();
-    if (Packer->packs(Blob.getSize()))
-      Packer->release(ptr, Blob.getActualSize());
-    AllocatedBlobs.erase(It);
-    return ret;
+    return releaseBlob(ptr);
   }
 
   DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
@@ -200,7 +205,7 @@ public:
         LOG_WARN("Not freeing PTR:{}: stream synchronize failed", ptr);
         return ret;
       }
-      return rtFree(ptr);
+      return releaseBlob(ptr);
     }
     if (ptr == nullptr || PassthroughAllocs.erase(ptr))
       LOG_DEBUG("Forwarding async free of vendor runtime allocation PTR:{}",
