@@ -155,6 +155,8 @@ class BaseExecutor:
         jit.register_pass_plugin(MNEME_PASS_PLUGIN_LIB)
 
     def open(self):
+        # Done first so that a failure leaves nothing mapped.
+        self.kernel_descr.apply_compare()
         # Note the 'executor' allocates all resources and picks address space.
         self._page_manager = PageManagerRef(
             self.device_id, self.records.va_addr, self.records.va_size

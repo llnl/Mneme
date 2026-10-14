@@ -10,7 +10,6 @@
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeAnnotation.hpp"
-#include "mneme/MnemeAnnotationInternal.hpp"
 #include "mneme/MnemeComparators.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeSnapshotRecords.hpp"
@@ -93,7 +92,6 @@ public:
     Buffer += Header.Size;
     LOG_DEBUG("Read memory blob at address {} SIZE: {} ActualSize:{}",
               Header.DevAddr, Header.Size, Header.ActualSize);
-    Blob.PtrMD = metadata::fromBuffer(Buffer);
     return std::make_pair(Header.DevAddr, std::move(Blob));
   }
 
@@ -135,7 +133,7 @@ public:
 
   void setMetadata(Metadata Md) { PtrMD = Md; }
 
-  Metadata getMetadata() const { return PtrMD; }
+  const Metadata &getMetadata() const { return PtrMD; }
 
   bool operator==(const MnemeMemoryBlob<VendorTypes> &other) const {
     if (getSize() != other.getSize()) {
@@ -165,7 +163,7 @@ template <DeviceVendors VendorTypes>
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
                               const MnemeMemoryBlob<VendorTypes> &Blob) {
   // The format in the binary is the following:
-  // | Var Actual Size | Var-Size | Device Address | Var Data | Metadata
+  // | Var Actual Size | Var-Size | Device Address | Var Data |
   BlobHeader{Blob.ActualSize, Blob.Size, Blob.BlobAddr}.write(OS);
 
   LOG_DEBUG("Serializing MemoryBlob, DevAddr:{} MirroredHostAddr:{} Size:{} "
@@ -185,8 +183,6 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
               EC.value() + "\n");
   OS << llvm::StringRef(
       reinterpret_cast<const char *>(Blob.getHostData().get()), Blob.Size);
-  auto MD = Blob.getMetadata();
-  mneme::metadata::serialize(OS, MD);
 
   return OS;
 }

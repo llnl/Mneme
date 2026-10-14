@@ -24,6 +24,23 @@ prologueAndEpilogue(MnemeDeviceMemStateRef v1, MnemeDeviceMemStateRef v2) {
   return {Prologue, Epilogue};
 }
 
+static EpilogueState<Vendor> *epilogue(MnemeDeviceMemStateRef State) {
+  auto *Epilogue = unwrap(State)->asEpilogue();
+  if (!Epilogue)
+    LOG_FATAL("Expected an epilogue memory state");
+  return Epilogue;
+}
+
+// Mirrors CompareMetadata in recorded_execution.py.
+struct MnemePyCompareMetadata {
+  void *DevAddr;
+  uint8_t DType;
+  double Threshold;
+  uint8_t ThresholdKind;
+  uint8_t Norm;
+  const char *Tag;
+};
+
 extern "C" {
 API_EXPORT(MnemeDeviceMemStateRef)
 MnemePy_initializeMemState(const char *KernelName, const char *fn,
@@ -66,5 +83,39 @@ API_EXPORT(void)
 MnemePy_ResetMemState(MnemeDeviceMemStateRef MemState) {
   auto state = unwrap(MemState);
   state->reset();
+}
+
+// Fills at most Capacity entries and returns the number of blobs. Tags point
+// into the state.
+API_EXPORT(uint64_t)
+MnemePy_getCompareMetadata(MnemeDeviceMemStateRef State,
+                           MnemePyCompareMetadata *Out, uint64_t Capacity) {
+  uint64_t Count = 0;
+  for (const auto &[DevAddr, Blob] : epilogue(State)->getDeviceMemory()) {
+    if (Count < Capacity) {
+      const mneme::Metadata &Md = Blob.getMetadata();
+      Out[Count] = {DevAddr,
+                    static_cast<uint8_t>(Md.builtin),
+                    Md.threshold,
+                    static_cast<uint8_t>(Md.threshold_kind),
+                    static_cast<uint8_t>(Md.norm),
+                    Md.tag ? Md.tag->c_str() : nullptr};
+    }
+    ++Count;
+  }
+  return Count;
+}
+
+API_EXPORT(bool)
+MnemePy_setCompareMetadata(MnemeDeviceMemStateRef State,
+                           const MnemePyCompareMetadata *In) {
+  mneme::Metadata Md;
+  Md.builtin = static_cast<BuiltinDType>(In->DType);
+  Md.threshold = In->Threshold;
+  Md.threshold_kind = static_cast<ThresholdKind>(In->ThresholdKind);
+  Md.norm = static_cast<Norm>(In->Norm);
+  if (In->Tag)
+    Md.tag = std::string(In->Tag);
+  return epilogue(State)->setCompareMetadata(In->DevAddr, std::move(Md));
 }
 }

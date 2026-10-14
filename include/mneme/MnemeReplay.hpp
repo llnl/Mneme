@@ -209,6 +209,15 @@ public:
 
   EpilogueState<VendorTypes> *asEpilogue() override { return this; }
 
+  // Sets how the blob at DevAddr is compared. False if there is none.
+  bool setCompareMetadata(void *DevAddr, Metadata Md) {
+    auto It = this->DeviceMemoryState.find(DevAddr);
+    if (It == this->DeviceMemoryState.end())
+      return false;
+    It->second.setMetadata(std::move(Md));
+    return true;
+  }
+
   // Verifies a replayed prologue against this expected-output epilogue. At call
   // time the prologue's device buffers hold the kernel's actual output.
   virtual bool matches(const PrologueState<VendorTypes> &Prologue) const {

@@ -1,30 +1,13 @@
-#include "mneme/MnemeAnnotation.hpp"
+#include "mneme/MnemeAnnotationInternal.hpp"
 #include "mneme/MnemeUtils.hpp"
-#include <llvm/Support/raw_ostream.h>
 
 namespace mneme {
 namespace metadata {
-void serialize(llvm::raw_ostream &OS, const Metadata &Md) {
-  OS.write(reinterpret_cast<const char *>(&Md.builtin),
-           sizeof(std::underlying_type_t<BuiltinDType>));
-  OS.write(reinterpret_cast<const char *>(&Md.threshold), sizeof(double));
-  OS.write(reinterpret_cast<const char *>(&Md.threshold_kind),
-           sizeof(ThresholdKind));
-  OS.write(reinterpret_cast<const char *>(&Md.norm), sizeof(Norm));
-  size_t Size = 0;
-  if (Md.tag.has_value())
-    Size = Md.tag->size();
-
-  OS.write(reinterpret_cast<const char *>(&Size), sizeof(size_t));
-  if (Md.tag.has_value())
-    OS.write(reinterpret_cast<const char *>(Md.tag->c_str()), Size);
-}
-
-size_t serializedSize(const Metadata &Md) {
-  return sizeof(std::underlying_type_t<BuiltinDType>) + sizeof(double) +
-         sizeof(ThresholdKind) + sizeof(Norm) + sizeof(size_t) +
-         (Md.tag ? Md.tag->size() : 0);
-}
+// Indexed by enum value. recorded_execution.py uses the same names.
+static const char *const DTypeNames[] = {
+    "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "f16", "f32", "f64"};
+static const char *const ThresholdKindNames[] = {"absolute", "relative"};
+static const char *const NormNames[] = {"none", "l1", "l2", "linf"};
 
 Metadata fromBuffer(const char *&Buffer) {
   Metadata Md;
@@ -38,6 +21,26 @@ Metadata fromBuffer(const char *&Buffer) {
     Buffer += Size;
   }
   return Md;
+}
+
+bool isDefault(const Metadata &Md) {
+  const Metadata Default;
+  return Md.builtin == Default.builtin && Md.threshold == Default.threshold &&
+         Md.threshold_kind == Default.threshold_kind &&
+         Md.norm == Default.norm && Md.tag == Default.tag;
+}
+
+llvm::json::Object toJSON(void *DevAddr, const Metadata &Md) {
+  llvm::json::Object Entry;
+  Entry["DevAddr"] = util::pointerToHexString(DevAddr);
+  if (Md.tag)
+    Entry["Tag"] = *Md.tag;
+  Entry["DType"] = DTypeNames[static_cast<size_t>(Md.builtin)];
+  Entry["Threshold"] = Md.threshold;
+  Entry["ThresholdKind"] =
+      ThresholdKindNames[static_cast<size_t>(Md.threshold_kind)];
+  Entry["Norm"] = NormNames[static_cast<size_t>(Md.norm)];
+  return Entry;
 }
 
 } // namespace metadata
