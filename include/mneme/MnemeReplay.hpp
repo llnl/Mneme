@@ -184,23 +184,24 @@ public:
     MnemeDeviceRT::getDevice(DeviceID);
     uint64_t PageSize = MnemeDeviceRT::getMinPageSize(DeviceID);
     uint64_t BlockSize = std::max(PageSize, MnemeDeviceRT::VABlockSize);
-    uint64_t Unit = BlockSize;
-    auto StartOf = [&](size_t I) { return Blobs[I].first & ~(Unit - 1); };
-    auto EndOf = [&](size_t I) {
+    auto StartOf = [&](size_t I, uint64_t Unit) {
+      return Blobs[I].first & ~(Unit - 1);
+    };
+    auto EndOf = [&](size_t I, uint64_t Unit) {
       return util::roundUp(Blobs[I].first + Blobs[I].second->getActualSize(),
                            Unit);
     };
     // Blobs [I, J) within Slack of each other's Unit-rounded ranges, and their
     // rounded end.
-    auto Group = [&](size_t I, size_t Limit, uint64_t Slack) {
-      uintptr_t End = EndOf(I);
+    auto Group = [&](size_t I, size_t Limit, uint64_t Slack, uint64_t Unit) {
+      uintptr_t End = EndOf(I, Unit);
       size_t J = I + 1;
-      for (; J < Limit && StartOf(J) <= End + Slack; ++J)
-        End = std::max(End, EndOf(J));
+      for (; J < Limit && StartOf(J, Unit) <= End + Slack; ++J)
+        End = std::max(End, EndOf(J, Unit));
       return std::make_pair(J, End);
     };
-    auto MapGroup = [&](size_t I, size_t J, uintptr_t End) {
-      uintptr_t Start = StartOf(I);
+    auto MapGroup = [&](size_t I, size_t J, uintptr_t End, uint64_t Unit) {
+      uintptr_t Start = StartOf(I, Unit);
       if (End > Start) {
         uint64_t Size = End - Start;
         auto Status = Blobs[I].second->mapFixed(
@@ -217,26 +218,27 @@ public:
     };
 
     for (size_t I = 0, N = Blobs.size(); I < N;) {
-      auto [J, End] = Group(I, N, util::LargePageSize);
-      if (J - I > 1 && MapGroup(I, J, End) == MapStatus::Mapped) {
+      auto [J, End] = Group(I, N, util::LargePageSize, BlockSize);
+      if (J - I > 1 && MapGroup(I, J, End, BlockSize) == MapStatus::Mapped) {
         I = J;
         continue;
       }
       // Something may live between the blobs; map only blobs sharing pages.
+      uint64_t Unit = BlockSize;
       for (size_t K = I; K < J;) {
-        auto [L, E] = Group(K, J, 0);
-        auto Status = MapGroup(K, L, E);
+        auto [L, E] = Group(K, J, 0, Unit);
+        auto Status = MapGroup(K, L, E, Unit);
         if (Status != MapStatus::Mapped && Unit != PageSize) {
           Unit = PageSize;
           continue;
         }
         if (Status != MapStatus::Mapped)
           LOG_FATAL("Cannot map recorded range {}-{}: {}\n{}",
-                    reinterpret_cast<void *>(StartOf(K)),
+                    reinterpret_cast<void *>(StartOf(K, Unit)),
                     reinterpret_cast<void *>(E),
                     Status == MapStatus::Occupied ? "occupied"
                                                   : "out of memory",
-                    util::getMappingsIn(StartOf(K), E));
+                    util::getMappingsIn(StartOf(K, Unit), E));
         K = L;
         Unit = BlockSize;
       }
