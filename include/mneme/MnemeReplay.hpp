@@ -24,6 +24,9 @@ namespace mneme {
 template <DeviceVendors VendorTypes> class PrologueState;
 template <DeviceVendors VendorTypes> class EpilogueState;
 
+// How each device blob is compared, keyed by device address.
+using CompareRules = llvm::DenseMap<void *, Metadata>;
+
 // Abstract base for a replay memory state. A concrete state is either a
 // prologue (kernel input state) or an epilogue (expected kernel output state).
 // Subclasses provide load(), which materializes the state onto the device.
@@ -274,26 +277,20 @@ public:
 
   EpilogueState<VendorTypes> *asEpilogue() override { return this; }
 
-  // Sets how the blob at DevAddr is compared. False if there is none.
-  bool setCompareMetadata(void *DevAddr, Metadata Md) {
-    auto It = this->DeviceMemoryState.find(DevAddr);
-    if (It == this->DeviceMemoryState.end())
-      return false;
-    It->second.setMetadata(std::move(Md));
-    return true;
-  }
-
   // Verifies a replayed prologue against this expected-output epilogue. At call
-  // time the prologue's device buffers hold the kernel's actual output.
-  virtual bool matches(const PrologueState<VendorTypes> &Prologue) const {
-    return compare(Prologue, /*GlobalsOnDevice=*/true);
+  // time the prologue's device buffers hold the kernel's actual output. Rules
+  // must hold an entry for every device blob.
+  virtual bool matches(const PrologueState<VendorTypes> &Prologue,
+                       const CompareRules &Rules) const {
+    return compare(Prologue, Rules, /*GlobalsOnDevice=*/true);
   }
 
   // True if the prologue's recorded input already satisfies this epilogue, so
   // a kernel that writes nothing would verify. Must be called before any launch
   // writes to the prologue's device buffers.
-  bool matchesUnlaunched(const PrologueState<VendorTypes> &Prologue) const {
-    return compare(Prologue, /*GlobalsOnDevice=*/false);
+  bool matchesUnlaunched(const PrologueState<VendorTypes> &Prologue,
+                         const CompareRules &Rules) const {
+    return compare(Prologue, Rules, /*GlobalsOnDevice=*/false);
   }
 
 protected:
@@ -303,7 +300,7 @@ private:
   // Globals reach the device only when a replay module is loaded, so before any
   // launch the prologue's input globals are read from their host copies.
   bool compare(const PrologueState<VendorTypes> &Prologue,
-               bool GlobalsOnDevice) const {
+               const CompareRules &Rules, bool GlobalsOnDevice) const {
     LOG_DEBUG("Comparing memory states");
     bool Correct = true;
 
@@ -320,7 +317,11 @@ private:
         LOG_WARN("Sizes Differ {} vs {}", ProBlob.getSize(), EpiBlob.getSize());
         return false;
       }
-      if (EpiBlob != ProBlob)
+      auto Rule = Rules.find(DevAddr);
+      if (Rule == Rules.end())
+        LOG_FATAL("No comparison rule for blob " +
+                  util::pointerToHexString(DevAddr));
+      if (!blobMatches(EpiBlob, ProBlob, Rule->second))
         Correct = false;
     }
 

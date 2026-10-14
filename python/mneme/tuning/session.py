@@ -882,7 +882,7 @@ class TuningSession:
             # Checked here so that a bad policy is reported instead of failing every worker.
             try:
                 compare_policy = ComparePolicy.from_file(self.options.compare_policy)
-                kernel.apply_compare(compare_policy)
+                kernel.compare_rules(compare_policy)
             except ValueError as exc:
                 print(f"Invalid tuning configuration: {exc}")
                 return EXIT_INVALID_CONFIGURATION

@@ -216,7 +216,9 @@ An unknown key, an unknown enum name, a negative threshold, or a tag or
 address that matches no buffer of the replayed instance is an error.
 The Python API takes the same policy as
 `ComparePolicy.from_file(path)`, passed as `compare_policy` to
-`AsyncReplayExecutor` or `BaseExecutor`.
+`AsyncReplayExecutor` or `BaseExecutor`.  To compare snapshots
+directly, pass `KernelInstance.compare_rules(policy)` to
+`MemStateRef.matches`; a buffer without a rule is an error.
 
 ---
 

@@ -147,6 +147,7 @@ class BaseExecutor:
         self._iterations = iterations
         self._warmup = warmup
         self.compare_policy = compare_policy
+        self._compare_rules = None
         self.num_devices = get_device_count()
         set_device(device_id)
         logger.debug(
@@ -156,11 +157,13 @@ class BaseExecutor:
 
     def open(self):
         # Done first so that a failure leaves nothing mapped.
-        self.kernel_descr.apply_compare(self.compare_policy)
+        self._compare_rules = self.kernel_descr.compare_rules(self.compare_policy)
         self._prologue = self.kernel_descr.prologue.open()
         self._epilogue = self.kernel_descr.epilogue.open()
         # No kernel has run yet, so this asks whether doing nothing would verify.
-        self.noop_verifies = self._prologue.matches_unlaunched(self._epilogue)
+        self.noop_verifies = self._prologue.matches_unlaunched(
+            self._epilogue, self._compare_rules
+        )
         return self
 
     @property
@@ -571,7 +574,7 @@ class BaseExecutor:
                 profile=track,
             )
             if verify:
-                result.verified = prologue == epilogue
+                result.verified = prologue.matches(epilogue, self._compare_rules)
                 result.noop_verifies = self.noop_verifies
             if track:
                 result.reg_usage = device_func.reg_usage

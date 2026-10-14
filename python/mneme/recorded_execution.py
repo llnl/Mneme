@@ -27,7 +27,6 @@ import json
 from ctypes import (
     POINTER,
     Structure,
-    byref,
     c_bool,
     c_char_p,
     c_double,
@@ -52,12 +51,6 @@ ffi.lib.MnemePy_initializeMemState.restype = MnemeRecordStateRef
 ffi.lib.MnemePy_DisposeMemState.argtypes = [MnemeRecordStateRef]
 
 ffi.lib.MnemePy_LoadMemState.argtypes = [MnemeRecordStateRef]
-
-ffi.lib.MnemePy_CompareMemState.argtypes = [MnemeRecordStateRef, MnemeRecordStateRef]
-ffi.lib.MnemePy_CompareMemState.restype = c_bool
-
-ffi.lib.MnemePy_MatchesUnlaunched.argtypes = [MnemeRecordStateRef, MnemeRecordStateRef]
-ffi.lib.MnemePy_MatchesUnlaunched.restype = c_bool
 
 ffi.lib.MnemePy_ResetMemState.argtypes = [MnemeRecordStateRef]
 
@@ -97,11 +90,21 @@ ffi.lib.MnemePy_getCompareMetadata.argtypes = [
 ]
 ffi.lib.MnemePy_getCompareMetadata.restype = c_uint64
 
-ffi.lib.MnemePy_setCompareMetadata.argtypes = [
+ffi.lib.MnemePy_CompareMemState.argtypes = [
+    MnemeRecordStateRef,
     MnemeRecordStateRef,
     POINTER(CompareMetadata),
+    c_uint64,
 ]
-ffi.lib.MnemePy_setCompareMetadata.restype = c_bool
+ffi.lib.MnemePy_CompareMemState.restype = c_bool
+
+ffi.lib.MnemePy_MatchesUnlaunched.argtypes = [
+    MnemeRecordStateRef,
+    MnemeRecordStateRef,
+    POINTER(CompareMetadata),
+    c_uint64,
+]
+ffi.lib.MnemePy_MatchesUnlaunched.restype = c_bool
 
 
 def _check_compare_fields(fields, where: str) -> dict:
@@ -486,43 +489,61 @@ class MemStateRef:
 
         ffi.lib.MnemePy_ResetMemState(self._state)
 
-    def __eq__(self, other):
+    def _compare(self, fn, other, rules: Dict[int, dict]) -> bool:
+        epilogue = self if self.s_type == SnapshotType.EPILOGUE else other
+        missing = epilogue.compare_metadata().keys() - rules.keys()
+        if missing:
+            raise ValueError(f"No comparison rule for blob {min(missing):#x}")
+        entries = (CompareMetadata * len(rules))()
+        for entry, (addr, fields) in zip(entries, rules.items()):
+            tag = fields.get("Tag")
+            entry.DevAddr = addr
+            entry.DType = DTYPES.index(fields["DType"])
+            entry.Threshold = fields["Threshold"]
+            entry.ThresholdKind = THRESHOLD_KINDS.index(fields["ThresholdKind"])
+            entry.Norm = NORMS.index(fields["Norm"])
+            entry.Tag = None if tag is None else tag.encode("utf-8")
+        return bool(fn(self._state, other._state, entries, len(rules)))
+
+    def matches(self, other, rules: Dict[int, dict]) -> bool:
         """
-        Compare two snapshots using the native comparison routine.
+        Verify a replayed prologue against an epilogue.
+
+        One snapshot must be a prologue and the other an epilogue. Each blob is
+        compared with its entry of ``rules``, as returned by
+        :meth:`RecordedExecution.KernelInstance.compare_rules`.
 
         Returns
         -------
         bool
-            True if the native layer considers the states equivalent.
-        """
-        return bool(ffi.lib.MnemePy_CompareMemState(self._state, other._state))
+            True if the prologue's device memory matches the epilogue.
 
-    def __ne__(self, other):
+        Raises
+        ------
+        ValueError
+            If ``rules`` has no entry for a blob of the epilogue.
         """
-        Compare two snapshots using the native comparison routine.
+        return self._compare(ffi.lib.MnemePy_CompareMemState, other, rules)
 
-        Returns
-        -------
-        bool
-            True if the native layer considers the states different.
-        """
-        return not bool(ffi.lib.MnemePy_CompareMemState(self._state, other._state))
-
-    def matches_unlaunched(self, other):
+    def matches_unlaunched(self, other, rules: Dict[int, dict]) -> bool:
         """
         Check whether the recorded input already satisfies the recorded output.
 
-        One snapshot must be a prologue and the other an epilogue. The check uses
-        the same comparison as verification, so it answers whether a kernel that
-        writes nothing would verify. Call it before any kernel launch writes to
-        the prologue's device buffers.
+        Takes the same arguments as :meth:`matches`, and answers whether a
+        kernel that writes nothing would verify. Call it before any kernel
+        launch writes to the prologue's device buffers.
 
         Returns
         -------
         bool
             True if the unmodified prologue matches the epilogue.
+
+        Raises
+        ------
+        ValueError
+            If ``rules`` has no entry for a blob of the epilogue.
         """
-        return bool(ffi.lib.MnemePy_MatchesUnlaunched(self._state, other._state))
+        return self._compare(ffi.lib.MnemePy_MatchesUnlaunched, other, rules)
 
     def compare_metadata(self) -> Dict[int, dict]:
         """
@@ -550,28 +571,6 @@ class MemStateRef:
             }
             for e in entries
         }
-
-    def set_compare_metadata(self, dev_addr: int, fields: dict):
-        """
-        Set how an epilogue compares the device blob at ``dev_addr``.
-
-        Raises
-        ------
-        ValueError
-            If no blob starts at ``dev_addr``.
-        """
-        self._initialize()
-        tag = fields.get("Tag")
-        entry = CompareMetadata(
-            dev_addr,
-            DTYPES.index(fields["DType"]),
-            fields["Threshold"],
-            THRESHOLD_KINDS.index(fields["ThresholdKind"]),
-            NORMS.index(fields["Norm"]),
-            None if tag is None else tag.encode("utf-8"),
-        )
-        if not ffi.lib.MnemePy_setCompareMetadata(self._state, byref(entry)):
-            raise ValueError(f"No device blob at {dev_addr:#x}")
 
     def __del__(self):
         try:
@@ -725,28 +724,30 @@ class RecordedExecution:
 
             return res
 
-        def _effective_compare(self, policy: Optional[ComparePolicy]) -> Dict[int, dict]:
-            blobs = self.epilogue.compare_metadata()
-            # Records without Compare predate it and keep the metadata in their snapshots.
-            if self.compare is not None:
-                recorded = dict(_check_recorded_compare(entry) for entry in self.compare)
-                unknown = recorded.keys() - blobs.keys()
-                if unknown:
-                    raise ValueError(f"Compare entry for unknown blob {min(unknown):#x}")
-                blobs = {addr: recorded.get(addr, EXACT_COMPARE) for addr in blobs}
-            return (policy or ComparePolicy()).resolve(blobs)
-
-        def apply_compare(self, policy: Optional[ComparePolicy] = None):
+        def compare_rules(self, policy: Optional[ComparePolicy] = None) -> Dict[int, dict]:
             """
-            Set the metadata the epilogue is verified with.
+            Return how each epilogue blob is verified, keyed by device address.
 
             ``policy`` overrides the recorded metadata. Only host memory is
             touched, so this can run before the epilogue is loaded. The
             epilogue is closed if this raises.
+
+            Raises
+            ------
+            ValueError
+                On a bad ``Compare`` entry or one for an unknown blob, or a
+                policy tag or address that matches no blob.
             """
             try:
-                for addr, fields in self._effective_compare(policy).items():
-                    self.epilogue.set_compare_metadata(addr, fields)
+                blobs = self.epilogue.compare_metadata()
+                # Records without Compare predate it and keep the metadata in their snapshots.
+                if self.compare is not None:
+                    recorded = dict(_check_recorded_compare(entry) for entry in self.compare)
+                    unknown = recorded.keys() - blobs.keys()
+                    if unknown:
+                        raise ValueError(f"Compare entry for unknown blob {min(unknown):#x}")
+                    blobs = {addr: recorded.get(addr, EXACT_COMPARE) for addr in blobs}
+                return (policy or ComparePolicy()).resolve(blobs)
             except Exception:
                 self.epilogue.close()
                 raise

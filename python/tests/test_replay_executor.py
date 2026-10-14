@@ -31,7 +31,8 @@ class FakeSnapshot:
     def close(self):
         self.closed = True
 
-    def matches_unlaunched(self, other):
+    def matches_unlaunched(self, other, rules):
+        assert rules is FakeKernelDescr.RULES
         return self.noop_verifies
 
 
@@ -52,6 +53,8 @@ class FakeEpilogueDescr:
 
 
 class FakeKernelDescr:
+    RULES = {0x1000: {}}
+
     def __init__(self, kernel_name="K", static_hash="H", prologue=None, epilogue=None):
         self.kernel_name = kernel_name
         self.static_hash = static_hash
@@ -59,8 +62,8 @@ class FakeKernelDescr:
         self.prologue = FakePrologueDescr(prologue or FakeSnapshot())
         self.epilogue = FakeEpilogueDescr(epilogue or FakeSnapshot())
 
-    def apply_compare(self, policy):
-        pass
+    def compare_rules(self, policy):
+        return self.RULES
 
 
 class FakeModule:
@@ -91,7 +94,7 @@ class FakeMemStateRef:
     def __enter__(self):
         return self.open()
 
-    def __eq__(self, other):
+    def matches(self, other, rules):
         return True
 
 class FakeDeviceFunction:
