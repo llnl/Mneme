@@ -146,7 +146,11 @@ MNEME_DEV void atomicAddDouble(double *addr, double val) {
   atomicAdd(addr, val);
 }
 
-MNEME_DEV int atomicMinInt(int *addr, int val) { return atomicMin(addr, val); }
+MNEME_DEV void atomicMinU64(uint64_t *addr, uint64_t val) {
+  static_assert(sizeof(uint64_t) == sizeof(unsigned long long));
+  atomicMin(reinterpret_cast<unsigned long long *>(addr),
+            static_cast<unsigned long long>(val));
+}
 
 template <class T>
 __global__ void
@@ -156,13 +160,13 @@ compare_builtin_kernel(const T *__restrict__ a, const T *__restrict__ b,
 
   CompareResult LOut;
   LOut.AnyFail = 0;
-  LOut.FirstBadIdx = (int)NumElements;
+  LOut.FirstBadIdx = NumElements;
   LOut.MaxErr = -1.0;
   LOut.Agg = 0.0;
   const std::size_t tid = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
   const std::size_t GridSize = (uint64_t)blockDim.x * (uint64_t)gridDim.x;
 
-  for (int i = tid; i < NumElements; i += GridSize) {
+  for (std::size_t i = tid; i < NumElements; i += GridSize) {
 
     const double err = element_error<T>(a[i], b[i], thr_kind);
 
@@ -195,7 +199,7 @@ compare_builtin_kernel(const T *__restrict__ a, const T *__restrict__ b,
     // Per-element threshold check: record first bad index + AnyFail
     if (LOut.AnyFail) {
       out->AnyFail = 1;
-      atomicMinInt(&out->FirstBadIdx, LOut.FirstBadIdx);
+      atomicMinU64(&out->FirstBadIdx, LOut.FirstBadIdx);
     }
     return;
   }
@@ -219,7 +223,7 @@ CompareResult compareDeviceBlobs(const char *Blob1, const char *Blob2,
                                  uint64_t NumBytes, Metadata Md) {
   CompareResult Init{};
   Init.AnyFail = 0;
-  Init.FirstBadIdx = (int)NumBytes;
+  Init.FirstBadIdx = NumBytes;
   Init.MaxErr = 0.0;
   Init.Agg = 0.0;
 
