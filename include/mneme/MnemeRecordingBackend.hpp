@@ -2,7 +2,7 @@
 
 #include "mneme/MnemeConfig.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
-#include "mneme/MnemeKernelTimer.hpp"
+#include "mneme/MnemeLaunchTimer.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeMemory.hpp"
 #include "mneme/MnemePageManager.hpp"
@@ -11,6 +11,7 @@
 #include "mneme/MnemeSnapshot.hpp"
 
 #include <cstddef>
+#include <cstdlib>
 #include <memory>
 #include <utility>
 
@@ -29,8 +30,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   using DeviceStream_t = typename Base::DeviceStream_t;
 
   RecorderRuntimeFunctions<VendorTypes> Runtime;
-  KernelTimer *Timer =
-      Config::get().KernelTiming ? KernelTimer::get() : nullptr;
+  std::unique_ptr<LaunchTimer<VendorTypes>> Timer =
+      createLaunchTimer<VendorTypes>(Config::get().KernelTiming);
   RecordDatabase DB{Timer != nullptr};
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
   // Allocations served by the vendor runtime (managed, pinned, pitched,
@@ -40,6 +41,11 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   std::unique_ptr<PageManager<VendorTypes>> PM;
   std::unique_ptr<ChunkAllocator<VendorTypes>> Packer;
   bool WarnedUnpacked = false;
+
+  // The exit handler that drains the timer is registered on the first timed
+  // launch, after the device runtime has initialized, so it runs before the
+  // runtime's own exit handlers tear it down.
+  inline static RecordingBackend *TimedBackend = nullptr;
 
   // NOTE: We only keep track of the first time we set the device id. Once we
   // create the allocator we assume that the allocations go to the same device.
@@ -73,6 +79,28 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
       Packer->release(ptr, Blob.getActualSize());
     AllocatedBlobs.erase(It);
     return ret;
+  }
+
+  void beginTimedLaunch(DeviceStream_t Stream, const TimedLaunch &Launch) {
+    if (!TimedBackend) {
+      TimedBackend = this;
+      std::atexit([] {
+        if (TimedBackend)
+          TimedBackend->drainTimer();
+      });
+    }
+    Timer->collect(
+        [this](const TimedLaunch &L, uint64_t Ns) { DB.addLaunchTime(L, Ns); });
+    Timer->begin(Stream, Launch);
+  }
+
+  // Launches after the drain are still counted but no longer timed.
+  void drainTimer() {
+    if (!Timer)
+      return;
+    Timer->drain(
+        [this](const TimedLaunch &L, uint64_t Ns) { DB.addLaunchTime(L, Ns); });
+    Timer.reset();
   }
 
 public:
@@ -236,16 +264,12 @@ public:
                              void **Args, size_t SharedMem,
                              DeviceStream_t Stream,
                              const std::optional<TimedLaunch> &Launch) {
-    // A captured launch dispatches nothing now, and its graph's later
-    // dispatches carry no token, so it would never get a duration.
+    // A captured launch only runs as part of its graph, where no duration
+    // can be attributed to it.
     bool Timed =
         Timer && Launch && !MnemeDeviceRT::deviceStreamIsCapturing(Stream);
-    if (Timed) {
-      Timer->collect([this](const TimedLaunch &L, uint64_t Ns) {
-        DB.addLaunchTime(L, Ns);
-      });
-      Timer->begin(*Launch);
-    }
+    if (Timed)
+      beginTimedLaunch(Stream, *Launch);
     auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
                                         SharedMem, Stream);
     if (Timed)
@@ -329,12 +353,8 @@ public:
   }
 
   ~RecordingBackend() {
-    if (Timer) {
-      (void)MnemeDeviceRT::DeviceSynchronize();
-      Timer->drain([this](const TimedLaunch &L, uint64_t Ns) {
-        DB.addLaunchTime(L, Ns);
-      });
-    }
+    if (TimedBackend == this)
+      TimedBackend = nullptr;
     DB.flush();
 
     LOG_DEBUG("RecordingBackend destructor: releasing {} blobs", AllocatedBlobs.size());
