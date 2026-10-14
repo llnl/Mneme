@@ -153,6 +153,8 @@ class BaseExecutor:
         jit.register_pass_plugin(MNEME_PASS_PLUGIN_LIB)
 
     def open(self):
+        # Done first so that a failure leaves nothing mapped.
+        self.kernel_descr.apply_compare()
         self._prologue = self.kernel_descr.prologue.open()
         self._epilogue = self.kernel_descr.epilogue.open()
         # No kernel has run yet, so this asks whether doing nothing would verify.

@@ -17,6 +17,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include "mneme/DeviceTraits.hpp"
+#include "mneme/MnemeAnnotationInternal.hpp"
 #include "mneme/MnemeConfig.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
 #include "mneme/MnemeLogger.hpp"
@@ -294,6 +295,34 @@ public:
 
     readGlobals(CurrentPtr, Snap.GlobalVars);
     size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
+    for (size_t I = 0; I < TotalMemBlobs; ++I) {
+      auto Record = MnemeMemoryBlob<VendorTypes>::fromBuffer(CurrentPtr);
+      Record.second.setMetadata(metadata::fromBuffer(CurrentPtr));
+      Snap.DeviceMemory.insert(std::move(Record));
+    }
+    readArgs(CurrentPtr, *Snap.KInfo);
+    return Snap;
+  }
+};
+
+template <DeviceVendors VendorTypes>
+class BytesReaderV1 : public SnapshotReader<VendorTypes> {
+public:
+  using SnapshotReader<VendorTypes>::SnapshotReader;
+
+  static constexpr SnapshotHeader Layout{SnapshotKind::Bytes, 1};
+
+  bool requiresBaseSnapshot() const override { return false; }
+
+  Snapshot<VendorTypes>
+  read(const std::string &KernelName,
+       const BaseSnapshotSource<VendorTypes> &) const override {
+    Snapshot<VendorTypes> Snap;
+    Snap.KInfo = std::make_shared<KernelInfo>(KernelName);
+    const char *CurrentPtr = this->payload();
+
+    readGlobals(CurrentPtr, Snap.GlobalVars);
+    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
     for (size_t I = 0; I < TotalMemBlobs; ++I)
       Snap.DeviceMemory.insert(
           MnemeMemoryBlob<VendorTypes>::fromBuffer(CurrentPtr));
@@ -326,6 +355,33 @@ public:
     for (size_t I = 0; I < TotalMemBlobs; ++I) {
       auto &Blob = readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
       Blob.setMetadata(metadata::fromBuffer(CurrentPtr));
+      applyDiffRanges(CurrentPtr, hostBytes(Blob));
+    }
+    return Snap;
+  }
+};
+
+template <DeviceVendors VendorTypes>
+class DiffReaderV2 : public SnapshotReader<VendorTypes> {
+public:
+  using SnapshotReader<VendorTypes>::SnapshotReader;
+
+  static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 2};
+
+  bool requiresBaseSnapshot() const override { return true; }
+
+  Snapshot<VendorTypes>
+  read(const std::string &KernelName,
+       const BaseSnapshotSource<VendorTypes> &Base) const override {
+    Snapshot<VendorTypes> Snap = loadDiffBase(Base, KernelName, this->Filename);
+    const char *CurrentPtr = this->payload();
+
+    applyGlobalDiffs(CurrentPtr, Snap.GlobalVars, this->Filename);
+    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
+    expectCount(TotalMemBlobs, Snap.DeviceMemory.size(), this->Filename,
+                "memory blob");
+    for (size_t I = 0; I < TotalMemBlobs; ++I) {
+      auto &Blob = readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
       applyDiffRanges(CurrentPtr, hostBytes(Blob));
     }
     return Snap;
@@ -379,7 +435,9 @@ private:
   static const Entry *table(size_t &Count) {
     static const Entry Table[] = {
         entry<BytesReaderV0<VendorTypes>>(),
+        entry<BytesReaderV1<VendorTypes>>(),
         entry<DiffReaderV1<VendorTypes>>(),
+        entry<DiffReaderV2<VendorTypes>>(),
     };
     Count = sizeof(Table) / sizeof(Table[0]);
     return Table;
@@ -541,7 +599,6 @@ public:
     for (const auto &[Ptr, Blob] : In.DeviceMemory) {
       Size += BlobHeader::serializedSize();
       Size += Blob.getSize();
-      Size += metadata::serializedSize(Blob.getMetadata());
     }
 
     Size += sizeof(size_t);
@@ -554,7 +611,7 @@ public:
 
 protected:
   SnapshotHeader header() const override {
-    return BytesReaderV0<VendorTypes>::Layout;
+    return BytesReaderV1<VendorTypes>::Layout;
   }
 
   void writePayload(llvm::raw_ostream &OutBC,
@@ -623,7 +680,7 @@ public:
 
 protected:
   SnapshotHeader header() const override {
-    return DiffReaderV1<VendorTypes>::Layout;
+    return DiffReaderV2<VendorTypes>::Layout;
   }
 
   void writePayload(llvm::raw_ostream &OutBC,
@@ -656,9 +713,6 @@ protected:
     for (auto &[Ptr, Blob] : DeviceMemory) {
       BlobHeader{Blob.getActualSize(), Blob.getSize(), Blob.getBlobAddr()}
           .write(OutBC);
-      auto MD = Blob.getMetadata();
-      mneme::metadata::serialize(OutBC, MD);
-
       writeCountAndWriteChangedRanges(OutBC, Blob, UpdateBaseData);
     }
   }

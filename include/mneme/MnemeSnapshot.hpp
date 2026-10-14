@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <llvm/ADT/ArrayRef.h>
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MD5.h>
@@ -30,6 +31,7 @@
 #include <type_traits>
 
 #include "mneme/DeviceTraits.hpp"
+#include "mneme/MnemeAnnotationInternal.hpp"
 #include "mneme/MnemeConfig.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
 #include "mneme/MnemeLLVMUtils.hpp"
@@ -51,6 +53,8 @@ struct KernelInstance {
   llvm::SmallVector<double> ArgValues;
   int NumOccurrences;
   uint64_t SharedMem;
+  // Epilogue-time metadata of every blob that has non-default metadata.
+  llvm::SmallVector<std::pair<void *, Metadata>> Compare;
   static llvm::json::Object toJSON(const dim3 &Dim) {
     llvm::json::Object JSONDim;
     JSONDim["x"] = Dim.x;
@@ -67,6 +71,10 @@ struct KernelInstance {
     instance["SharedMem"] = SharedMem;
     instance["Args"] = llvm::json::Array(ArgValues);
     instance["Occurrences"] = NumOccurrences;
+    llvm::json::Array CompareJSON;
+    for (const auto &[DevAddr, Md] : Compare)
+      CompareJSON.push_back(metadata::toJSON(DevAddr, Md));
+    instance["Compare"] = std::move(CompareJSON);
     return instance;
   }
   KernelInstance(dim3 &GridDim, dim3 &BlockDim, uint64_t SharedMem, void **Args)
@@ -369,8 +377,14 @@ public:
 
               SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory,
                                             KernelArgSizes, Args, Stream};
-              Instances[DynamicHash].EpilogueFn =
-                  Writer->write(Filename, In).string();
+              auto &Instance = Instances[DynamicHash];
+              Instance.EpilogueFn = Writer->write(Filename, In).string();
+              for (const auto &[DevAddr, Blob] : DeviceMemory)
+                if (!metadata::isDefault(Blob.getMetadata()))
+                  Instance.Compare.emplace_back(DevAddr, Blob.getMetadata());
+              llvm::sort(Instance.Compare, [](const auto &L, const auto &R) {
+                return L.first < R.first;
+              });
             };
     return CaptureEpilogue;
   }

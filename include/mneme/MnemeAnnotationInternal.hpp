@@ -1,13 +1,13 @@
 #pragma once
 #include "mneme/MnemeAnnotation.hpp"
-#include <cstddef>
-#include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/JSON.h>
 
 namespace mneme {
 namespace metadata {
-void serialize(llvm::raw_ostream &OS, const Metadata &Md);
+// Reads the metadata that older snapshot layouts stored after each blob.
 Metadata fromBuffer(const char *&Buffer);
-// The number of bytes serialize() writes for Md.
-size_t serializedSize(const Metadata &Md);
+bool isDefault(const Metadata &Md);
+// An entry of a kernel instance's "Compare" list in the record database.
+llvm::json::Object toJSON(void *DevAddr, const Metadata &Md);
 } // namespace metadata
 } // namespace mneme

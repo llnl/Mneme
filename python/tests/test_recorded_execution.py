@@ -1,10 +1,12 @@
 import hashlib
 import json
+import re
 import tempfile
 from unittest.mock import patch, MagicMock
 import pytest
 
 from mneme.recorded_execution import (
+    EXACT_COMPARE,
     MemStateRef,
     RecordedExecution,
     SnapshotType,
@@ -437,3 +439,39 @@ def test_to_json_relativizes_in_dir_files_only(tmp_path, layout):
         assert written["Modules"] == [str(mod_path)]
         assert written["instances"]["H"]["Prologue"] == str(pro_path)
         assert written["instances"]["H"]["Epilogue"] == str(epi_path)
+
+
+def _instance_with_compare(tmp_path, compare):
+    for name in ("k.pro", "k.epi"):
+        (tmp_path / name).touch()
+    return RecordedExecution.KernelInstance(
+        "S", "H", "K", [], 0, dim3(1, 1, 1), dim3(1, 1, 1), [], 1,
+        str(tmp_path / "k.pro"), str(tmp_path / "k.epi"), compare=compare,
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "error"),
+    [
+        ({"DevAddr": "0x1000", "Norm": "l3"}, "record Compare entry 0x1000: bad Norm 'l3'"),
+        ({"DevAddr": "0x1000", "Tolerance": 1.0}, "record Compare entry 0x1000: unknown key 'Tolerance'"),
+        ({"DevAddr": "0x1000", "Threshold": "big"}, "record Compare entry 0x1000: bad Threshold 'big'"),
+        ({"DevAddr": "zz", "Threshold": 1.0}, "record Compare entry: bad DevAddr 'zz'"),
+        ({"Threshold": 1.0}, "record Compare entry: bad DevAddr None"),
+    ],
+)
+def test_apply_compare_rejects_bad_recorded_entries(tmp_path, entry, error):
+    inst = _instance_with_compare(tmp_path, [entry])
+    blobs = {0x1000: dict(EXACT_COMPARE, Tag=None)}
+    with patch.object(inst.epilogue, "compare_metadata", return_value=blobs):
+        with pytest.raises(ValueError, match=re.escape(error)):
+            inst.apply_compare()
+
+
+def test_apply_compare_fills_missing_recorded_fields_bytewise(tmp_path):
+    inst = _instance_with_compare(tmp_path, [{"DevAddr": "0x1000", "Threshold": 0.5}])
+    blobs = {0x1000: dict(EXACT_COMPARE, Tag=None)}
+    with patch.object(inst.epilogue, "compare_metadata", return_value=blobs):
+        with patch.object(inst.epilogue, "set_compare_metadata") as set_compare:
+            inst.apply_compare()
+    set_compare.assert_called_once_with(0x1000, dict(EXACT_COMPARE, Threshold=0.5, Tag=None))

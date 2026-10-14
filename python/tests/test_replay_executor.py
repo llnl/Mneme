@@ -59,6 +59,9 @@ class FakeKernelDescr:
         self.prologue = FakePrologueDescr(prologue or FakeSnapshot())
         self.epilogue = FakeEpilogueDescr(epilogue or FakeSnapshot())
 
+    def apply_compare(self):
+        pass
+
 
 class FakeModule:
     def __init__(self, name="m", clone_counter=None):
