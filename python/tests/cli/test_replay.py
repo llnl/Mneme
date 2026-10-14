@@ -130,6 +130,7 @@ def test_replay_chunked_allocations(
             assert owner == expected, f"{size}-byte allocation at {ptr:#x}"
     if chunk_size:
         assert log.count("raise MNEME_CHUNK_SIZE") == 1
+        assert len(CHUNK_LOG.findall(log)) < 50, "Chunks were remapped"
     else:
         assert len(CHUNK_LOG.findall(log)) == 1, "Chunks were remapped"
 

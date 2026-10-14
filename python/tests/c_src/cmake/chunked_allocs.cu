@@ -80,6 +80,12 @@ int main() {
   long *Out = static_cast<long *>(alloc(NumBufs * sizeof(long)));
   prefix(Memset)(Out, 0, NumBufs * sizeof(long));
 
+  // With small chunks, fills the existing ones so the loop needs another.
+  for (int I = 0; I < 3; ++I)
+    alloc(7 * MiB);
+  for (int I = 0; I < 50; ++I)
+    prefix(Free)(alloc(7 * MiB));
+
   ends<<<1, 64>>>(Table, DLens, NumBufs, Out);
   prefix(DeviceSynchronize)();
 

@@ -223,8 +223,10 @@ public:
     uintptr_t Start = It->first;
     Free.release(A, Size, Start, Start + C.Size);
     C.Used -= Size;
-    // The last chunk stays mapped so malloc/free loops don't remap.
-    if (C.Used || Chunks.size() == 1)
+    // One empty chunk stays mapped so malloc/free loops don't remap.
+    if (C.Used || std::none_of(Chunks.begin(), Chunks.end(), [&](auto &E) {
+          return E.first != Start && !E.second.Used;
+        }))
       return;
     Free.remove(Start);
     DT::unmapFixed(reinterpret_cast<void *>(Start), C.Size, C.Handle);
