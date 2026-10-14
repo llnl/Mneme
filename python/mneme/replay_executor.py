@@ -52,7 +52,7 @@ from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
 from mneme.profile import init_profiler
 from mneme.proteus import jit
-from mneme.recorded_execution import RecordedExecution, MemStateRef
+from mneme.recorded_execution import ComparePolicy, RecordedExecution, MemStateRef
 from mneme.utils import cond_gpu_time, cond_time
 
 
@@ -121,6 +121,7 @@ class BaseExecutor:
         iterations: int = 3,
         device_id: int = 0,
         warmup: int = 2,
+        compare_policy: Optional[ComparePolicy] = None,
     ):
         self.record_db = record_db
         self.device_id = device_id
@@ -145,6 +146,7 @@ class BaseExecutor:
         self.noop_verifies = False
         self._iterations = iterations
         self._warmup = warmup
+        self.compare_policy = compare_policy
         self.num_devices = get_device_count()
         set_device(device_id)
         logger.debug(
@@ -154,7 +156,7 @@ class BaseExecutor:
 
     def open(self):
         # Done first so that a failure leaves nothing mapped.
-        self.kernel_descr.apply_compare()
+        self.kernel_descr.apply_compare(self.compare_policy)
         self._prologue = self.kernel_descr.prologue.open()
         self._epilogue = self.kernel_descr.epilogue.open()
         # No kernel has run yet, so this asks whether doing nothing would verify.
@@ -756,6 +758,7 @@ class TuneWorker(BaseExecutor):
         results_db_dir: str,
         state: Event,
         warmup: int = 2,
+        compare_policy: Optional[ComparePolicy] = None,
     ):
         """
         Worker process entry point: initialize resources and serve requests from a queue.
@@ -800,6 +803,8 @@ class TuneWorker(BaseExecutor):
             on the executor pipeline).
         warmup : int
             Number of warmup iterations to execute before measured iterations.
+        compare_policy : ComparePolicy, optional
+            Overrides of the recorded comparison metadata used to verify.
         results_db_dir : str
             Directory where per-worker logs and output artifacts are written.
         state : multiprocessing.Event
@@ -829,6 +834,7 @@ class TuneWorker(BaseExecutor):
             device_id=device_id,
             iterations=iterations,
             warmup=warmup,
+            compare_policy=compare_policy,
         )
         # Open GPU memory, setup prologue epilogue and create a single
         # LLVM IR file to start working on optimizations

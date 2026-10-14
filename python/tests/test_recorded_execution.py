@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from mneme.recorded_execution import (
+    ComparePolicy,
     EXACT_COMPARE,
     MemStateRef,
     RecordedExecution,
@@ -475,3 +476,59 @@ def test_apply_compare_fills_missing_recorded_fields_bytewise(tmp_path):
         with patch.object(inst.epilogue, "set_compare_metadata") as set_compare:
             inst.apply_compare()
     set_compare.assert_called_once_with(0x1000, dict(EXACT_COMPARE, Threshold=0.5, Tag=None))
+
+
+# ======================================================================
+#                        ComparePolicy Tests
+# ======================================================================
+
+def test_compare_policy_merges_fields_by_precedence():
+    exact = {"DType": "u8", "Threshold": 0.0, "ThresholdKind": "absolute", "Norm": "none"}
+    recorded = {"DType": "f64", "Threshold": 0.01, "ThresholdKind": "relative", "Norm": "linf"}
+    policy = ComparePolicy.from_dict(
+        {
+            "Default": {"Threshold": 1.0, "Norm": "l2"},
+            "Tags": {"out": {"Threshold": 2.0}},
+            "Addresses": {"0x00000000000a0000": {"Threshold": 3.0}},
+        }
+    )
+
+    effective = policy.resolve(
+        {
+            0x10000: dict(exact),
+            0x20000: dict(recorded, Tag="out"),
+            0xA0000: dict(recorded, Tag="out"),
+        }
+    )
+
+    assert effective[0x10000] == dict(exact, Threshold=1.0, Norm="l2", Tag=None)
+    assert effective[0x20000] == dict(recorded, Threshold=2.0, Norm="l2", Tag="out")
+    assert effective[0xA0000] == dict(recorded, Threshold=3.0, Norm="l2", Tag="out")
+
+
+@pytest.mark.parametrize(
+    ("data", "error"),
+    [
+        ({"Defaults": {}}, "unknown key 'Defaults'"),
+        ({"Default": {"Tolerance": 1.0}}, "unknown key 'Tolerance'"),
+        ({"Tags": {"out": {"Norm": "l3"}}}, "bad Norm 'l3'"),
+        ({"Default": {"Threshold": -1}}, "bad Threshold -1"),
+        ({"Addresses": {"zz": {}}}, "bad address 'zz'"),
+    ],
+)
+def test_compare_policy_rejects_bad_policies(data, error):
+    with pytest.raises(ValueError, match=error):
+        ComparePolicy.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    ("data", "error"),
+    [
+        ({"Tags": {"missing": {}}}, "no blob has tag 'missing'"),
+        ({"Addresses": {"0x30000": {}}}, "no blob at 0x30000"),
+    ],
+)
+def test_compare_policy_rejects_unmatched_selectors(data, error):
+    blobs = {0x10000: {"DType": "u8", "Threshold": 0.0, "ThresholdKind": "absolute", "Norm": "none"}}
+    with pytest.raises(ValueError, match=error):
+        ComparePolicy.from_dict(data).resolve(blobs)

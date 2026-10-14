@@ -143,6 +143,117 @@ def _check_recorded_compare(entry) -> Tuple[int, dict]:
     return addr, dict(EXACT_COMPARE, **_check_compare_fields(fields, where), Tag=tag)
 
 
+class ComparePolicy:
+    """
+    Replay-time overrides of the recorded comparison metadata.
+
+    A policy file is a JSON object with up to three keys, each holding
+    ``Compare`` fields (``DType``, ``Threshold``, ``ThresholdKind``, ``Norm``)::
+
+        {"Default": {...}, "Tags": {"<tag>": {...}}, "Addresses": {"<hex>": {...}}}
+
+    ``Default`` applies to every blob, ``Tags`` to the blobs recorded with that
+    tag, and ``Addresses`` to the blob at that device address. Fields merge one
+    at a time with precedence Addresses > Tags > Default > recorded metadata.
+    """
+
+    def __init__(
+        self,
+        default: Optional[dict] = None,
+        tags: Optional[Dict[str, dict]] = None,
+        addresses: Optional[Dict[int, dict]] = None,
+    ):
+        self.default = default or {}
+        self.tags = tags or {}
+        self.addresses = addresses or {}
+
+    @classmethod
+    def from_dict(cls, data) -> "ComparePolicy":
+        """
+        Build a policy from its JSON form.
+
+        Raises
+        ------
+        ValueError
+            On an unknown key, a bad enum name or threshold, or a bad address.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("compare policy: expected an object")
+        for key in data:
+            if key not in ("Default", "Tags", "Addresses"):
+                raise ValueError(f"compare policy: unknown key {key!r}")
+
+        def section(key):
+            value = data.get(key, {})
+            if not isinstance(value, dict):
+                raise ValueError(f"compare policy: {key} must be an object")
+            return value
+
+        default = _check_compare_fields(section("Default"), "compare policy Default")
+        tags = {
+            tag: _check_compare_fields(fields, f"compare policy tag {tag!r}")
+            for tag, fields in section("Tags").items()
+        }
+        addresses = {}
+        for key, fields in section("Addresses").items():
+            try:
+                addr = int(key, 16)
+            except ValueError:
+                raise ValueError(f"compare policy: bad address {key!r}") from None
+            addresses[addr] = _check_compare_fields(fields, f"compare policy address {key}")
+        return cls(default, tags, addresses)
+
+    @classmethod
+    def from_file(cls, fn: str) -> "ComparePolicy":
+        """Load a policy from a JSON file. Raises ValueError on any error."""
+        try:
+            with open(fn, "r") as fd:
+                data = json.load(fd)
+        except OSError as exc:
+            raise ValueError(f"compare policy {fn}: {exc.strerror}") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"compare policy {fn}: {exc}") from exc
+        return cls.from_dict(data)
+
+    def resolve(self, blobs: Dict[int, dict]) -> Dict[int, dict]:
+        """
+        Merge this policy over the recorded metadata of ``blobs``.
+
+        Parameters
+        ----------
+        blobs : dict[int, dict]
+            ``Compare`` fields and optional ``Tag`` of every blob, keyed by
+            device address.
+
+        Returns
+        -------
+        dict[int, dict]
+            The effective fields and the recorded ``Tag`` of every blob.
+
+        Raises
+        ------
+        ValueError
+            If a tag or address of the policy matches no blob.
+        """
+        tags = {recorded.get("Tag") for recorded in blobs.values()}
+        for tag in self.tags:
+            if tag not in tags:
+                raise ValueError(f"compare policy: no blob has tag {tag!r}")
+        for addr in self.addresses:
+            if addr not in blobs:
+                raise ValueError(f"compare policy: no blob at {addr:#x}")
+
+        effective = {}
+        for addr, recorded in blobs.items():
+            fields = {key: recorded[key] for key in EXACT_COMPARE}
+            fields.update(self.default)
+            fields.update(self.tags.get(recorded.get("Tag"), {}))
+            fields.update(self.addresses.get(addr, {}))
+            fields["Tag"] = recorded.get("Tag")
+            effective[addr] = fields
+        return effective
+
+
 class SnapshotType(Enum):
     """
     Enumeration of memory snapshot roles within a recorded execution.
@@ -614,27 +725,27 @@ class RecordedExecution:
 
             return res
 
-        def _effective_compare(self) -> Dict[int, dict]:
+        def _effective_compare(self, policy: Optional[ComparePolicy]) -> Dict[int, dict]:
             blobs = self.epilogue.compare_metadata()
-            # Older records keep the metadata in their snapshots instead.
-            if self.compare is None:
-                return blobs
+            # Records without Compare predate it and keep the metadata in their snapshots.
+            if self.compare is not None:
+                recorded = dict(_check_recorded_compare(entry) for entry in self.compare)
+                unknown = recorded.keys() - blobs.keys()
+                if unknown:
+                    raise ValueError(f"Compare entry for unknown blob {min(unknown):#x}")
+                blobs = {addr: recorded.get(addr, EXACT_COMPARE) for addr in blobs}
+            return (policy or ComparePolicy()).resolve(blobs)
 
-            recorded = dict(_check_recorded_compare(entry) for entry in self.compare)
-            unknown = recorded.keys() - blobs.keys()
-            if unknown:
-                raise ValueError(f"Compare entry for unknown blob {min(unknown):#x}")
-            return {addr: recorded.get(addr, EXACT_COMPARE) for addr in blobs}
-
-        def apply_compare(self):
+        def apply_compare(self, policy: Optional[ComparePolicy] = None):
             """
             Set the metadata the epilogue is verified with.
 
-            Only host memory is touched, so this can run before the epilogue is
-            loaded. The epilogue is closed if this raises.
+            ``policy`` overrides the recorded metadata. Only host memory is
+            touched, so this can run before the epilogue is loaded. The
+            epilogue is closed if this raises.
             """
             try:
-                for addr, fields in self._effective_compare().items():
+                for addr, fields in self._effective_compare(policy).items():
                     self.epilogue.set_compare_metadata(addr, fields)
             except Exception:
                 self.epilogue.close()

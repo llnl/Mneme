@@ -21,7 +21,7 @@ from mneme.async_executor import AsyncReplayExecutor
 from mneme.convert import export_proteus_tuned_kernel
 from mneme.futures import EvalFuture
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
-from mneme.recorded_execution import RecordedExecution
+from mneme.recorded_execution import ComparePolicy, RecordedExecution
 from mneme.replay_executor import noop_verifies_warning
 from mneme.tuning.builtin_spaces import (
     BuiltinTuneSearchSpace,
@@ -68,6 +68,7 @@ class TuneOptions:
     iterations: int = 5
     warmup: int = 2
     workers: int = 1
+    compare_policy: Optional[str] = None
 
     # Output location, scoring, and reproducibility.
     results_dir: Optional[str] = None
@@ -361,8 +362,8 @@ class TuningSession:
         """Use ``ir`` for this session, optionally on a caller-owned executor.
 
         A borrowed executor must target the same record, instance, worker count,
-        iterations, and warmup as ``options``. The caller remains responsible for
-        shutting it down.
+        iterations, warmup, and compare policy as ``options``. The caller
+        remains responsible for shutting it down.
         """
         self.options = options
         self._borrowed_executor = executor
@@ -463,9 +464,11 @@ class TuningSession:
             "launch_bounds_space",
             "launch_candidates",
             "require_verified_baseline",
+            "compare_policy",
         ]
         existing.setdefault("launch_candidates", [])
         existing.setdefault("require_verified_baseline", True)
+        existing.setdefault("compare_policy", None)
         mismatched = [
             key for key in immutable if existing.get(key) != resolved_config.get(key)
         ]
@@ -874,6 +877,18 @@ class TuningSession:
             print(json.dumps({"baseline": baseline_config.to_dict(), "search_space": space_description}, indent=2))
             return 0
 
+        compare_policy = None
+        if self.options.compare_policy:
+            # Checked here so that a bad policy is reported instead of failing every worker.
+            try:
+                compare_policy = ComparePolicy.from_file(self.options.compare_policy)
+                kernel.apply_compare(compare_policy)
+            except ValueError as exc:
+                print(f"Invalid tuning configuration: {exc}")
+                return EXIT_INVALID_CONFIGURATION
+            finally:
+                kernel.epilogue.close()
+
         self._print("Mneme tune")
         self._print(f"  record database: {self.options.record_database}")
         self._print(f"  record id:       {self.options.record_id}")
@@ -897,6 +912,7 @@ class TuningSession:
                 results_db_dir=self.options.results_dir,
                 num_workers=self.options.workers,
                 warmup=self.options.warmup,
+                compare_policy=compare_policy,
             )
         # the main tuning phase
         try:
