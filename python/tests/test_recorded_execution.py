@@ -142,30 +142,51 @@ def test_memstate_context_manager_calls_open_and_close():
             fake.MnemePy_DisposeMemState.assert_called_once_with("ST")
 
 
-def test_memstate_equality_uses_ffi_compare():
-    with patch("mneme.recorded_execution.Path.exists", return_value=True):
-        with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.side_effect = ["A", "B"]
-            fake.MnemePy_CompareMemState.return_value = True
-
-            m1 = MemStateRef("p1.pro", "k", SnapshotType.PROLOGUE).open()
-            m2 = MemStateRef("p2.pro", "k", SnapshotType.PROLOGUE).open()
-
-            assert m1 == m2
-            fake.MnemePy_CompareMemState.assert_called_once_with("A", "B")
+RULES = {
+    0x1000: dict(EXACT_COMPARE, Tag=None),
+    0x2000: dict(EXACT_COMPARE, DType="f64", Threshold=0.5, Norm="l2", Tag="out"),
+}
 
 
-def test_memstate_matches_unlaunched_uses_ffi():
+@pytest.mark.parametrize(
+    ("method", "ffi_fn"),
+    [("matches", "MnemePy_CompareMemState"), ("matches_unlaunched", "MnemePy_MatchesUnlaunched")],
+)
+def test_memstate_matches_passes_rules_to_ffi(method, ffi_fn):
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
             fake.MnemePy_initializeMemState.side_effect = ["P", "E"]
-            fake.MnemePy_MatchesUnlaunched.return_value = True
+            getattr(fake, ffi_fn).return_value = True
 
             pro = MemStateRef("p.pro", "k", SnapshotType.PROLOGUE).open()
             epi = MemStateRef("e.epi", "k", SnapshotType.EPILOGUE).open()
 
-            assert pro.matches_unlaunched(epi)
-            fake.MnemePy_MatchesUnlaunched.assert_called_once_with("P", "E")
+            with patch.object(epi, "compare_metadata", return_value=RULES):
+                assert getattr(pro, method)(epi, RULES)
+            (p, e, entries, count), _ = getattr(fake, ffi_fn).call_args
+            assert (p, e, count) == ("P", "E", 2)
+            got = [
+                (x.DevAddr, x.DType, x.Threshold, x.ThresholdKind, x.Norm, x.Tag) for x in entries
+            ]
+            assert got == [(0x1000, 0, 0.0, 0, 0, None), (0x2000, 10, 0.5, 0, 2, b"out")]
+
+
+@pytest.mark.parametrize(
+    ("method", "ffi_fn"),
+    [("matches", "MnemePy_CompareMemState"), ("matches_unlaunched", "MnemePy_MatchesUnlaunched")],
+)
+def test_memstate_matches_rejects_missing_rule(method, ffi_fn):
+    with patch("mneme.recorded_execution.Path.exists", return_value=True):
+        with patch("mneme.recorded_execution.ffi.lib") as fake:
+            fake.MnemePy_initializeMemState.side_effect = ["P", "E"]
+
+            pro = MemStateRef("p.pro", "k", SnapshotType.PROLOGUE).open()
+            epi = MemStateRef("e.epi", "k", SnapshotType.EPILOGUE).open()
+
+            with patch.object(epi, "compare_metadata", return_value=RULES):
+                with pytest.raises(ValueError, match="No comparison rule for blob 0x2000"):
+                    getattr(epi, method)(pro, {0x1000: RULES[0x1000]})
+            getattr(fake, ffi_fn).assert_not_called()
 
 
 # ======================================================================
@@ -465,21 +486,24 @@ def _instance_with_compare(tmp_path, compare):
         ({"Threshold": 1.0}, "record Compare entry: bad DevAddr None"),
     ],
 )
-def test_apply_compare_rejects_bad_recorded_entries(tmp_path, entry, error):
+def test_compare_rules_rejects_bad_recorded_entries(tmp_path, entry, error):
     inst = _instance_with_compare(tmp_path, [entry])
     blobs = {0x1000: dict(EXACT_COMPARE, Tag=None)}
     with patch.object(inst.epilogue, "compare_metadata", return_value=blobs):
-        with pytest.raises(ValueError, match=re.escape(error)):
-            inst.apply_compare()
+        with patch.object(inst.epilogue, "close") as close:
+            with pytest.raises(ValueError, match=re.escape(error)):
+                inst.compare_rules()
+    close.assert_called_once()
 
 
-def test_apply_compare_fills_missing_recorded_fields_bytewise(tmp_path):
+def test_compare_rules_fills_missing_recorded_fields_bytewise(tmp_path):
     inst = _instance_with_compare(tmp_path, [{"DevAddr": "0x1000", "Threshold": 0.5}])
-    blobs = {0x1000: dict(EXACT_COMPARE, Tag=None)}
+    blobs = {0x1000: dict(EXACT_COMPARE, Tag=None), 0x2000: dict(EXACT_COMPARE, Tag=None)}
     with patch.object(inst.epilogue, "compare_metadata", return_value=blobs):
-        with patch.object(inst.epilogue, "set_compare_metadata") as set_compare:
-            inst.apply_compare()
-    set_compare.assert_called_once_with(0x1000, dict(EXACT_COMPARE, Threshold=0.5, Tag=None))
+        assert inst.compare_rules() == {
+            0x1000: dict(EXACT_COMPARE, Threshold=0.5, Tag=None),
+            0x2000: dict(EXACT_COMPARE, Tag=None),
+        }
 
 
 # ======================================================================

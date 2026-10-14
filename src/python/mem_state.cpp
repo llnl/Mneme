@@ -41,6 +41,25 @@ struct MnemePyCompareMetadata {
   const char *Tag;
 };
 
+static CompareRules compareRules(const MnemePyCompareMetadata *Rules,
+                                 uint64_t NumRules) {
+  CompareRules Out;
+  for (uint64_t I = 0; I < NumRules; ++I) {
+    const auto &In = Rules[I];
+    mneme::Metadata Md;
+    Md.builtin = static_cast<BuiltinDType>(In.DType);
+    Md.threshold = In.Threshold;
+    Md.threshold_kind = static_cast<ThresholdKind>(In.ThresholdKind);
+    Md.norm = static_cast<Norm>(In.Norm);
+    if (In.Tag)
+      Md.tag = std::string(In.Tag);
+    if (!Out.try_emplace(In.DevAddr, std::move(Md)).second)
+      LOG_FATAL("Duplicate comparison rule for blob " +
+                util::pointerToHexString(In.DevAddr));
+  }
+  return Out;
+}
+
 extern "C" {
 API_EXPORT(MnemeDeviceMemStateRef)
 MnemePy_initializeMemState(const char *KernelName, const char *fn,
@@ -67,16 +86,19 @@ API_EXPORT(void) MnemePy_LoadMemState(MnemeDeviceMemStateRef MemState) {
 }
 
 API_EXPORT(bool)
-MnemePy_CompareMemState(MnemeDeviceMemStateRef v1, MnemeDeviceMemStateRef v2) {
+MnemePy_CompareMemState(MnemeDeviceMemStateRef v1, MnemeDeviceMemStateRef v2,
+                        const MnemePyCompareMetadata *Rules,
+                        uint64_t NumRules) {
   auto [Prologue, Epilogue] = prologueAndEpilogue(v1, v2);
-  return Epilogue->matches(*Prologue);
+  return Epilogue->matches(*Prologue, compareRules(Rules, NumRules));
 }
 
 API_EXPORT(bool)
-MnemePy_MatchesUnlaunched(MnemeDeviceMemStateRef v1,
-                          MnemeDeviceMemStateRef v2) {
+MnemePy_MatchesUnlaunched(MnemeDeviceMemStateRef v1, MnemeDeviceMemStateRef v2,
+                          const MnemePyCompareMetadata *Rules,
+                          uint64_t NumRules) {
   auto [Prologue, Epilogue] = prologueAndEpilogue(v1, v2);
-  return Epilogue->matchesUnlaunched(*Prologue);
+  return Epilogue->matchesUnlaunched(*Prologue, compareRules(Rules, NumRules));
 }
 
 API_EXPORT(void)
@@ -104,18 +126,5 @@ MnemePy_getCompareMetadata(MnemeDeviceMemStateRef State,
     ++Count;
   }
   return Count;
-}
-
-API_EXPORT(bool)
-MnemePy_setCompareMetadata(MnemeDeviceMemStateRef State,
-                           const MnemePyCompareMetadata *In) {
-  mneme::Metadata Md;
-  Md.builtin = static_cast<BuiltinDType>(In->DType);
-  Md.threshold = In->Threshold;
-  Md.threshold_kind = static_cast<ThresholdKind>(In->ThresholdKind);
-  Md.norm = static_cast<Norm>(In->Norm);
-  if (In->Tag)
-    Md.tag = std::string(In->Tag);
-  return epilogue(State)->setCompareMetadata(In->DevAddr, std::move(Md));
 }
 }
