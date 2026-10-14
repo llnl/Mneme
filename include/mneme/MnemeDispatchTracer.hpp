@@ -270,17 +270,23 @@ class DispatchTracer {
   }
 
 public:
-  // Only one tracer per process may be created.
-  void create(DispatchSink S, void *Data) {
+  // Only one tracer per process may be created. Fails when CUPTI is
+  // unavailable, e.g. because another tool uses it.
+  CUptiResult create(DispatchSink S, void *Data) {
     Sink = S;
     SinkData = Data;
     Active = this;
-    CHECK_CUPTI(
-        cuptiActivityRegisterCallbacks(&requestBuffer, &completeBuffer));
-    CHECK_CUPTI(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION));
-    CHECK_CUPTI(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL));
-    CHECK_CUPTI(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_RUNTIME));
-    CHECK_CUPTI(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_DRIVER));
+    CUptiResult Result =
+        cuptiActivityRegisterCallbacks(&requestBuffer, &completeBuffer);
+    if (Result != CUPTI_SUCCESS)
+      return Result;
+    for (CUpti_ActivityKind Kind :
+         {CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION,
+          CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, CUPTI_ACTIVITY_KIND_RUNTIME,
+          CUPTI_ACTIVITY_KIND_DRIVER})
+      if ((Result = cuptiActivityEnable(Kind)) != CUPTI_SUCCESS)
+        return Result;
+    return CUPTI_SUCCESS;
   }
 
   void push(uint64_t Token) {

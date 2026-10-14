@@ -92,7 +92,7 @@ public:
     // Make sure CUDA is initialized
     CHECK_CUDA(cudaFree(nullptr));
 
-    tracer_.create(&recordDuration, nullptr);
+    CHECK_CUPTI(tracer_.create(&recordDuration, nullptr));
 
     initialized_ = true;
     LOG_DEBUG("Initialized CUPTI activity profiling");

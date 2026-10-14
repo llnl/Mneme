@@ -265,7 +265,8 @@ public:
                              DeviceStream_t Stream,
                              const std::optional<TimedLaunch> &Launch) {
     // A captured launch only runs as part of its graph, where no duration
-    // can be attributed to it.
+    // can be attributed to it, and events recorded during the capture would
+    // become nodes of the graph.
     bool Timed =
         Timer && Launch && !MnemeDeviceRT::deviceStreamIsCapturing(Stream);
     if (Timed)

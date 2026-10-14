@@ -1,20 +1,24 @@
 // clang-format off
+// %TIMING is the timer under test, the profiler unless lit gets -D TIMING.
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_KERNEL_TIMING=1 MNEME_MAX_RECORDINGS=1 MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: MNEME_KERNEL_TIMING=%TIMING MNEME_MAX_RECORDINGS=1 MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-MAX
+// RUN: %CHECK_TIMING "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-INVARIANTS
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_KERNEL_TIMING=1 MNEME_SKIP_RECORDINGS=1 MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: MNEME_KERNEL_TIMING=%TIMING MNEME_SKIP_RECORDINGS=1 MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SKIP
+// RUN: %CHECK_TIMING "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-INVARIANTS
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_KERNEL_TIMING=1 MNEME_RR_KERNELS="spin_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: MNEME_KERNEL_TIMING=%TIMING MNEME_RR_KERNELS="spin_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-SPIN
+// RUN: %CHECK_TIMING "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-INVARIANTS
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_KERNEL_TIMING=0 LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
-// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-OFF
-// RUN: cat "%t.$$.mneme"/*.json | %FILECHECK %s --check-prefix=CHECK-OFF
-// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_KERNEL_TIMING=1 MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext capture 2>&1 | %FILECHECK %s --check-prefixes=CHECK-CAPTURED
+// RUN: MNEME_KERNEL_TIMING=%TIMING MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext capture 2>&1 | %FILECHECK %s --check-prefixes=CHECK-CAPTURED
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-CAPTURE
+// RUN: %CHECK_TIMING "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-INVARIANTS
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: env -u MNEME_KERNEL_TIMING LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: cat "%t.$$.mneme"/*.json | %FILECHECK %s --check-prefix=CHECK-UNTIMED
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 
@@ -38,13 +42,12 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-MAX: DemangledName: count_kernel()
 // CHECK-MAX: TotalLaunches: 5
 // CHECK-MAX: UnrecordedLaunches: 2
-// CHECK-MAX: TotalTimeNs: {{[1-9][0-9]*}}
-// CHECK-MAX: UnrecordedTimeNs: {{[1-9][0-9]*}}
+// CHECK-MAX: TotalTimeNs: {{[1-9][0-9]*$}}
+// CHECK-MAX: UnrecordedTimeNs: {{[1-9][0-9]*$}}
 // CHECK-MAX: BlockDims:(32, 1, 1)
 // CHECK-MAX-NEXT: GridDims:(1, 1, 1)
 // CHECK-MAX-NEXT: SharedMem:0 Occurrences:[[OCC:3]]
-// CHECK-MAX-NEXT: Timing: TimedLaunches:[[OCC]] SumNs:{{[1-9][0-9]*}} MinNs:{{[1-9][0-9]*}} MaxNs:{{[1-9][0-9]*}} RecordedNs:{{[1-9][0-9]*}}{{$}}
-// CHECK-MAX-NEXT: TimingConsistent: True
+// CHECK-MAX-NEXT: Timing: TimedLaunches:[[OCC]] SumNs:{{[1-9][0-9]*}} MinNs:{{[1-9][0-9]*}} MaxNs:{{[1-9][0-9]*}} RecordedNs:{{[1-9][0-9]*$}}
 
 // The skipped launch is timed into the instance that is recorded later.
 // CHECK-SKIP: TotalLaunches: 5
@@ -52,10 +55,8 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-SKIP: UnrecordedTimeNs: {{0$}}
 // CHECK-SKIP: SharedMem:{{.*}} Occurrences:[[OCC1:[0-9]+]]
 // CHECK-SKIP-NEXT: Timing: TimedLaunches:[[OCC1]] SumNs:{{[1-9][0-9]*}}
-// CHECK-SKIP-NEXT: TimingConsistent: True
 // CHECK-SKIP: SharedMem:{{.*}} Occurrences:[[OCC2:[0-9]+]]
 // CHECK-SKIP-NEXT: Timing: TimedLaunches:[[OCC2]] SumNs:{{[1-9][0-9]*}}
-// CHECK-SKIP-NEXT: TimingConsistent: True
 
 // Each launch spins for 1 ms, so anything below 0.5 ms is implausible.
 // CHECK-SPIN: DemangledName: spin_kernel(unsigned long)
@@ -63,9 +64,6 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-SPIN: UnrecordedTimeNs: {{0$}}
 // CHECK-SPIN: SharedMem:{{.*}} Occurrences:2
 // CHECK-SPIN-NEXT: Timing: TimedLaunches:2 SumNs:{{[0-9]+}} MinNs:{{([5-9][0-9]{5}|[1-9][0-9]{6,})}} MaxNs:
-// CHECK-SPIN-NEXT: TimingConsistent: True
-
-// CHECK-OFF-NOT: Time
 
 // Launches captured into a graph are counted but not timed, and the exit
 // drain does not wait for them.
@@ -75,6 +73,11 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-CAPTURE: TotalLaunches: 3
 // CHECK-CAPTURE: Occurrences:3
 // CHECK-CAPTURE-NEXT: Timing: TimedLaunches:1 SumNs:{{[0-9]+}} MinNs:{{[0-9]+}} MaxNs:{{[0-9]+}} RecordedNs:{{[0-9]+$}}
+
+// CHECK-INVARIANTS-NOT: TimingError
+// CHECK-INVARIANTS: TimingInvariants: ok
+
+// CHECK-UNTIMED-NOT: {{TotalTimeNs|TimedLaunches|TimeNs|RecordedLaunchTimeNs}}
 // clang-format on
 __global__ void count_kernel() {}
 

@@ -36,7 +36,8 @@ using Recorder = MnemeRecorderHIPPreload;
 // intercepted call, and rocprofiler-sdk must be configured before that.
 __attribute__((constructor)) static void configureKernelTiming() {
   const auto &Conf = Config::get();
-  if (Conf.KernelTiming && Conf.isRecordingEnabledForCurrentRank())
+  if (Conf.KernelTiming == KernelTimingType::Profiler &&
+      Conf.isRecordingEnabledForCurrentRank())
     KernelTimer::configure();
 }
 
