@@ -13,6 +13,11 @@ namespace mneme {
 #if defined(MNEME_ENABLE_HIP)
 namespace {
 
+constexpr const char *UnavailableMessage =
+    "[mneme] Kernel timing disabled: rocprofiler-sdk is unavailable, likely in "
+    "use by another tool such as rocprofv3. Set MNEME_KERNEL_TIMING=events to "
+    "time kernels with device events instead.\n";
+
 int initializeTool(rocprofiler_client_finalize_t, void *) {
   KernelTimer::instance().start();
   return 0;
@@ -35,6 +40,15 @@ void KernelTimer::configure() {
   (void)rocprofiler_force_configure(&configureTool);
 }
 #else
+namespace {
+
+constexpr const char *UnavailableMessage =
+    "[mneme] Kernel timing disabled: CUPTI is unavailable, likely in use by "
+    "another tool such as Nsight Systems. Set MNEME_KERNEL_TIMING=events to "
+    "time kernels with device events instead.\n";
+
+} // namespace
+
 void KernelTimer::configure() {}
 #endif
 
@@ -56,17 +70,22 @@ KernelTimer *KernelTimer::get() {
     Timer.start();
 #endif
   if (!Timer.Running) {
-    std::cerr << "[mneme] Kernel timing is unavailable because another tool, "
-                 "such as rocprofv3, configured rocprofiler-sdk first\n";
+    std::cerr << UnavailableMessage;
     return nullptr;
   }
   return &Timer;
 }
 
 void KernelTimer::start() {
-  Tracer->create(&KernelTimer::onDispatch, this);
 #if defined(MNEME_ENABLE_HIP)
+  Tracer->create(&KernelTimer::onDispatch, this);
   Tracer->start();
+#else
+  if (CUptiResult Result = Tracer->create(&KernelTimer::onDispatch, this);
+      Result != CUPTI_SUCCESS) {
+    std::cerr << "[mneme] CUPTI error: " << cuptiResultString(Result) << "\n";
+    return;
+  }
 #endif
   Running = true;
 }
