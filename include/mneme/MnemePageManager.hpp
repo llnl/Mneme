@@ -179,6 +179,8 @@ template <mneme::DeviceVendors VendorTypes> class ChunkAllocator {
         return true;
       if (Size == Min)
         return false;
+      // The app sees only the final failure.
+      DT::clearLastError();
     }
   }
 

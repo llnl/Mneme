@@ -374,6 +374,9 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
       LOG_WARN("Could not unmap {}: {}", Addr, *EC);
   }
 
+  // From ROCm 7 a failed call stays the last error until the app reads it.
+  static void clearLastError() { (void)hipGetLastError(); }
+
   static hipError_t DeviceStreamCreate(hipStream_t *Stream) {
     return hipStreamCreate(Stream);
   }
@@ -725,6 +728,9 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
     if (EC)
       LOG_WARN("Could not unmap {}: {}", Addr, *EC);
   }
+
+  // Driver API failures do not set the runtime's last error.
+  static void clearLastError() {}
 
   static bool compareDeviceBlobs(const char *Blob1, const char *Blob2,
                                  uint64_t NumBytes);
