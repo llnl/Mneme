@@ -11,6 +11,8 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
     with open(fn, "r") as fd:
         rr_data = json.load(fd)
     name = rr_data["DemangledName"]
+    if rr_data.get("TimingSource") not in ("profiler", "events"):
+        errors.append(f"{name}: TimingSource must name the timer")
     recorded_time = 0
     for dhash, instance in rr_data["instances"].items():
         where = f"{name} instance {dhash}"

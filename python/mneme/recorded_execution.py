@@ -408,6 +408,9 @@ class RecordedExecution:
         Summed GPU duration in nanoseconds of the launches counted in
         ``total_launches``, or ``None`` when recorded without
         ``MNEME_KERNEL_TIMING``.
+    timing_source : str, optional
+        Timer that measured the durations, ``"profiler"`` or ``"events"``, or
+        ``None`` when recorded without ``MNEME_KERNEL_TIMING``.
     """
 
     class KernelInstance:
@@ -530,6 +533,7 @@ class RecordedExecution:
         source_end_line: Optional[int] = None,
         total_launches: Optional[int] = None,
         total_time_ns: Optional[int] = None,
+        timing_source: Optional[str] = None,
     ):
         self.static_hash = static_hash
         self.kernel_name = kernel_name
@@ -547,6 +551,7 @@ class RecordedExecution:
         self.source_end_line = source_end_line
         self.total_launches = total_launches
         self.total_time_ns = total_time_ns
+        self.timing_source = timing_source
         self._link_mod = None
 
     def __str__(self):
@@ -675,6 +680,8 @@ class RecordedExecution:
             res["TotalLaunches"] = self.total_launches
         if self.total_time_ns is not None:
             res["TotalTimeNs"] = self.total_time_ns
+        if self.timing_source is not None:
+            res["TimingSource"] = self.timing_source
         res["instances"] = {}
         for k, v in self.items():
             res["instances"][k] = v.to_dict(base_dir)
@@ -789,4 +796,5 @@ class RecordedExecution:
             source_end_line=record_db.get("SourceEndLine"),
             total_launches=record_db.get("TotalLaunches"),
             total_time_ns=record_db.get("TotalTimeNs"),
+            timing_source=record_db.get("TimingSource"),
         )

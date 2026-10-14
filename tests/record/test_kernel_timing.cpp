@@ -2,7 +2,7 @@
 // %TIMING is the timer under test, the profiler unless lit gets -D TIMING.
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_KERNEL_TIMING=%TIMING MNEME_MAX_RECORDINGS=1 MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
-// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-MAX
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-MAX -DTIMING=%TIMING
 // RUN: %CHECK_TIMING "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-INVARIANTS
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_KERNEL_TIMING=%TIMING MNEME_SKIP_RECORDINGS=1 MNEME_RR_KERNELS="count_kernel" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_kernel_timing%ext | %FILECHECK %s --check-prefixes=CHECK
@@ -42,6 +42,7 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-MAX: DemangledName: count_kernel()
 // CHECK-MAX: TotalLaunches: 5
 // CHECK-MAX: UnrecordedLaunches: 2
+// CHECK-MAX: TimingSource: [[TIMING]]{{$}}
 // CHECK-MAX: TotalTimeNs: {{[1-9][0-9]*$}}
 // CHECK-MAX: UnrecordedTimeNs: {{[1-9][0-9]*$}}
 // CHECK-MAX: BlockDims:(32, 1, 1)
@@ -77,7 +78,7 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-INVARIANTS-NOT: TimingError
 // CHECK-INVARIANTS: TimingInvariants: ok
 
-// CHECK-UNTIMED-NOT: {{TotalTimeNs|TimedLaunches|TimeNs|RecordedLaunchTimeNs}}
+// CHECK-UNTIMED-NOT: {{TimingSource|TotalTimeNs|TimedLaunches|TimeNs|RecordedLaunchTimeNs}}
 // clang-format on
 __global__ void count_kernel() {}
 

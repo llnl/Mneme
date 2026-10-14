@@ -206,6 +206,18 @@ getEnvOrDefaultKernelTimingType(const char *VarName, KernelTimingType Default) {
                            "'. Expected 'profiler', 'events', or 'off'.");
 }
 
+inline const char *getKernelTimingName(KernelTimingType Type) {
+  switch (Type) {
+  case KernelTimingType::Off:
+    return "off";
+  case KernelTimingType::Profiler:
+    return "profiler";
+  case KernelTimingType::Events:
+    return "events";
+  }
+  return "off";
+}
+
 inline bool defaultRecordingPolicy(const std::optional<int> &DistributedRank) {
   if (!DistributedRank)
     return true;

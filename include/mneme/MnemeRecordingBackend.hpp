@@ -32,7 +32,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   RecorderRuntimeFunctions<VendorTypes> Runtime;
   std::unique_ptr<LaunchTimer<VendorTypes>> Timer =
       createLaunchTimer<VendorTypes>(Config::get().KernelTiming);
-  RecordDatabase DB{Timer != nullptr};
+  RecordDatabase DB{Timer ? Config::get().KernelTiming : KernelTimingType::Off};
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
   // Allocations served by the vendor runtime (managed, pinned, pitched,
   // stream-ordered, ...). They are not captured, but the application may
