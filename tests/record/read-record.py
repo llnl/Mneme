@@ -104,6 +104,9 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
     print("DemangledName:", rr_data["DemangledName"])
     print("NumModules:", len(rr_data["Modules"]))
     print("NumInstances:", len(rr_data["instances"]))
+    print("TotalLaunches:", rr_data["TotalLaunches"])
+    recorded_launches = sum(i["Occurrences"] for i in rr_data["instances"].values())
+    print("UnrecordedLaunches:", rr_data["TotalLaunches"] - recorded_launches)
     if "SourceFile" in rr_data:
         print("SourceFile:", rr_data["SourceFile"])
     if "SourceLine" in rr_data:
@@ -136,6 +139,15 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
                 instance["GridDims"]["x"],
                 instance["GridDims"]["y"],
                 instance["GridDims"]["z"],
+            )
+        )
+        print(
+            "Recorded: Grid:({0}, {1}, {2}) Block:({3}, {4}, {5}) "
+            "SharedMem:{6} Occurrences:{7}".format(
+                instance["GridDims"]["x"], instance["GridDims"]["y"],
+                instance["GridDims"]["z"], instance["BlockDims"]["x"],
+                instance["BlockDims"]["y"], instance["BlockDims"]["z"],
+                instance["SharedMem"], instance["Occurrences"],
             )
         )
         prologue_path = base_dir / instance["Prologue"]
