@@ -453,7 +453,9 @@ and launch bounds use `fixed`, `on`, `off`, or `on-off` modes.
 Use `--seed` for reproducible random or TPE sampling, and `--timeout` to stop
 submitting new trials after a fixed number of seconds. Each candidate is replayed
 with `--warmup` warmup iterations and `--iterations` measured iterations.
-`--workers` controls concurrent replay workers.
+`--workers` controls concurrent replay workers. `--compare-policy FILE`
+overrides the recorded comparison metadata used to verify every candidate
+(see [Verification](verification.md#overriding-tolerances-at-replay-time)).
 
 The ranking metric is selected with `--metric` (`mean`, `median`, `min`, or
 `max`). `--objective time` minimizes the selected time metric, while

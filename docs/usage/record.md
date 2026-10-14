@@ -17,9 +17,8 @@ floating-point results, this is often too strict.
 
 Mneme provides a lightweight C++ API — `mneme::annotate()` — that lets
 you attach a data type, error threshold, aggregation norm, and an
-optional tag to any device pointer.  The metadata is captured inside
-the recorded snapshot and used automatically during every subsequent
-replay.
+optional tag to any device pointer.  The metadata is stored in the
+record database and used automatically during every subsequent replay.
 
 ```cpp
 #include "mneme/MnemeAnnotation.hpp"

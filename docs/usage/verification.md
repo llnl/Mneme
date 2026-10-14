@@ -8,8 +8,9 @@ check.
 **Annotations** let you override this default on a per-buffer basis by
 attaching typed comparison metadata — data type, error threshold, norm,
 and an optional human-readable tag — to any device pointer *before* a
-kernel is recorded.  The metadata is persisted inside the recorded
-snapshot and used automatically during every subsequent replay.
+kernel is recorded.  The metadata is stored in the record database
+and used automatically during every subsequent replay, and
+`--compare-policy` can override it without re-recording.
 
 ---
 
@@ -153,9 +154,8 @@ against `threshold` to determine pass/fail.
 
 ### `tag` (optional)
 
-A free-form string stored alongside the buffer snapshot.  Tags are
-useful for identifying buffers in diagnostic output and multi-buffer
-kernels.  They are not interpreted by Mneme.
+A free-form string recorded with the metadata.  A compare policy can
+select buffers by tag; Mneme does not otherwise interpret it.
 
 ---
 
@@ -164,12 +164,59 @@ kernels.  They are not interpreted by Mneme.
 1. Mneme restores the recorded **prologue** device memory state.
 2. The kernel is recompiled and executed.
 3. For every recorded memory blob, Mneme dispatches a GPU comparison
-   kernel that applies the `BuiltinDType`, `ThresholdKind`, and `Norm`
-   stored in the blob's annotation metadata.
+   kernel that applies the blob's `BuiltinDType`, `ThresholdKind`, and
+   `Norm`, taken from the record database and any `--compare-policy`.
 4. If *all* blobs pass, the replay result reports `"verified": true`.
 
 Buffers that were **not** annotated fall back to the default byte-wise
 comparison (equivalent to `threshold = 0`, `Norm::None`).
+
+### Recorded metadata
+
+Mneme records the metadata each annotated buffer had when the kernel
+finished, as the `Compare` list of the kernel instance in
+`<static-hash>.json`:
+
+```json
+"Compare": [
+  {"DevAddr": "0x00004aaa40002000", "Tag": "out_loose", "DType": "f64",
+   "Threshold": 0.01, "ThresholdKind": "relative", "Norm": "linf"}
+]
+```
+
+`DType` is one of `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `u64`, `i64`,
+`f16`, `f32`, `f64`; `ThresholdKind` is `absolute` or `relative`; `Norm`
+is `none`, `l1`, `l2`, or `linf`.  `Tag` is present only when set.
+Buffers without an entry are compared byte-wise.
+
+Recordings made before the `Compare` list existed have none; their
+metadata is read from the snapshots instead and verifies as before.
+
+---
+
+## Overriding tolerances at replay time
+
+`mneme replay` and `mneme tune` accept `--compare-policy FILE`, a JSON
+file that overrides the recorded metadata without re-recording:
+
+```json
+{"Default": {"Threshold": 1e-6},
+ "Tags": {"out_loose": {"Threshold": 1e-3}},
+ "Addresses": {"0x00004aaa40002000": {"Norm": "l2"}}}
+```
+
+Each section holds `Compare` fields (`DType`, `Threshold`,
+`ThresholdKind`, `Norm`).  `Default` applies to every buffer, `Tags` to
+the buffers recorded with that tag, and `Addresses` to the buffer at
+that device address.  Fields are merged one at a time with precedence
+`Addresses` > `Tags` > `Default` > recorded metadata > byte-wise
+comparison.
+
+An unknown key, an unknown enum name, a negative threshold, or a tag or
+address that matches no buffer of the replayed instance is an error.
+The Python API takes the same policy as
+`ComparePolicy.from_file(path)`, passed as `compare_policy` to
+`AsyncReplayExecutor` or `BaseExecutor`.
 
 ---
 
@@ -273,7 +320,8 @@ replayed epilogue satisfies every annotated buffer's tolerance.
 | `BuiltinDType` | Scalar type used to interpret buffer contents |
 | `ThresholdKind` | Absolute or relative error formula |
 | `Norm` | Per-element (`None`) or aggregate (`L1`, `L2`, `Linf`) comparison |
-| `tag` | Optional label for diagnostics |
+| `tag` | Optional label that compare policies can select |
+| `--compare-policy` | Override the recorded metadata at replay time |
 
 Annotations are recorded once and applied automatically on every replay.
 Buffers without annotations continue to use the default byte-wise
