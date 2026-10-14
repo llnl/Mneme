@@ -103,7 +103,8 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
         invalid("recording.defaults.ranks", "expected a list of ranks or all");
       }
 
-      if (!std::getenv("MNEME_RECORD_RANKS"))
+      const char *EnvRanks = std::getenv("MNEME_RECORD_RANKS");
+      if (!EnvRanks || EnvRanks[0] == '\0')
         Result.EnabledThisRank = Enabled;
     }
   }

@@ -171,6 +171,18 @@ int main() {
            .isRecordingEnabledForCurrentRank(),
       "No ranks");
 
+  setenv("MNEME_RECORD_RANKS", "", 1);
+  setenv("FLUX_TASK_RANK", "0", 1);
+  expect(
+      !RecordingPolicy::fromJSON(R"({"recording":{"defaults":{"ranks":[]}}})")
+           .isRecordingEnabledForCurrentRank(),
+      "Empty environment rank setting preserves disabled config ranks");
+  setenv("FLUX_TASK_RANK", "1", 1);
+  expect(
+      RecordingPolicy::fromJSON(R"({"recording":{"defaults":{"ranks":[1]}}})")
+          .isRecordingEnabledForCurrentRank(),
+      "Empty environment rank setting preserves included config rank");
+
   setenv("MNEME_RECORD_RANKS", "1", 1);
   expect(
       RecordingPolicy::fromJSON(RankPolicy).isRecordingEnabledForCurrentRank(),
