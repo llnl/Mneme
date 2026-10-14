@@ -116,17 +116,16 @@ def test_replay_chunked_allocations(
     assert rc == 0, "chunkedAllocs failed under mneme record"
 
     (log,) = [p.read_text() for p in log_dir.glob("*.log")]
-    large = chunk_size or 4096 * MiB
-    # CUDA mappings cover whole 32 MiB driver blocks.
+    # CUDA chunks cover whole 32 MiB driver blocks.
     block = 32 * MiB if has_nvidia_gpu else 1
-    chunk = -(-large // block) * block
+    chunk = -(-(chunk_size or 4096 * MiB) // block) * block
     chunks = {}
     for line in log.splitlines():
         if m := CHUNK_LOG.search(line):
             chunks[int(m[2], 16)] = int(m[1])
         elif m := MALLOC_LOG.search(line):
             ptr, size = int(m[1], 16), int(m[2])
-            expected = [chunk] if size < large else []
+            expected = [chunk] if size < chunk else []
             owner = [s for c, s in chunks.items() if c <= ptr < c + s]
             assert owner == expected, f"{size}-byte allocation at {ptr:#x}"
     if chunk_size:

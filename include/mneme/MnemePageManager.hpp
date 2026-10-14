@@ -149,6 +149,9 @@ template <mneme::DeviceVendors VendorTypes> class ChunkAllocator {
   };
   using ChunkMap = std::map<uintptr_t, Chunk>;
 
+  // Chunks are whole mapping units, so CUDA chunks are 32 MiB multiples.
+  static constexpr uint64_t Unit = PageManager<VendorTypes>::Align;
+
   PageManager<VendorTypes> &PM;
   int DeviceID;
   uint64_t ChunkSize;
@@ -177,9 +180,8 @@ template <mneme::DeviceVendors VendorTypes> class ChunkAllocator {
 
   // Halves the chunk while the device lacks memory, down to MinSize.
   bool growFor(uint64_t MinSize) {
-    uint64_t Unit = std::max(mneme::util::LargePageSize, DT::VABlockSize);
     uint64_t Min = mneme::util::roundUp(MinSize, Unit);
-    for (uint64_t Size = mneme::util::roundUp(ChunkSize, Unit);;
+    for (uint64_t Size = ChunkSize;;
          Size = std::max(Min, mneme::util::roundUp(Size / 2, Unit))) {
       if (mapChunk(Size))
         return true;
@@ -197,7 +199,8 @@ public:
   }
 
   ChunkAllocator(PageManager<VendorTypes> &PM, int DeviceID, uint64_t ChunkSize)
-      : PM(PM), DeviceID(DeviceID), ChunkSize(ChunkSize) {}
+      : PM(PM), DeviceID(DeviceID),
+        ChunkSize(mneme::util::roundUp(ChunkSize, Unit)) {}
 
   bool packs(uint64_t Size) const { return Size < ChunkSize; }
 
