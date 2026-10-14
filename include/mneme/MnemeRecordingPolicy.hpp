@@ -5,9 +5,16 @@
 #include <string>
 #include <vector>
 
+namespace llvm::json {
+class Value;
+}
+
 namespace mneme {
 
 class Config;
+namespace config_detail {
+struct RecordingRankPolicy;
+}
 
 struct KernelRecordingPolicy {
   uint64_t Skip = 0;
@@ -43,6 +50,9 @@ private:
   bool MatchMangledNames = false;
 
   static RecordingPolicy load(const Config &Conf);
+  static RecordingPolicy
+  fromJSONValue(const llvm::json::Value &Value,
+                const config_detail::RecordingRankPolicy &Ranks);
 };
 
 } // namespace mneme

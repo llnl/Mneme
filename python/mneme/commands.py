@@ -242,56 +242,42 @@ def _parse_recording_count(value, flag, env_name, parser):
         parser.error(f"{flag} / {env_name} requires a nonnegative 64-bit integer")
 
 
-def _default_recording_filter(args, record_env, mode):
-    """ Translate default-mode env vars and CLI args.
-        If mode is not 'default', then a warning is emitted and None is returned.
-    """
+def _prepare_default_recording_controls(args, record_env, mode):
+    """Resolve default-mode controls or warn and remove them in other modes."""
     count_options = (
         (
             "--per-kernel-skip-recordings",
             "MNEME_SKIP_RECORDINGS",
-            "skip",
             args.per_kernel_skip_recordings,
         ),
         (
             "--per-kernel-max-recordings",
             "MNEME_MAX_RECORDINGS",
-            "max_records",
             args.per_kernel_max_recordings,
         ),
     )
     supplied = [name for name in _RECORDING_FILTER_ENV_VARS if name in record_env]
-    supplied.extend(flag for flag, _, _, value in count_options if value is not None)
-
-    if not supplied:
-        return None
+    supplied.extend(flag for flag, _, value in count_options if value is not None)
 
     if mode != "default":
-        print(
-            f"[mneme] Warning: {', '.join(supplied)} are ignored in "
-            f"{mode} filter mode; they apply only in default mode.",
-            file=sys.stderr,
-        )
-        return None
+        if supplied:
+            print(
+                f"[mneme] Warning: {', '.join(supplied)} are ignored in "
+                f"{mode} filter mode; they apply only in default mode.",
+                file=sys.stderr,
+            )
+        for name in _RECORDING_FILTER_ENV_VARS:
+            record_env.pop(name, None)
+        return
 
-    defaults = {}
-    for flag, env_name, field, value in count_options:
+    for flag, env_name, value in count_options:
         if value is None:
             value = record_env.get(env_name)
 
         if value is not None:
-            defaults[field] = _parse_recording_count(
-                value, flag, env_name, args.parser
+            record_env[env_name] = str(
+                _parse_recording_count(value, flag, env_name, args.parser)
             )
-
-    recording = {"defaults": defaults}
-    if "MNEME_RR_KERNELS" in record_env:
-        recording["kernel_overrides"] = [
-            {"match": {"demangled_regex": record_env["MNEME_RR_KERNELS"]}},
-            {"match": {"demangled_regex": ".*"}, "max_records": 0},
-        ]
-
-    return json.dumps({"recording": recording})
 
 
 def _prepare_recording_filter(args, record_env):
@@ -312,13 +298,7 @@ def _prepare_recording_filter(args, record_env):
     if args.filter_config:
         filter_json = _load_recording_filter(args.filter_config, args.parser)
 
-    default_filter_json = _default_recording_filter(args, record_env, mode)
-    if mode == "default":
-        filter_json = default_filter_json
-
-    # remove irrelevant env vars
-    for name in _RECORDING_FILTER_ENV_VARS:
-        record_env.pop(name, None)
+    _prepare_default_recording_controls(args, record_env, mode)
 
     record_env.pop("MNEME_FILTER_CONFIG", None)
     record_env["MNEME_FILTER_MODE"] = mode
@@ -327,9 +307,7 @@ def _prepare_recording_filter(args, record_env):
 
 @contextmanager
 def _recording_filter_file(filter_json, record_db_dir):
-    """ keep the filter file around until the application exits.
-        helper is nice since file is optional.
-    """
+    """Keep a config-mode filter file available until the application exits."""
     if filter_json is None:
         yield None
         return

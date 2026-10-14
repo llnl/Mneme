@@ -13,11 +13,9 @@
 #include <llvm/Support/raw_ostream.h>
 #include <memory>
 #include <optional>
-#include <regex>
 #include <unordered_map>
 #include <vector>
 
-#include "llvm/Demangle/Demangle.h"
 #include <llvm/ADT/StableHashing.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Bitcode/BitcodeReader.h>
@@ -271,10 +269,7 @@ public:
         util::pointerToHexString(reinterpret_cast<uint8_t *>(VAddr));
     Collection["VASize"] = VASize;
     Collection["KernelName"] = KName;
-    std::size_t pos = KName.find("__intern__");
-    std::string Orig =
-        (pos != std::string::npos) ? KName.substr(0, pos) : KName;
-    Collection["DemangledName"] = llvm::demangle(Orig);
+    Collection["DemangledName"] = util::demangleKernelName(KName);
     Collection["Modules"] = llvm::json::Array(ModuleFiles);
     Collection["BinaryBlobs"] = llvm::json::Array();
     Collection["ArgNames"] = llvm::json::Array(KernelArgNames);
@@ -445,18 +440,17 @@ public:
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       dim3 &GridDim, dim3 &BlockDim, void **Args, size_t SharedMem,
       typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
-    
+
     auto StaticHash = KInfo.getStaticHash();
     auto [StateIt, Inserted] = KernelLaunches.try_emplace(StaticHash);
     auto &State = StateIt->second;
     if (Inserted) {
       // Match the same original name displayed in the recording database.
       auto Name = KInfo.getName();
-      auto Pos = Name.find("__intern__");
       State.Policy = RecordingPolicy::get().resolve(
-          llvm::demangle(Name.substr(0, Pos)), Name);
+          util::demangleKernelName(Name), Name);
     }
-    
+
     ++State.Count;
     if (!State.Policy.selects(State.Count))
       return std::nullopt;

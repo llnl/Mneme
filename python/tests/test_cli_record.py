@@ -356,38 +356,20 @@ def test_record_mode_ignores_environment(record_parser, tmp_path, monkeypatch, m
         ),
     ],
 )
-def test_default_controls_json(
+def test_default_controls_environment(
     record_parser, tmp_path, monkeypatch, capsys, flags, skip, max_records
 ):
     monkeypatch.setenv("MNEME_SKIP_RECORDINGS", "7")
     monkeypatch.setenv("MNEME_MAX_RECORDINGS", "8")
     monkeypatch.setenv("MNEME_RR_KERNELS", "foo")
-    monkeypatch.setattr(utils_mod, "get_mneme_record_library_name", lambda: "/tmp/x.so")
-    paths = []
+    env = _capture_env_with_args(record_parser, tmp_path, monkeypatch, flags)
 
-    def run(cmd, env):
-        path = Path(env["MNEME_FILTER_CONFIG"])
-        paths.append(path)
-        policy = json.loads(path.read_text())["recording"]
-        assert env["MNEME_FILTER_MODE"] == "default"
-        assert policy["defaults"] == {"skip": skip, "max_records": max_records}
-        assert policy["kernel_overrides"] == [
-            {"match": {"demangled_regex": "foo"}},
-            {"match": {"demangled_regex": ".*"}, "max_records": 0},
-        ]
-        for name in (
-            "MNEME_SKIP_RECORDINGS",
-            "MNEME_MAX_RECORDINGS",
-            "MNEME_RR_KERNELS",
-        ):
-            assert name not in env
-        return record_mod.subprocess.CompletedProcess([], 0)
-
-    monkeypatch.setattr(record_mod.subprocess, "run", run)
-    args = record_parser.parse_args(["-rdb", str(tmp_path), *flags, "--", "/usr/bin/true"])
-    assert Record.run(args, None) == 0
-
-    assert not paths[0].parent.exists()
+    assert env["MNEME_FILTER_MODE"] == "default"
+    assert env["MNEME_SKIP_RECORDINGS"] == str(skip)
+    assert env["MNEME_MAX_RECORDINGS"] == str(max_records)
+    assert env["MNEME_RR_KERNELS"] == "foo"
+    assert "MNEME_FILTER_CONFIG" not in env
+    assert not list((tmp_path / "records").iterdir())
     assert not capsys.readouterr().err
 
 

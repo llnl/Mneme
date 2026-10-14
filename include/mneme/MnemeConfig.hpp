@@ -170,11 +170,11 @@ parseRecordRanksList(const std::string &Value) {
   return Parsed;
 }
 
-inline bool computeRecordingEnabledForCurrentRank() {
-  auto DistributedRank = detectDistributedRank();
+inline std::optional<bool>
+getRecordingRankOverride(const std::optional<int> &DistributedRank) {
   const char *EnvValue = std::getenv("MNEME_RECORD_RANKS");
   if (!EnvValue || EnvValue[0] == '\0')
-    return defaultRecordingPolicy(DistributedRank);
+    return std::nullopt;
 
   std::string Value(EnvValue);
   std::string Lower = Value;
@@ -193,6 +193,16 @@ inline bool computeRecordingEnabledForCurrentRank() {
 
   return ParsedRanks->count(DistributedRank.value_or(0)) > 0;
 }
+
+// Capture rank selection once and reuse it across policy sources.
+struct RecordingRankPolicy {
+  const std::optional<int> Rank = detectDistributedRank();
+  const std::optional<bool> Override = getRecordingRankOverride(Rank);
+
+  bool isEnabled(std::optional<bool> Configured = std::nullopt) const {
+    return Override.value_or(Configured.value_or(defaultRecordingPolicy(Rank)));
+  }
+};
 
 } // namespace config_detail
 
@@ -213,7 +223,11 @@ public:
   const bool CopySource;
 
   bool isRecordingEnabledForCurrentRank() const {
-    return RecordingEnabledThisRank;
+    return RankPolicy.isEnabled();
+  }
+
+  const config_detail::RecordingRankPolicy &getRecordingRankPolicy() const {
+    return RankPolicy;
   }
 
   std::filesystem::path getDataDirectory() const {
@@ -240,7 +254,7 @@ public:
 private:
   const std::optional<std::string> MnemeDataDir;
   const std::optional<std::string> MnemeLogDir;
-  const bool RecordingEnabledThisRank;
+  const config_detail::RecordingRankPolicy RankPolicy;
 
   Config()
       : RecordingFilterMode(config_detail::getFilterMode()),
@@ -254,14 +268,12 @@ private:
         CopySource(
             config_detail::getEnvOrDefaultBool("MNEME_COPY_SOURCE", false)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
-        MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")),
-        RecordingEnabledThisRank(
-            config_detail::computeRecordingEnabledForCurrentRank()) {
-    
+        MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")) {
+
     if (RecordingFilterMode == FilterMode::Config &&
         (!FilterConfigPath || FilterConfigPath->empty()))
       throw std::runtime_error("MNEME_FILTER_MODE=config requires MNEME_FILTER_CONFIG");
-    
+
     if (RecordingFilterMode == FilterMode::Scoped && FilterConfigPath)
       throw std::runtime_error("MNEME_FILTER_CONFIG is not supported in scoped mode");
   }

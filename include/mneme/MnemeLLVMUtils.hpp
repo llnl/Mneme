@@ -4,9 +4,11 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/ADT/Twine.h>
+#include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/raw_ostream.h>
+#include <string>
 
 #include "mneme/MnemeLogger.hpp"
 
@@ -30,6 +32,10 @@ template <> struct DenseMapInfo<std::string> {
 //
 namespace mneme {
 namespace util {
+inline std::string demangleKernelName(const std::string &Name) {
+  return llvm::demangle(Name.substr(0, Name.find("__intern__")));
+}
+
 template <typename Ty>
 void writeScalar(llvm::raw_ostream &OS, const Ty &Value) {
   OS << llvm::StringRef(reinterpret_cast<const char *>(&Value), sizeof(Value));

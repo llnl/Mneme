@@ -194,6 +194,8 @@ int main() {
               .isRecordingEnabledForCurrentRank(),
          "Environment can exclude YAML rank");
 
+  invalid(R"({"recording":{"defaults":{"ranks":[true]}}})", "ranks");
+
   // Validate the whole document even when the rank is excluded.
   invalid(
       R"({"recording":{"defaults":{"ranks":[]},"kernel_overrides":[{"ranks":[1]}]}})",
@@ -210,6 +212,21 @@ int main() {
   expect(RecordingPolicy::createFromEnvironment().resolve("foo()").Skip == 7,
          "JSON file transport");
 
+  setenv("MNEME_RECORD_RANKS", "invalid", 1);
+  Warning.str("");
+  Saved = std::cerr.rdbuf(Warning.rdbuf());
+  auto InvalidRanks = RecordingPolicy::createFromEnvironment();
+  std::cerr.rdbuf(Saved);
+  expect(!InvalidRanks.isRecordingEnabledForCurrentRank(),
+         "Malformed environment rank setting falls back to default policy");
+  auto Message = Warning.str();
+  auto RankWarning = Message.find("MNEME_RECORD_RANKS");
+  expect(RankWarning != std::string::npos &&
+             Message.find("MNEME_RECORD_RANKS", RankWarning + 1) ==
+                 std::string::npos,
+         "Rank environment is validated only once when loading a config");
+  unsetenv("MNEME_RECORD_RANKS");
+
   setenv("MNEME_SKIP_RECORDINGS", "invalid", 1);
   setenv("MNEME_RR_KERNELS", "[", 1);
   Warning.str("");
@@ -224,7 +241,7 @@ int main() {
   unsetenv("MNEME_RR_KERNELS");
   setenv("MNEME_FILTER_MODE", "default", 1);
   expect(RecordingPolicy::createFromEnvironment().resolve("foo()").Skip == 7,
-         "Default mode loads CLI-generated JSON through the same parser");
+         "Default mode can load an explicit JSON policy");
 
   std::filesystem::remove(Path);
   bool Threw = false;

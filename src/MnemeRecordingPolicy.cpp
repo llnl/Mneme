@@ -7,13 +7,19 @@
 
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MemoryBuffer.h>
-#include <llvm/Support/raw_ostream.h>
 
 namespace mneme {
 namespace {
 
 [[noreturn]] void invalid(const std::string &Path, const std::string &Message) {
   throw std::runtime_error("Invalid recording filter " + Path + ": " + Message);
+}
+
+llvm::json::Value parseJSON(const std::string &Text) {
+  auto Parsed = llvm::json::parse(Text);
+  if (!Parsed)
+    invalid("document", llvm::toString(Parsed.takeError()));
+  return std::move(*Parsed);
 }
 
 const llvm::json::Object &object(const llvm::json::Value &Value,
@@ -48,7 +54,7 @@ void counts(const llvm::json::Object &Object, const std::string &Path,
                     ? "expected a positive integer"
                     : "expected a nonnegative integer");
       }
-        
+
       *Field.second = static_cast<uint64_t>(*Number);
     }
   }
@@ -57,11 +63,13 @@ void counts(const llvm::json::Object &Object, const std::string &Path,
 } // namespace
 
 RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
-  auto Parsed = llvm::json::parse(Text);
-  if (!Parsed)
-    invalid("document", llvm::toString(Parsed.takeError()));
+  return fromJSONValue(parseJSON(Text), config_detail::RecordingRankPolicy{});
+}
 
-  const auto &Root = object(*Parsed, "document");
+RecordingPolicy RecordingPolicy::fromJSONValue(
+    const llvm::json::Value &Value,
+    const config_detail::RecordingRankPolicy &Ranks) {
+  const auto &Root = object(Value, "document");
   keys(Root, "document", {"recording"});
 
   const auto *Recording = Root.get("recording");
@@ -72,8 +80,7 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
   keys(Body, "recording", {"defaults", "kernel_overrides"});
 
   RecordingPolicy Result;
-  Result.EnabledThisRank =
-      config_detail::computeRecordingEnabledForCurrentRank();
+  std::optional<bool> ConfiguredRanks;
 
   if (const auto *Value = Body.get("defaults")) {
     const auto &Defaults = object(*Value, "recording.defaults");
@@ -81,14 +88,13 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
          {"skip", "every", "max_records", "ranks"});
     counts(Defaults, "recording.defaults", Result.Defaults);
 
-    if (const auto *Ranks = Defaults.get("ranks")) {
+    if (const auto *RankList = Defaults.get("ranks")) {
       bool Enabled = false;
 
-      if (auto All = Ranks->getAsString(); All && *All == "all") {
+      if (auto All = RankList->getAsString(); All && *All == "all") {
         Enabled = true;
-      } else if (auto *List = Ranks->getAsArray()) {
-        // check if the current rank is included in the list of ranks
-        int Rank = detectDistributedRank().value_or(0);
+      } else if (auto *List = RankList->getAsArray()) {
+        int Rank = Ranks.Rank.value_or(0);
 
         for (const auto &Item : *List) {
           auto Number = Item.getAsUINT64();
@@ -96,19 +102,16 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
           if (!Number || *Number > INT_MAX)
             invalid("recording.defaults.ranks",
                     "expected nonnegative integer ranks");
-          
+
           Enabled |= *Number == Rank;
         }
       } else {
         invalid("recording.defaults.ranks", "expected a list of ranks or all");
       }
 
-      const char *EnvRanks = std::getenv("MNEME_RECORD_RANKS");
-      if (!EnvRanks || EnvRanks[0] == '\0')
-        Result.EnabledThisRank = Enabled;
+      ConfiguredRanks = Enabled;
     }
   }
-
 
   if (const auto *Value = Body.get("kernel_overrides")) {
 
@@ -126,7 +129,6 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
                 "rank selection is process-wide; enable the rank "
                 "in recording.defaults.ranks or --record-ranks before "
                 "filtering its kernels");
-
       }
 
       keys(Override, Path, {"match", "skip", "every", "max_records"});
@@ -150,13 +152,14 @@ RecordingPolicy RecordingPolicy::fromJSON(const std::string &Text) {
     }
   }
 
+  Result.EnabledThisRank = Ranks.isEnabled(ConfiguredRanks);
   return Result;
 }
 
 RecordingPolicy RecordingPolicy::load(const Config &Conf) {
   std::string Controls;
-  for (const char *Name : {"MNEME_SKIP_RECORDINGS", "MNEME_MAX_RECORDINGS",
-                           "MNEME_RR_KERNELS"}) {
+  for (const char *Name :
+       {"MNEME_SKIP_RECORDINGS", "MNEME_MAX_RECORDINGS", "MNEME_RR_KERNELS"}) {
     if (std::getenv(Name)) {
       if (!Controls.empty())
         Controls += ", ";
@@ -165,9 +168,9 @@ RecordingPolicy RecordingPolicy::load(const Config &Conf) {
   }
 
   if (Conf.RecordingFilterMode != FilterMode::Default && !Controls.empty())
-    std::cerr << "[mneme] Warning: " << Controls
-              << " are ignored in "
-              << (Conf.RecordingFilterMode == FilterMode::Scoped ? "scoped" : "config")
+    std::cerr << "[mneme] Warning: " << Controls << " are ignored in "
+              << (Conf.RecordingFilterMode == FilterMode::Scoped ? "scoped"
+                                                                 : "config")
               << " filter mode; they apply only in default mode.\n";
 
   RecordingPolicy Result;
@@ -175,11 +178,13 @@ RecordingPolicy RecordingPolicy::load(const Config &Conf) {
     auto Buffer = llvm::MemoryBuffer::getFile(*Conf.FilterConfigPath);
     if (!Buffer)
       throw std::runtime_error("Cannot read MNEME_FILTER_CONFIG '" +
-                               *Conf.FilterConfigPath + "': " +
-                               Buffer.getError().message());
+                               *Conf.FilterConfigPath +
+                               "': " + Buffer.getError().message());
 
-    Result = fromJSON((*Buffer)->getBuffer().str());
-  } else if (Conf.RecordingFilterMode == FilterMode::Default && !Controls.empty()) {
+    Result = fromJSONValue(parseJSON((*Buffer)->getBuffer().str()),
+                           Conf.getRecordingRankPolicy());
+  } else if (Conf.RecordingFilterMode == FilterMode::Default &&
+             !Controls.empty()) {
     llvm::json::Object Defaults;
     for (auto Field : {std::pair{"MNEME_SKIP_RECORDINGS", "skip"},
                        std::pair{"MNEME_MAX_RECORDINGS", "max_records"}}) {
@@ -194,14 +199,15 @@ RecordingPolicy RecordingPolicy::load(const Config &Conf) {
     llvm::json::Object Recording{{"defaults", std::move(Defaults)}};
     if (const char *Pattern = std::getenv("MNEME_RR_KERNELS"))
       Recording["kernel_overrides"] = llvm::json::Array{
-          llvm::json::Object{{"match", llvm::json::Object{{"demangled_regex", Pattern}}}},
-          llvm::json::Object{{"match", llvm::json::Object{{"demangled_regex", ".*"}}},
-                             {"max_records", 0}}};
+          llvm::json::Object{
+              {"match", llvm::json::Object{{"demangled_regex", Pattern}}}},
+          llvm::json::Object{
+              {"match", llvm::json::Object{{"demangled_regex", ".*"}}},
+              {"max_records", 0}}};
 
-    std::string JSON;
-    llvm::raw_string_ostream Stream(JSON);
-    Stream << llvm::json::Value(llvm::json::Object{{"recording", std::move(Recording)}});
-    Result = fromJSON(JSON);
+    Result =
+        fromJSONValue(llvm::json::Object{{"recording", std::move(Recording)}},
+                      Conf.getRecordingRankPolicy());
   } else {
     Result.EnabledThisRank = Conf.isRecordingEnabledForCurrentRank();
   }
@@ -220,14 +226,15 @@ RecordingPolicy RecordingPolicy::createFromEnvironment() {
   return load(Config::createFromEnvironment());
 }
 
-KernelRecordingPolicy RecordingPolicy::resolve(const std::string &Name,
-                                               const std::string &MangledName) const {
+KernelRecordingPolicy
+RecordingPolicy::resolve(const std::string &Name,
+                         const std::string &MangledName) const {
   for (const auto &Rule : Rules)
     if (std::regex_search(Name, Rule.Pattern) ||
         (MatchMangledNames && !MangledName.empty() &&
          std::regex_search(MangledName, Rule.Pattern)))
       return Rule.Policy;
-      
+
   return Defaults;
 }
 
