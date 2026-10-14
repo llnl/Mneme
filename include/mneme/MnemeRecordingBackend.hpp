@@ -190,8 +190,13 @@ public:
                    ptr);
       LOG_FATAL("Free address that is not being allocated through Mneme\n");
     }
-    // Like hipFree, wait for kernels that may still use the memory.
-    MnemeDeviceRT::DeviceSynchronize();
+    // Like hipFree, wait for kernels that may still use the memory, and report
+    // their errors.
+    auto ret = MnemeDeviceRT::DeviceSynchronize();
+    if (ret != MnemeDeviceRT::DeviceSuccess) {
+      LOG_WARN("Not freeing PTR:{}: device synchronize failed", ptr);
+      return ret;
+    }
     return releaseBlob(ptr);
   }
 
