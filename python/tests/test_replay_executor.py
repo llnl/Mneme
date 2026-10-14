@@ -70,7 +70,7 @@ class FakeKernelDescr:
         self.prologue = FakePrologueDescr(prologue or FakeSnapshot())
         self.epilogue = FakeEpilogueDescr(epilogue or FakeSnapshot())
 
-    def apply_compare(self):
+    def apply_compare(self, policy):
         pass
 
 
@@ -717,7 +717,9 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path):
     process_ir_names = []
 
     class FakeWorker:
-        def __init__(self, record_db, record_id, device_id, iterations, warmup):
+        def __init__(
+            self, record_db, record_id, device_id, iterations, warmup, compare_policy
+        ):
             self.record_db = record_db
             self.record_id = record_id
             self.device_id = device_id
@@ -805,7 +807,9 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
     )
 
     class FakeWorker:
-        def __init__(self, record_db, record_id, device_id, iterations, warmup):
+        def __init__(
+            self, record_db, record_id, device_id, iterations, warmup, compare_policy
+        ):
             self.device_id = device_id
 
         def link_ir(self):
