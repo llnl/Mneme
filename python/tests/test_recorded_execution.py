@@ -509,11 +509,13 @@ def test_recorded_execution_loads_kernel_timing(tmp_path):
         },
         TotalLaunches=7,
         TotalTimeNs=100,
+        TimingSource="events",
     )
 
     r = RecordedExecution.from_json(str(json_path))
 
     assert r.total_time_ns == 100
+    assert r.timing_source == "events"
     assert r["H"].timed_launches == 3
     assert r["H"].time_ns == LaunchTimes(sum=60, min=10, max=30)
     assert r["H"].recorded_launch_time_ns == 30
@@ -522,6 +524,7 @@ def test_recorded_execution_loads_kernel_timing(tmp_path):
     r.to_json(str(out_path))
     written = json.loads(out_path.read_text())
     assert written["TotalTimeNs"] == 100
+    assert written["TimingSource"] == "events"
     assert written["instances"]["H"]["TimedLaunches"] == 3
     assert written["instances"]["H"]["TimeNs"] == time_ns
     assert written["instances"]["H"]["RecordedLaunchTimeNs"] == 30
@@ -533,11 +536,13 @@ def test_recorded_execution_loads_record_without_kernel_timing(tmp_path):
     )
 
     assert r.total_time_ns is None
+    assert r.timing_source is None
     assert r["H"].timed_launches is None
     assert r["H"].time_ns is None
     assert r["H"].recorded_launch_time_ns is None
     d = r.to_dict()
     assert "TotalTimeNs" not in d
+    assert "TimingSource" not in d
     for key in ("TimedLaunches", "TimeNs", "RecordedLaunchTimeNs"):
         assert key not in d["instances"]["H"]
 
@@ -548,6 +553,7 @@ def test_recorded_execution_loads_instance_without_timed_launches(tmp_path):
         instance_fields={"TimedLaunches": 0},
         TotalLaunches=7,
         TotalTimeNs=0,
+        TimingSource="profiler",
     )
 
     r = RecordedExecution.from_json(str(json_path))

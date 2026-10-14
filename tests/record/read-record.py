@@ -112,6 +112,7 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
         recorded_time = sum(
             i["TimeNs"]["Sum"] for i in rr_data["instances"].values() if "TimeNs" in i
         )
+        print("TimingSource:", rr_data["TimingSource"])
         print("TotalTimeNs:", rr_data["TotalTimeNs"])
         print("UnrecordedTimeNs:", rr_data["TotalTimeNs"] - recorded_time)
     if "SourceFile" in rr_data:

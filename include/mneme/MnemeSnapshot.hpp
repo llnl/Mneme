@@ -240,7 +240,7 @@ class KernelInstancesCollection {
   const std::string KName;
   SourceFileInfo Source;
   bool CopySource;
-  bool KernelTiming;
+  KernelTimingType Timing;
 
 private:
   // Parse Proteus's serialized bitcode in a Mneme-owned LLVMContext and
@@ -300,8 +300,11 @@ public:
     Collection["Specializations"] = llvm::json::Array(KernelSpecializations);
     Source.addToJSON(Collection);
     Collection["TotalLaunches"] = TotalLaunches;
-    if (KernelTiming)
+    bool KernelTiming = Timing != KernelTimingType::Off;
+    if (KernelTiming) {
+      Collection["TimingSource"] = config_detail::getKernelTimingName(Timing);
       Collection["TotalTimeNs"] = TotalTimeNs;
+    }
     llvm::json::Object JSONInstances;
     for (auto &[hash, KI] : Instances)
       if (KI.isRecorded())
@@ -312,9 +315,9 @@ public:
 
   KernelInstancesCollection(const proteus::runtime::KernelMetadata &KInfo,
                             const KernelRecordingPolicy &Policy,
-                            bool CopySource, bool KernelTiming)
+                            bool CopySource, KernelTimingType Timing)
       : NumRecords(0), Policy(Policy), KName(KInfo.getName()),
-        CopySource(CopySource), KernelTiming(KernelTiming) {}
+        CopySource(CopySource), Timing(Timing) {}
 
   bool hasRecords() const { return NumRecords > 0; }
 
@@ -484,10 +487,10 @@ class RecordDatabase {
   llvm::DenseMap<const void *, std::optional<uint64_t>> CountedKernels;
   EpilogueSnapshotType EpilogueType;
   bool CopySource;
-  bool KernelTiming;
+  KernelTimingType Timing;
 
 public:
-  explicit RecordDatabase(bool KernelTiming) : KernelTiming(KernelTiming) {
+  explicit RecordDatabase(KernelTimingType Timing) : Timing(Timing) {
     const auto &Conf = Config::get();
 
     MnemeDirectory = Conf.getDataDirectory();
@@ -556,10 +559,9 @@ public:
       auto Policy = filterLaunch(StaticHash, KInfo.getName());
       if (!Policy)
         return nullptr;
-      It =
-          KernelRecords
-              .try_emplace(StaticHash, KInfo, *Policy, CopySource, KernelTiming)
-              .first;
+      It = KernelRecords
+               .try_emplace(StaticHash, KInfo, *Policy, CopySource, Timing)
+               .first;
       LOG_INFO("Created instance");
     }
     return &It->second;
