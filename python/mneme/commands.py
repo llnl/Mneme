@@ -452,14 +452,21 @@ class Record:
                 if filter_path is not None:
                     record_env["MNEME_FILTER_CONFIG"] = str(filter_path)
 
-                result = subprocess.run(cmd, env=record_env)
-                return result.returncode
-        except FileNotFoundError:
-            parser.error(f"Executable '{cmd[0]}' not found")
-        except PermissionError:
-            parser.error(f"Executable '{cmd[0]}' is not executable")
-        except OSError as e:
-            parser.error(f"Failed to execute '{cmd[0]}': {e.strerror}")
+                try:
+                    result = subprocess.run(cmd, env=record_env)
+                except FileNotFoundError:
+                    parser.error(f"Executable '{cmd[0]}' not found")
+                except PermissionError:
+                    parser.error(f"Executable '{cmd[0]}' is not executable")
+                except OSError as exc:
+                    parser.error(f"Failed to execute '{cmd[0]}': {exc.strerror}")
+        except OSError as exc:
+            parser.error(
+                f"Failed to manage temporary recording filter in "
+                f"'{record_db_dir}': {exc}"
+            )
+
+        return result.returncode
 
 
 class Config:
