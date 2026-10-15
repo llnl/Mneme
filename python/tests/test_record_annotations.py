@@ -115,8 +115,6 @@ def test_record_annotations_complex_cases(build_annotation_test_program, tmp_pat
             "record",
             "--record-db-dir",
             str(out_dir),
-            "-vass",
-            "2",
             "--filter-config",
             str(policy),
             "--",

@@ -34,18 +34,5 @@ inline std::string readSizedString(const char *&Buffer) {
   return Name;
 }
 
-template <typename T> std::string pointerToHexString(T *ptr) {
-  std::ostringstream oss;
-  oss << "0x" << std::hex << std::setw(sizeof(void *) * 2) << std::setfill('0')
-      << reinterpret_cast<std::uintptr_t>(ptr);
-  return oss.str();
-}
-
-template <typename T> T *hexStringToPointer(const std::string &HEXStr) {
-  uint64_t Addr = std::stoul(HEXStr, nullptr, 16);
-  // Cast the integer to void*
-  return reinterpret_cast<T *>(Addr);
-}
-
 } // namespace util
 } // namespace mneme

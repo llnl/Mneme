@@ -46,11 +46,11 @@ artifact.
 | Option                                  | Description                                                                                                               |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------            |
 | `-rdb`, `--record-db-dir`               | Path to a **existing** directory where recorded artifacts (metadata, LLVM IR, and device memory snapshots) will be stored |
-| `-vass`, `--virtual-address-space-size` | Size (in **GB**) of the virtual address space allocated by Mneme for recording                                            |
 | `-mr`, `--per-kernel-max-recordings` | Maximum captures per kernel in default mode; explicit CLI values override `MNEME_MAX_RECORDINGS`, otherwise default 4. Ignored with a warning in scoped/config modes. |
 | `-sr`, `--per-kernel-skip-recordings` | Launches to skip per kernel in default mode; explicit CLI values override `MNEME_SKIP_RECORDINGS`, otherwise default 0. Ignored with a warning in scoped/config modes. |
 | `--filter-mode` | `default` (default), `scoped`, or `config`. Selected from CLI flags, ignoring inherited mode variables. |
 | `--filter-config` | YAML/JSON filter file; implies `config` when the mode is omitted. Required in config mode. |
+| `--chunk-size` | Device memory mapped at once and shared by smaller allocations, e.g. `64MB` or `4GB`; default `4GB`. Sets `MNEME_CHUNK_SIZE`. See the notes below. |
 | `--epilogue-format`                     | Store epilogue snapshots as `diff`, `bytes`, or `best`; defaults to `diff`                                                        |
 | `-rr`, `--record-ranks`                 | Restrict recording to a comma-separated set of MPI ranks (e.g. `0`, `0,1,3`) or `all` for every rank. See *Multi-rank recording* below. |
 | `--copy-source`                         | Copy the source file that defines each recorded kernel into the record directory and record its MD5 checksum         |
@@ -80,13 +80,7 @@ mneme record -rdb record-dir -- ./vecAdd 1024
 mneme record -rdb record-dir --filter-config filter.yaml -- ./vecAdd 1024
 ```
 
-3. Increase the virtual address space used during recording:
-
-```bash
-mneme record -rdb record-dir -vass 64 -- ./vecAdd 1024
-```
-
-4. Record only on rank 0 of a 4-rank MPI run (this is also the default for distributed runs):
+3. Record only on rank 0 of a 4-rank MPI run (this is also the default for distributed runs):
 
 ```bash
 mneme record -rdb record-dir --record-ranks 0 -- mpirun -n 4 ./app
@@ -127,7 +121,10 @@ To override the default, pass `--record-ranks`:
     Mneme can save several instances of a kernel. Set `recording.defaults.max_records` in a filter file to limit distinct launch configurations. Repeated configurations remain deduplicated, even when their inputs change.
 
 !!! note
-    The virtual address space size should be chosen large enough to accommodate all device allocations performed by the application during kernel execution
+    Mneme no longer reserves a fixed virtual address space. It maps device memory on demand, in chunks at addresses it chooses. The `-vass` option is deprecated: it is still accepted, but ignored with a warning. Use `--chunk-size` instead.
+
+!!! note
+    Mneme packs allocations smaller than the chunk size into shared device mappings, since creating a mapping is slow. Larger allocations each get their own mapping. Set the chunk size with `--chunk-size` or the `MNEME_CHUNK_SIZE` environment variable, as bytes or with a suffix such as `64MB` or `4GB`. Suffixes `K`, `M`, `G` and `T` are powers of 2 and may be followed by `B` or `iB`, so `64M`, `64MB` and `64MiB` are all 64 MiB. It must be a multiple of 2 MiB, and the default is `4GB`. On CUDA, chunks are rounded up to a multiple of 32 MiB. If the device lacks memory for a full chunk, Mneme maps a smaller one.
 
 !!! note
     `--record-ranks` is equivalent to setting the environment variable

@@ -191,8 +191,6 @@ def test_recorded_execution_to_dict(with_source):
         llvm_files=["a.ll"],
         arg_names=["a0"],
         specializations=[True],
-        va_addr="0x100",
-        va_size=32,
         kernel_instances={"hashX": fake_instance},
         **source_kwargs,
     )
@@ -227,8 +225,6 @@ def test_recorded_execution_link_llvm_modules_calls_jit():
             ["a.ll", "b.ll"],
             ["x"],
             [True, False],
-            "0x100",
-            128,
             {},
         )
 
@@ -282,6 +278,7 @@ def test_recorded_execution_from_json_reconstructs(tmp_path, path_style, with_so
         "Modules": modules,
         "ArgNames": ["x"],
         "Specializations": [True, True, False],
+        # Written by older recordings; ignored.
         "VAddr": "ADDR",
         "VASize": 64,
         "instances": {
@@ -350,7 +347,7 @@ def test_recorded_execution_kernel_source_slices_recorded_copy(tmp_path):
     def make(**source_kwargs):
         source_kwargs.setdefault("source_copy", str(copy_path))
         return RecordedExecution(
-            "S", "K", "DK", ["a.ll"], ["x"], [True], "0x100", 32, {},
+            "S", "K", "DK", ["a.ll"], ["x"], [True], {},
             **source_kwargs,
         )
 
@@ -423,8 +420,6 @@ def test_to_json_relativizes_in_dir_files_only(tmp_path, layout):
         llvm_files=[str(mod_path)],
         arg_names=["x"],
         specializations=[True],
-        va_addr="0x100",
-        va_size=64,
         kernel_instances={"H": instance},
     )
 
@@ -432,6 +427,7 @@ def test_to_json_relativizes_in_dir_files_only(tmp_path, layout):
     r.to_json(str(json_path))
 
     written = json.loads(json_path.read_text())
+    assert "VAddr" not in written and "VASize" not in written
 
     if layout == "in_dir":
         assert written["Modules"] == ["mod.bc"]

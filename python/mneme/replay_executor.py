@@ -9,8 +9,8 @@ This module provides the execution backbone used by both:
 
 At a high level, an "experiment" in Mneme is:
   1) Load a recorded kernel execution (RecordedExecution + KernelInstance).
-  2) Reconstruct the recorded GPU memory state (prologue/epilogue snapshots)
-     into a managed virtual address space (PageManagerRef).
+  2) Reconstruct the recorded GPU memory state (prologue/epilogue snapshots),
+     mapping the prologue at its recorded device addresses.
   3) Link recorded LLVM IR modules into a single IR module suitable for replay.
   4) Apply optional IR specializations (arguments, launch dims, launch bounds).
   5) Run an optimization pipeline and generate a device object.
@@ -50,7 +50,6 @@ from mneme.llvm.buffer import MemBufferRef
 from mneme.llvm.module import ModuleRef, parse_assembly, parse_bitcode
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
-from mneme.page_manager import PageManagerRef
 from mneme.profile import init_profiler
 from mneme.proteus import jit
 from mneme.recorded_execution import RecordedExecution, MemStateRef
@@ -83,8 +82,8 @@ class BaseExecutor:
     * Load the recorded execution metadata (RecordedExecution) and select the
       target KernelInstance (kernel_descr).
     * Pin the current OS process to a specific GPU device (set_device()).
-    * Manage the replay address space and recorded snapshots:
-        - PageManagerRef selects/initializes the virtual address space.
+    * Manage the recorded snapshots:
+        - the prologue is mapped at its recorded device addresses.
         - prologue/epilogue snapshots are opened and later compared.
     * Provide a structured pipeline that takes IR -> object -> execution:
         - _preprocess_ir(): apply specialization transforms and compute a variant hash
@@ -102,7 +101,7 @@ class BaseExecutor:
         with executor:
             res = executor.execute(...)
 
-    The context manager ensures GPU memory state (snapshots + page manager) is
+    The context manager ensures GPU memory state (snapshots) is
     opened exactly once and released even when execution raises.
 
     Notes / invariants
@@ -144,7 +143,6 @@ class BaseExecutor:
         self._epilogue = None
         self._prologue = None
         self.noop_verifies = False
-        self._page_manager = None
         self._iterations = iterations
         self._warmup = warmup
         self.num_devices = get_device_count()
@@ -155,10 +153,6 @@ class BaseExecutor:
         jit.register_pass_plugin(MNEME_PASS_PLUGIN_LIB)
 
     def open(self):
-        # Note the 'executor' allocates all resources and picks address space.
-        self._page_manager = PageManagerRef(
-            self.device_id, self.records.va_addr, self.records.va_size
-        )
         self._prologue = self.kernel_descr.prologue.open()
         self._epilogue = self.kernel_descr.epilogue.open()
         # No kernel has run yet, so this asks whether doing nothing would verify.
@@ -180,9 +174,6 @@ class BaseExecutor:
         if self._prologue is not None:
             self._prologue.close()
             self._prologue = None
-        if self._page_manager is not None:
-            self._page_manager.close()
-            self._page_manager = None
 
     def __enter__(self):
         return self.open()
@@ -668,7 +659,7 @@ class TuneWorker(BaseExecutor):
 
     ``TuneWorker`` is a concrete :class:`BaseExecutor` specialization intended to run
     inside a dedicated worker process. It owns the GPU affinity, prologue/epilogue
-    state, page manager, and JIT pipeline required to compile and replay a recorded
+    state, and JIT pipeline required to compile and replay a recorded
     kernel under a given :class:`ExperimentConfiguration`.
 
     A worker process typically:

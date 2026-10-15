@@ -79,7 +79,7 @@ flowchart TB
 
     subgraph replay["<b>③ Replay & Tuning — Runtime</b>"]
         direction TB
-        load["<b>Load Memory State &<br/>Initialize Device Virtual Address Space</b>"]:::process
+        load["<b>Load Memory State at<br/>Recorded Device Addresses</b>"]:::process
         select["<b>Select Kernel Configuration<br/>(threads, blocks, launch bounds, optimizations)</b>"]:::process
         execver["<b>Execute & Verify Kernel</b>"]:::process
         store["<b>Store Result in DB</b>"]:::process

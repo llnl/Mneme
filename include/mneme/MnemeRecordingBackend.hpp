@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mneme/MnemeConfig.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeMemory.hpp"
@@ -34,14 +35,16 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   // release them with the device free, which must then be forwarded.
   llvm::DenseSet<void *> PassthroughAllocs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
+  std::unique_ptr<ChunkAllocator<VendorTypes>> Packer;
+  bool WarnedUnpacked = false;
 
   // NOTE: We only keep track of the first time we set the device id. Once we
   // create the allocator we assume that the allocations go to the same device.
   int DeviceID = -1;
 
-  void initializePageManagerIfNeeded() {
+  PageManager<VendorTypes> &getOrCreatePageManager() {
     if (PM)
-      return;
+      return *PM;
 
     // NOTE: We need this arch cause internally we initialize the device.
     // FIXME: We need to have a DeviceTrait function to initialize the GPU
@@ -50,7 +53,23 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     LOG_DEBUG("Initializing system {}", arch);
     if (DeviceID == -1)
       Runtime.origGetDeviceID(&DeviceID);
-    PM = initializePageManager<VendorTypes>(DeviceID);
+    PM = std::make_unique<PageManager<VendorTypes>>();
+    Packer = std::make_unique<ChunkAllocator<VendorTypes>>(
+        *PM, DeviceID, Config::get().ChunkSize);
+    return *PM;
+  }
+
+  // The caller must first wait for work that may still use the memory.
+  DeviceError_t releaseBlob(void *ptr) {
+    auto It = AllocatedBlobs.find(ptr);
+    auto &Blob = It->second;
+    LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
+              Blob.getSize(), Blob.getActualSize());
+    auto ret = Blob.release();
+    if (Packer->packs(Blob.getSize()))
+      Packer->release(ptr, Blob.getActualSize());
+    AllocatedBlobs.erase(It);
+    return ret;
   }
 
 public:
@@ -99,17 +118,36 @@ public:
       return ret;
     }
 
-    initializePageManagerIfNeeded();
+    auto &Pages = getOrCreatePageManager();
 
-    auto [Addr, ReservedSize] = PM->allocateAddr(size, nullptr);
-    MnemeMemoryBlob<VendorTypes> MemBlob(ReservedSize,
-                                         reinterpret_cast<void *>(Addr), size);
-    auto ret = MemBlob.map(reinterpret_cast<void *>(Addr), ReservedSize, size);
-    *ptr = MemBlob.ptr();
-    AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
+    MnemeMemoryBlob<VendorTypes> MemBlob;
+    if (Packer->packs(size)) {
+      uint64_t ActualSize = Packer->actualSize(size);
+      void *Addr = Packer->allocate(ActualSize);
+      if (Addr) {
+        MemBlob = MnemeMemoryBlob<VendorTypes>(ActualSize, nullptr, size);
+        MemBlob.mapInto(Addr);
+      }
+    } else {
+      if (!WarnedUnpacked) {
+        LOG_WARN("Mapping {}-byte allocation separately; raise "
+                 "MNEME_CHUNK_SIZE to pack it",
+                 size);
+        WarnedUnpacked = true;
+      }
+      Pages.mapAddr(size, [&](const auto &R) {
+        MemBlob = MnemeMemoryBlob<VendorTypes>(R.Size, nullptr, size);
+        return MemBlob.mapFixed(R.Addr, R.Addr, R.Size, R.Align, DeviceID);
+      });
+    }
+
+    *ptr = MemBlob.getBlobAddr();
+    if (!*ptr)
+      return MnemeDeviceRT::DeviceOutOfMemory;
     LOG_DEBUG("Intercepted Device Malloc PTR:{} SIZE:{} ACTUALSIZE:{}", *ptr,
-              size, ReservedSize);
-    return ret;
+              size, MemBlob.getActualSize());
+    AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
+    return MnemeDeviceRT::DeviceSuccess;
   }
 
   DeviceError_t rtManagedMalloc(void **ptr, size_t size,
@@ -152,13 +190,14 @@ public:
                    ptr);
       LOG_FATAL("Free address that is not being allocated through Mneme\n");
     }
-    PM->releaseAddr(AllocatedBlobs[ptr].getActualSize(), ptr);
-    auto ret = AllocatedBlobs[ptr].release();
-    LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
-              AllocatedBlobs[ptr].getSize(),
-              AllocatedBlobs[ptr].getActualSize());
-    AllocatedBlobs.erase(ptr);
-    return ret;
+    // Like hipFree, wait for kernels that may still use the memory, and report
+    // their errors.
+    auto ret = MnemeDeviceRT::DeviceSynchronize();
+    if (ret != MnemeDeviceRT::DeviceSuccess) {
+      LOG_WARN("Not freeing PTR:{}: device synchronize failed", ptr);
+      return ret;
+    }
+    return releaseBlob(ptr);
   }
 
   DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
@@ -171,7 +210,7 @@ public:
         LOG_WARN("Not freeing PTR:{}: stream synchronize failed", ptr);
         return ret;
       }
-      return rtFree(ptr);
+      return releaseBlob(ptr);
     }
     if (ptr == nullptr || PassthroughAllocs.erase(ptr))
       LOG_DEBUG("Forwarding async free of vendor runtime allocation PTR:{}",
@@ -192,7 +231,7 @@ public:
   DeviceError_t rtLaunchKernel(const void *func, dim3 &GridDim, dim3 &BlockDim,
                                void **Args, size_t SharedMem,
                                DeviceStream_t Stream) override {
-    initializePageManagerIfNeeded();
+    getOrCreatePageManager();
 
     if (Config::get().RecordingFilterMode == FilterMode::Scoped &&
         !detail::scopeAllowsRecording(func))
@@ -215,8 +254,7 @@ public:
     LOG_INFO("Hash value is {}", KInfo.getStaticHash());
 
     auto RecordAction = DB.takeSnapshot<VendorTypes>(
-        PM->getVAStart(), PM->getTotalVASize(), KInfo, AllocatedBlobs, GridDim,
-        BlockDim, Args, SharedMem, Stream);
+        KInfo, AllocatedBlobs, GridDim, BlockDim, Args, SharedMem, Stream);
     if (RecordAction)
       LOG_INFO("Successfully Recorded Prologue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
@@ -273,8 +311,8 @@ public:
       }
     }
 
-    if (PM)
-      PM.reset();
+    Packer.reset();
+    PM.reset();
 
     LOG_DEBUG("RecordingBackend destructor complete");
   }
