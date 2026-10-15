@@ -26,15 +26,12 @@ record_scope::~record_scope() noexcept {
 }
 
 bool detail::scopeAllowsRecording(const void *Kernel) noexcept {
-  bool Matched = false;
   for (auto *Scope = record_scope::Top; Scope; Scope = Scope->Previous) {
     if (Scope->Kernel && Scope->Kernel != Kernel)
       continue;
-    if (!Scope->Enabled)
-      return false;
-    Matched = true;
+    return Scope->Enabled;
   }
-  return Matched;
+  return false;
 }
 
 } // namespace mneme

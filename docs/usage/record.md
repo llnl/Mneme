@@ -50,8 +50,18 @@ foo<<<grid, block>>>(data); // This does not record, since `scope` is out-of-sco
 Kernel selectors use function addresses, not names. Template specializations
 such as `foo<double>` are supported; overloaded functions require an explicit
 function-pointer cast. Null pointers throw `std::invalid_argument`.
-At least one active scope must match a launch, and **every matching scope must
-be true**. 
+The **innermost matching scope** decides whether a launch is eligible for
+recording. A scope without a kernel matches every kernel; a kernel-specific scope
+matches only its selected kernel. Without a matching scope, the launch is not recorded.
+
+```cpp
+mneme::record_scope outer_scope(foo, false);
+{
+  mneme::record_scope inner_scope(foo, true);
+  foo<<<grid, block>>>(data);  // recorded
+}
+foo<<<grid, block>>>(data);  // not recorded
+```
 
 Scopes cover host launch submission on the calling thread, including ordinary
 helper calls. Worker threads need their own scopes. Scope entry and exit do
