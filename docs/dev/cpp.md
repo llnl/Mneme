@@ -103,7 +103,11 @@ This procedure uses a change to the diff layout as the example.
 
 1. Add `DiffReaderV2` after `DiffReaderV1`. Give it
    `static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 2};` and a
-   `read()` that decodes the new payload. Keep `DiffReaderV1`.
+   `read()` that decodes the new payload. Keep `DiffReaderV1`. Every
+   reader derives directly from `SnapshotReader`, never from another
+   version's reader. Build `read()` from the section helpers in the header.
+   For a section whose encoding changes, add a new helper. Do not change a
+   helper that an older reader calls.
 2. Add `entry<DiffReaderV2<VendorTypes>>()` to the table in
    `SnapshotFormatRegistry::table`.
 3. Change `DiffWriter::header()` to return
