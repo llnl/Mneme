@@ -77,8 +77,16 @@ int main(int Argc, char **Argv) {
       record_scope Suppress(foo<int>, false);
       advance_solution(Data, Iter, Grid, false);
     } else if (Scenario == "blocked") {
+      record_scope Outer(true);
+      record_scope Inner(false);
+      advance_solution(Data, Iter, Grid, false);
+    } else if (Scenario == "inner-wildcard") {
       record_scope Outer(false);
-      record_scope Inner(true);
+      record_scope Inner(Selected);
+      advance_solution(Data, Iter, Grid, false);
+    } else if (Scenario == "inner-kernel") {
+      record_scope Outer(foo<int>, false);
+      record_scope Inner(foo<int>, Selected);
       advance_solution(Data, Iter, Grid, false);
     } else if (Scenario == "none") {
       advance_solution(Data, Iter, Grid, false);

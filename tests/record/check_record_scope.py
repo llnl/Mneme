@@ -104,6 +104,8 @@ def main():
         ("overload", "overload", {"bar": [5]}, {}),
         ("nested", "nested", {"bar": [5]}, {}),
         ("blocked", "blocked", {}, {}),
+        ("inner-wildcard", "inner-wildcard", both, {}),
+        ("inner-kernel", "inner-kernel", {"foo": [5]}, {}),
         ("no-scopes", "none", {}, {}),
         ("dedup", "sampling", {"foo": [3], "bar": [3]}, {}),
         ("scoped-limit", "limit", {"foo": [3, 4, 5, 6], "bar": [3, 4, 5, 6]}, {}),

@@ -46,8 +46,13 @@ int main() {
       record_scope Suppress(foo, false);
       expect(!scopeAllowsRecording(Foo) && scopeAllowsRecording(Bar),
              "Kernel-specific false scope must suppress only its kernel");
-      record_scope Inner(foo, true);
-      expect(!scopeAllowsRecording(Foo), "True cannot override matching false");
+      {
+        record_scope Inner(foo, true);
+        expect(scopeAllowsRecording(Foo),
+               "Innermost matching scope must override outer false");
+      }
+      expect(!scopeAllowsRecording(Foo),
+             "Leaving inner scope must restore outer false");
     }
 
     expect(scopeAllowsRecording(Foo), "Leaving inner scope must restore state");
@@ -87,7 +92,22 @@ int main() {
   {
     record_scope Outer(false);
     record_scope Inner(foo, true);
-    expect(!scopeAllowsRecording(Foo), "Outer false wildcard must dominate");
+    expect(scopeAllowsRecording(Foo) && !scopeAllowsRecording(Bar),
+           "Inner kernel scope must override wildcard only for its kernel");
+  }
+
+  {
+    record_scope Outer(foo, false);
+    record_scope Inner(true);
+    expect(scopeAllowsRecording(Foo) && scopeAllowsRecording(Bar),
+           "Inner wildcard must override outer kernel scope");
+  }
+
+  {
+    record_scope Outer(false);
+    record_scope Inner(true);
+    expect(scopeAllowsRecording(Foo) && scopeAllowsRecording(Bar),
+           "Inner wildcard must override outer wildcard");
   }
 
   {
