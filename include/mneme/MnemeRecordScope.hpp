@@ -10,10 +10,10 @@ bool scopeAllowsRecording(const void *Kernel) noexcept;
 
 class record_scope {
 public:
-  explicit record_scope(bool Enabled) noexcept;
+  [[nodiscard]] explicit record_scope(bool Enabled) noexcept;
 
   template <typename Return, typename... Args>
-  record_scope(Return (*Kernel)(Args...), bool Enabled)
+  [[nodiscard]] record_scope(Return (*Kernel)(Args...), bool Enabled)
       : record_scope(reinterpret_cast<const void *>(Kernel), Enabled) {}
 
   ~record_scope() noexcept;
@@ -24,7 +24,7 @@ public:
   record_scope &operator=(record_scope &&) = delete;
 
 private:
-  record_scope(const void *Kernel, bool Enabled);
+  [[nodiscard]] record_scope(const void *Kernel, bool Enabled);
   friend bool detail::scopeAllowsRecording(const void *Kernel) noexcept;
 
   static thread_local record_scope *Top;
