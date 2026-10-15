@@ -31,6 +31,12 @@ int main() {
   static_assert(!std::is_move_assignable_v<record_scope>);
   static_assert(std::is_nothrow_destructible_v<record_scope>);
 
+  static_assert(!std::is_constructible_v<record_scope, decltype(foo) &>);
+  static_assert(!std::is_constructible_v<record_scope, decltype(&foo)>);
+  static_assert(!std::is_constructible_v<record_scope, int *>);
+  static_assert(std::is_constructible_v<record_scope, bool>);
+  static_assert(std::is_constructible_v<record_scope, decltype(&foo), bool>);
+
   auto Foo = reinterpret_cast<const void *>(foo);
   auto Bar = reinterpret_cast<const void *>(bar);
   expect(!scopeAllowsRecording(Foo), "No scope must reject launches");

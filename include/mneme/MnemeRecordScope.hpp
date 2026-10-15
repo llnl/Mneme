@@ -12,6 +12,8 @@ class record_scope {
 public:
   [[nodiscard]] explicit record_scope(bool Enabled) noexcept;
 
+  template <typename T> record_scope(T *) = delete;
+
   template <typename Return, typename... Args>
   [[nodiscard]] record_scope(Return (*Kernel)(Args...), bool Enabled)
       : record_scope(reinterpret_cast<const void *>(Kernel), Enabled) {}
