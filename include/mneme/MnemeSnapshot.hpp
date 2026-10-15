@@ -509,8 +509,6 @@ public:
         MnemeDirectory, KInfo, DeviceMemory, GridDim, BlockDim, Args, SharedMem,
         Stream, EpilogueType);
   }
-
-  const std::string getDir() const { return MnemeDirectory.string(); }
 };
 
 } // namespace mneme
