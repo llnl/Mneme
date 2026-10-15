@@ -62,5 +62,5 @@ int main() {
 // CHECK-RR: DemangledName: annotation_kernel(float*, int)
 // CHECK-RR: NumModules: 1
 // CHECK-RR: NumInstances: 1
-// CHECK-RR: BlobAnnotation: threshold=0.001 threshold_kind=1 builtin=9 norm=3 tag=test_ptr
+// CHECK-RR: Compare: DType=f32 Threshold=0.001 ThresholdKind=relative Norm=linf Tag=test_ptr
 // clang-format on

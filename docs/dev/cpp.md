@@ -10,9 +10,9 @@ before running `mkdocs build` or `mkdocs serve`.
 ## Annotation API (`mneme/MnemeAnnotation.hpp`)
 
 Mneme ships a lightweight C++ header that lets application code attach
-verification metadata to device pointers.  The metadata is recorded
-alongside the device memory snapshot and consumed during replay to
-perform tolerance-aware comparison.
+verification metadata to device pointers.  The metadata is recorded in
+the record database and consumed during replay to perform
+tolerance-aware comparison.
 
 ### Include and link
 
@@ -71,9 +71,9 @@ One reader class decodes one on-disk layout. The reader class holds its
 
 ```cpp
 template <DeviceVendors VendorTypes>
-class DiffReaderV1 : public SnapshotReader<VendorTypes> {
+class DiffReaderV2 : public SnapshotReader<VendorTypes> {
 public:
-  static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 1};
+  static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 2};
   ...
 };
 ```
@@ -101,23 +101,23 @@ must continue to open. `ctest -R Serialize` checks this.
 
 This procedure uses a change to the diff layout as the example.
 
-1. Add `DiffReaderV2` after `DiffReaderV1`. Give it
-   `static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 2};` and a
-   `read()` that decodes the new payload. Keep `DiffReaderV1`. Every
+1. Add `DiffReaderV3` next to `DiffReaderV2`. Give it
+   `static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 3};` and a
+   `read()` that decodes the new payload. Keep `DiffReaderV2`. Every
    reader derives directly from `SnapshotReader`, never from another
    version's reader. Build `read()` from the section helpers in the header.
    For a section whose encoding changes, add a new helper. Do not change a
    helper that an older reader calls.
-2. Add `entry<DiffReaderV2<VendorTypes>>()` to the table in
+2. Add `entry<DiffReaderV3<VendorTypes>>()` to the table in
    `SnapshotFormatRegistry::table`.
 3. Change `DiffWriter::header()` to return
-   `DiffReaderV2<VendorTypes>::Layout`. Change `DiffWriter::writePayload` to
+   `DiffReaderV3<VendorTypes>::Layout`. Change `DiffWriter::writePayload` to
    write the new layout.
 4. Extend `tests/unit_tests/ReadWriteSnapshot.cpp` so that the round trip
    covers the new layout. Keep a fixture or a hand-built buffer in the old
    layout so that the old reader stays covered.
 
 The version number appears only in the new reader's `Layout`. The compiler
-cannot detect a missing step 2. In that case the writer stamps version 2,
+cannot detect a missing step 2. In that case the writer stamps version 3,
 the registry has no row for it, and the snapshot fails to open with
 `Unsupported Mneme snapshot format`.

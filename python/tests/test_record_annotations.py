@@ -1,98 +1,14 @@
 import json
-import struct
-from pathlib import Path
+
+import pytest
 
 from mneme.cli import main as mneme_main
 
 
-# Enum values from include/mneme/MnemeAnnotation.hpp
-BUILTIN_F64 = 10
-THRESHOLD_ABSOLUTE = 0
-THRESHOLD_RELATIVE = 1
-NORM_L2 = 2
-NORM_LINF = 3
-
-
-# The container prefix SnapshotHeader writes. Older recordings have none.
-CONTAINER_MAGIC = b"MNEMESNP"
-CONTAINER_SIZE = 16
-
-
-def _payload_offset(data: bytes) -> int:
-    if len(data) >= CONTAINER_SIZE and data[:8] == CONTAINER_MAGIC:
-        return CONTAINER_SIZE
-    return 0
-
-
-def _parse_prologue_blob_metadata(prologue_path: Path):
-    data = prologue_path.read_bytes()
-    off = _payload_offset(data)
-
-    def read_u64():
-        nonlocal off
-        v = struct.unpack_from("<Q", data, off)[0]
-        off += 8
-        return v
-
-    def read_u8():
-        nonlocal off
-        v = struct.unpack_from("B", data, off)[0]
-        off += 1
-        return v
-
-    def read_f64():
-        nonlocal off
-        v = struct.unpack_from("<d", data, off)[0]
-        off += 8
-        return v
-
-    def skip(n):
-        nonlocal off
-        off += n
-
-    # globals
-    for _ in range(read_u64()):
-        name_len = read_u64()
-        skip(name_len)
-        var_size = read_u64()
-        skip(8)  # dev addr
-        skip(var_size)
-
-    out = []
-    # blobs
-    for _ in range(read_u64()):
-        read_u64()  # actual size
-        blob_size = read_u64()
-        skip(8)  # dev addr
-        skip(blob_size)
-
-        builtin = read_u8()
-        threshold = read_f64()
-        threshold_kind = read_u8()
-        norm = read_u8()
-        tag_len = read_u64()
-        tag = None
-        if tag_len:
-            tag = data[off : off + tag_len].decode("utf-8", errors="replace")
-            skip(tag_len)
-
-        out.append(
-            {
-                "builtin": builtin,
-                "threshold": threshold,
-                "threshold_kind": threshold_kind,
-                "norm": norm,
-                "tag": tag,
-            }
-        )
-
-    return out
-
-
-def _find_tagged(mds, tag):
-    for md in mds:
-        if md["tag"] == tag:
-            return md
+def _find_tagged(entries, tag):
+    for entry in entries:
+        if entry.get("Tag") == tag:
+            return entry
     return None
 
 
@@ -100,11 +16,8 @@ def _approx_eq(a, b, eps=1e-12):
     return abs(a - b) <= eps
 
 
-def test_record_annotations_complex_cases(build_annotation_test_program, tmp_path):
-    binary = build_annotation_test_program["binary"]
+def _record(binary, out_dir):
     assert binary.exists(), "vecAddAnnotations binary must exist"
-
-    out_dir = tmp_path / "record_annotations_out"
     out_dir.mkdir()
 
     policy = tmp_path / "filter.json"
@@ -128,12 +41,19 @@ def test_record_annotations_complex_cases(build_annotation_test_program, tmp_pat
 
     json_records = list(out_dir.glob("*.json"))
     assert len(json_records) == 1, "Expected one record JSON"
+    return json_records[0]
 
-    rr = json.loads(json_records[0].read_text())
+
+def test_record_annotations_complex_cases(build_annotation_test_program, tmp_path):
+    record = _record(
+        build_annotation_test_program["binary"], tmp_path / "record_annotations_out"
+    )
+
+    rr = json.loads(record.read_text())
     instances = rr["instances"]
     assert len(instances) >= 2, "Expected at least two dynamic kernel instances"
 
-    record_dir = json_records[0].resolve().parent
+    record_dir = record.resolve().parent
 
     saw_in_vec = False
     saw_out_loose = False
@@ -145,32 +65,115 @@ def test_record_annotations_complex_cases(build_annotation_test_program, tmp_pat
         assert prologue.exists(), f"Missing prologue snapshot: {prologue}"
         assert epilogue.exists(), f"Missing epilogue snapshot: {epilogue}"
 
-        all_blob_md = _parse_prologue_blob_metadata(prologue)
+        all_blob_md = instance["Compare"]
 
         in_md = _find_tagged(all_blob_md, "in_vec")
         if in_md is not None:
-            assert in_md["builtin"] == BUILTIN_F64
-            assert _approx_eq(in_md["threshold"], 0.125)
-            assert in_md["threshold_kind"] == THRESHOLD_ABSOLUTE
-            assert in_md["norm"] == NORM_L2
+            assert in_md["DType"] == "f64"
+            assert _approx_eq(in_md["Threshold"], 0.125)
+            assert in_md["ThresholdKind"] == "absolute"
+            assert in_md["Norm"] == "l2"
             saw_in_vec = True
 
         loose_md = _find_tagged(all_blob_md, "out_loose")
         if loose_md is not None:
-            assert loose_md["builtin"] == BUILTIN_F64
-            assert _approx_eq(loose_md["threshold"], 0.01)
-            assert loose_md["threshold_kind"] == THRESHOLD_RELATIVE
-            assert loose_md["norm"] == NORM_LINF
+            assert loose_md["DType"] == "f64"
+            assert _approx_eq(loose_md["Threshold"], 0.01)
+            assert loose_md["ThresholdKind"] == "relative"
+            assert loose_md["Norm"] == "linf"
             saw_out_loose = True
 
         tight_md = _find_tagged(all_blob_md, "out_tight")
         if tight_md is not None:
-            assert tight_md["builtin"] == BUILTIN_F64
-            assert _approx_eq(tight_md["threshold"], 0.005)
-            assert tight_md["threshold_kind"] == THRESHOLD_RELATIVE
-            assert tight_md["norm"] == NORM_LINF
+            assert tight_md["DType"] == "f64"
+            assert _approx_eq(tight_md["Threshold"], 0.005)
+            assert tight_md["ThresholdKind"] == "relative"
+            assert tight_md["Norm"] == "linf"
             saw_out_tight = True
 
-    assert saw_in_vec, "Did not find in_vec annotation in any prologue blob"
-    assert saw_out_loose, "Did not find out_loose annotation in any prologue blob"
-    assert saw_out_tight, "Did not find out_tight annotation in any prologue blob"
+    assert saw_in_vec, "Did not find in_vec annotation in any instance"
+    assert saw_out_loose, "Did not find out_loose annotation in any instance"
+    assert saw_out_tight, "Did not find out_tight annotation in any instance"
+
+
+# A policy loose enough that the input of the first launch, whose output
+# buffer is tagged out_loose, already matches its output.
+LOOSE_POLICY = {"Tags": {"out_loose": {"ThresholdKind": "absolute", "Threshold": 1e9}}}
+MISSING_TAG_POLICY = {"Tags": {"missing": {"Threshold": 1.0}}}
+
+
+def _record_loose_instance(binary, out_dir):
+    record = _record(binary, out_dir)
+    instances = json.loads(record.read_text())["instances"]
+    record_id = next(
+        rid
+        for rid, instance in instances.items()
+        if _find_tagged(instance["Compare"], "out_loose") is not None
+    )
+    return record, record_id
+
+
+def test_compare_policy_overrides_recorded_tolerance(
+    build_annotation_test_program, tmp_path, capsys
+):
+    record, record_id = _record_loose_instance(
+        build_annotation_test_program["binary"], tmp_path / "record_out"
+    )
+    policy = tmp_path / "policy.json"
+
+    def replay(*args):
+        rc = mneme_main(["replay", "-rdb", str(record), "-rid", record_id, *args, "default<O0>"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        report, _ = json.JSONDecoder().raw_decode(out[out.index('{\n  "Replay-config"'):])
+        return report["Result"]
+
+    result = replay()
+    assert result["verified"]
+    assert not result["noop_verifies"]
+
+    policy.write_text(json.dumps(LOOSE_POLICY))
+    result = replay("--compare-policy", str(policy))
+    assert result["verified"]
+    assert result["noop_verifies"]
+
+    policy.write_text(json.dumps(MISSING_TAG_POLICY))
+    with pytest.raises(ValueError, match="no blob has tag 'missing'"):
+        replay("--compare-policy", str(policy))
+
+
+def test_tune_verifies_with_compare_policy(
+    build_annotation_test_program, tmp_path, capsys
+):
+    record, record_id = _record_loose_instance(
+        build_annotation_test_program["binary"], tmp_path / "record_out"
+    )
+    policy = tmp_path / "policy.json"
+
+    def tune(results_dir):
+        return mneme_main(
+            [
+                "tune",
+                "-rdb",
+                str(record),
+                "-rid",
+                record_id,
+                "--compare-policy",
+                str(policy),
+                "--baseline-only",
+                "--trials",
+                "1",
+                "--results-dir",
+                str(results_dir),
+                "--no-proteus-output",
+                "--quiet",
+            ]
+        )
+
+    policy.write_text(json.dumps(LOOSE_POLICY))
+    assert tune(tmp_path / "tune") == 0
+    assert json.loads((tmp_path / "tune" / "summary.json").read_text())["noop_verifies"]
+
+    policy.write_text(json.dumps(MISSING_TAG_POLICY))
+    assert tune(tmp_path / "tune_missing") == 3
+    assert "no blob has tag 'missing'" in capsys.readouterr().out

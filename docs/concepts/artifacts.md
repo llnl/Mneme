@@ -81,9 +81,10 @@ While global variables are identified by:
 The memory state provides realistic and representative inputs for
 replay and serves as the reference for correctness validation.
 
-Each memory blob in the snapshot may also carry **annotation metadata**
-(data type, error threshold, aggregation norm, and an optional tag)
-attached by the application via `mneme::annotate()`.  This metadata
+Each memory blob may also have **annotation metadata** (data type,
+error threshold, aggregation norm, and an optional tag) attached by the
+application via `mneme::annotate()`, recorded per kernel instance in the
+record database.  This metadata
 defines how Mneme judges equivalence between the replayed output and
 the recorded epilogue during verification, making it part of the
 artifact contract rather than optional debug information.

@@ -1,10 +1,13 @@
 import hashlib
 import json
+import re
 import tempfile
 from unittest.mock import patch, MagicMock
 import pytest
 
 from mneme.recorded_execution import (
+    ComparePolicy,
+    EXACT_COMPARE,
     MemStateRef,
     RecordedExecution,
     SnapshotType,
@@ -139,30 +142,51 @@ def test_memstate_context_manager_calls_open_and_close():
             fake.MnemePy_DisposeMemState.assert_called_once_with("ST")
 
 
-def test_memstate_equality_uses_ffi_compare():
-    with patch("mneme.recorded_execution.Path.exists", return_value=True):
-        with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.side_effect = ["A", "B"]
-            fake.MnemePy_CompareMemState.return_value = True
-
-            m1 = MemStateRef("p1.pro", "k", SnapshotType.PROLOGUE).open()
-            m2 = MemStateRef("p2.pro", "k", SnapshotType.PROLOGUE).open()
-
-            assert m1 == m2
-            fake.MnemePy_CompareMemState.assert_called_once_with("A", "B")
+RULES = {
+    0x1000: dict(EXACT_COMPARE, Tag=None),
+    0x2000: dict(EXACT_COMPARE, DType="f64", Threshold=0.5, Norm="l2", Tag="out"),
+}
 
 
-def test_memstate_matches_unlaunched_uses_ffi():
+@pytest.mark.parametrize(
+    ("method", "ffi_fn"),
+    [("matches", "MnemePy_CompareMemState"), ("matches_unlaunched", "MnemePy_MatchesUnlaunched")],
+)
+def test_memstate_matches_passes_rules_to_ffi(method, ffi_fn):
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
             fake.MnemePy_initializeMemState.side_effect = ["P", "E"]
-            fake.MnemePy_MatchesUnlaunched.return_value = True
+            getattr(fake, ffi_fn).return_value = True
 
             pro = MemStateRef("p.pro", "k", SnapshotType.PROLOGUE).open()
             epi = MemStateRef("e.epi", "k", SnapshotType.EPILOGUE).open()
 
-            assert pro.matches_unlaunched(epi)
-            fake.MnemePy_MatchesUnlaunched.assert_called_once_with("P", "E")
+            with patch.object(epi, "compare_metadata", return_value=RULES):
+                assert getattr(pro, method)(epi, RULES)
+            (p, e, entries, count), _ = getattr(fake, ffi_fn).call_args
+            assert (p, e, count) == ("P", "E", 2)
+            got = [
+                (x.DevAddr, x.DType, x.Threshold, x.ThresholdKind, x.Norm, x.Tag) for x in entries
+            ]
+            assert got == [(0x1000, 0, 0.0, 0, 0, None), (0x2000, 10, 0.5, 0, 2, b"out")]
+
+
+@pytest.mark.parametrize(
+    ("method", "ffi_fn"),
+    [("matches", "MnemePy_CompareMemState"), ("matches_unlaunched", "MnemePy_MatchesUnlaunched")],
+)
+def test_memstate_matches_rejects_missing_rule(method, ffi_fn):
+    with patch("mneme.recorded_execution.Path.exists", return_value=True):
+        with patch("mneme.recorded_execution.ffi.lib") as fake:
+            fake.MnemePy_initializeMemState.side_effect = ["P", "E"]
+
+            pro = MemStateRef("p.pro", "k", SnapshotType.PROLOGUE).open()
+            epi = MemStateRef("e.epi", "k", SnapshotType.EPILOGUE).open()
+
+            with patch.object(epi, "compare_metadata", return_value=RULES):
+                with pytest.raises(ValueError, match="No comparison rule for blob 0x2000"):
+                    getattr(epi, method)(pro, {0x1000: RULES[0x1000]})
+            getattr(fake, ffi_fn).assert_not_called()
 
 
 # ======================================================================
@@ -441,3 +465,98 @@ def test_to_json_relativizes_in_dir_files_only(tmp_path, layout):
         assert written["Modules"] == [str(mod_path)]
         assert written["instances"]["H"]["Prologue"] == str(pro_path)
         assert written["instances"]["H"]["Epilogue"] == str(epi_path)
+
+
+def _instance_with_compare(tmp_path, compare):
+    for name in ("k.pro", "k.epi"):
+        (tmp_path / name).touch()
+    return RecordedExecution.KernelInstance(
+        "S", "H", "K", [], 0, dim3(1, 1, 1), dim3(1, 1, 1), [], 1,
+        str(tmp_path / "k.pro"), str(tmp_path / "k.epi"), compare=compare,
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "error"),
+    [
+        ({"DevAddr": "0x1000", "Norm": "l3"}, "record Compare entry 0x1000: bad Norm 'l3'"),
+        ({"DevAddr": "0x1000", "Tolerance": 1.0}, "record Compare entry 0x1000: unknown key 'Tolerance'"),
+        ({"DevAddr": "0x1000", "Threshold": "big"}, "record Compare entry 0x1000: bad Threshold 'big'"),
+        ({"DevAddr": "zz", "Threshold": 1.0}, "record Compare entry: bad DevAddr 'zz'"),
+        ({"Threshold": 1.0}, "record Compare entry: bad DevAddr None"),
+    ],
+)
+def test_compare_rules_rejects_bad_recorded_entries(tmp_path, entry, error):
+    inst = _instance_with_compare(tmp_path, [entry])
+    blobs = {0x1000: dict(EXACT_COMPARE, Tag=None)}
+    with patch.object(inst.epilogue, "compare_metadata", return_value=blobs):
+        with patch.object(inst.epilogue, "close") as close:
+            with pytest.raises(ValueError, match=re.escape(error)):
+                inst.compare_rules()
+    close.assert_called_once()
+
+
+def test_compare_rules_fills_missing_recorded_fields_bytewise(tmp_path):
+    inst = _instance_with_compare(tmp_path, [{"DevAddr": "0x1000", "Threshold": 0.5}])
+    blobs = {0x1000: dict(EXACT_COMPARE, Tag=None), 0x2000: dict(EXACT_COMPARE, Tag=None)}
+    with patch.object(inst.epilogue, "compare_metadata", return_value=blobs):
+        assert inst.compare_rules() == {
+            0x1000: dict(EXACT_COMPARE, Threshold=0.5, Tag=None),
+            0x2000: dict(EXACT_COMPARE, Tag=None),
+        }
+
+
+# ======================================================================
+#                        ComparePolicy Tests
+# ======================================================================
+
+def test_compare_policy_merges_fields_by_precedence():
+    exact = {"DType": "u8", "Threshold": 0.0, "ThresholdKind": "absolute", "Norm": "none"}
+    recorded = {"DType": "f64", "Threshold": 0.01, "ThresholdKind": "relative", "Norm": "linf"}
+    policy = ComparePolicy.from_dict(
+        {
+            "Default": {"Threshold": 1.0, "Norm": "l2"},
+            "Tags": {"out": {"Threshold": 2.0}},
+            "Addresses": {"0x00000000000a0000": {"Threshold": 3.0}},
+        }
+    )
+
+    effective = policy.resolve(
+        {
+            0x10000: dict(exact),
+            0x20000: dict(recorded, Tag="out"),
+            0xA0000: dict(recorded, Tag="out"),
+        }
+    )
+
+    assert effective[0x10000] == dict(exact, Threshold=1.0, Norm="l2", Tag=None)
+    assert effective[0x20000] == dict(recorded, Threshold=2.0, Norm="l2", Tag="out")
+    assert effective[0xA0000] == dict(recorded, Threshold=3.0, Norm="l2", Tag="out")
+
+
+@pytest.mark.parametrize(
+    ("data", "error"),
+    [
+        ({"Defaults": {}}, "unknown key 'Defaults'"),
+        ({"Default": {"Tolerance": 1.0}}, "unknown key 'Tolerance'"),
+        ({"Tags": {"out": {"Norm": "l3"}}}, "bad Norm 'l3'"),
+        ({"Default": {"Threshold": -1}}, "bad Threshold -1"),
+        ({"Addresses": {"zz": {}}}, "bad address 'zz'"),
+    ],
+)
+def test_compare_policy_rejects_bad_policies(data, error):
+    with pytest.raises(ValueError, match=error):
+        ComparePolicy.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    ("data", "error"),
+    [
+        ({"Tags": {"missing": {}}}, "no blob has tag 'missing'"),
+        ({"Addresses": {"0x30000": {}}}, "no blob at 0x30000"),
+    ],
+)
+def test_compare_policy_rejects_unmatched_selectors(data, error):
+    blobs = {0x10000: {"DType": "u8", "Threshold": 0.0, "ThresholdKind": "absolute", "Norm": "none"}}
+    with pytest.raises(ValueError, match=error):
+        ComparePolicy.from_dict(data).resolve(blobs)

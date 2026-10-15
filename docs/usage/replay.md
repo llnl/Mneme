@@ -16,7 +16,8 @@ annotated device buffers with `mneme::annotate()` before the recorded
 launch, Mneme uses the stored metadata (data type, threshold, norm)
 instead.  This allows replay to accept numerically equivalent results
 that differ at the bit level — essential when exploring alternative
-optimization pipelines or launch configurations.
+optimization pipelines or launch configurations.  `--compare-policy
+FILE` overrides the recorded metadata without re-recording.
 
 For a detailed explanation of the annotation API, metadata fields,
 threshold semantics, and a complete example, see

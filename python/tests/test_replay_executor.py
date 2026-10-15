@@ -42,7 +42,8 @@ class FakeSnapshot:
     def close(self):
         self.closed = True
 
-    def matches_unlaunched(self, other):
+    def matches_unlaunched(self, other, rules):
+        assert rules is FakeKernelDescr.RULES
         return self.noop_verifies
 
 
@@ -63,12 +64,17 @@ class FakeEpilogueDescr:
 
 
 class FakeKernelDescr:
+    RULES = {0x1000: {}}
+
     def __init__(self, kernel_name="K", static_hash="H", prologue=None, epilogue=None):
         self.kernel_name = kernel_name
         self.static_hash = static_hash
         self.available_specializations = {"dummy": True}
         self.prologue = FakePrologueDescr(prologue or FakeSnapshot())
         self.epilogue = FakeEpilogueDescr(epilogue or FakeSnapshot())
+
+    def compare_rules(self, policy):
+        return self.RULES
 
 
 class FakeModule:
@@ -99,7 +105,7 @@ class FakeMemStateRef:
     def __enter__(self):
         return self.open()
 
-    def __eq__(self, other):
+    def matches(self, other, rules):
         return True
 
 class FakeDeviceFunction:
@@ -714,7 +720,9 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path):
     process_ir_names = []
 
     class FakeWorker:
-        def __init__(self, record_db, record_id, device_id, iterations, warmup):
+        def __init__(
+            self, record_db, record_id, device_id, iterations, warmup, compare_policy
+        ):
             self.record_db = record_db
             self.record_id = record_id
             self.device_id = device_id
@@ -802,7 +810,9 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
     )
 
     class FakeWorker:
-        def __init__(self, record_db, record_id, device_id, iterations, warmup):
+        def __init__(
+            self, record_db, record_id, device_id, iterations, warmup, compare_policy
+        ):
             self.device_id = device_id
 
         def link_ir(self):

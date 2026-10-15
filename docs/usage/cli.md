@@ -221,6 +221,7 @@ When omitted, all values default to those recorded during execution.
 | Option                | Description                                                           |
 | --------------------- | --------------------------------------------------------------------- |
 | `--iterations`, `-it` | Number of iterations to execute the kernel for statistical evaluation |
+| `--compare-policy`    | JSON file that overrides the recorded comparison metadata (see [Verification](verification.md#overriding-tolerances-at-replay-time)) |
 
 
 ### Examples
@@ -268,7 +269,8 @@ mneme replay \
     After execution, Mneme compares the resulting device memory state
     against the recorded epilogue snapshot.  By default this is a byte-exact
     check.  If buffers were annotated with `mneme::annotate()` before
-    recording, Mneme uses the stored tolerance metadata instead.  See
+    recording, Mneme uses the recorded tolerance metadata instead, with
+    any `--compare-policy` overrides.  See
     [Usage → Verification](verification.md) for the full semantics.
 
 ### Exit status
