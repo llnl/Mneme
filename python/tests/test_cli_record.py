@@ -236,7 +236,7 @@ def test_record_handles_not_executable(record_parser, tmp_path, monkeypatch):
 
 
 def test_record_defaults(record_parser, tmp_path, monkeypatch):
-    """Defaults are exported when not provided explicitly."""
+    """Only the filter mode is exported when no controls are given."""
     record_dir = tmp_path / "records"
     record_dir.mkdir()
 

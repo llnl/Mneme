@@ -61,8 +61,8 @@ If you need this:
 
 ## 4. GPU-Aware Cray MPICH on AMD APUs Needs `MPICH_SMP_SINGLE_COPY_MODE=NONE`
 
-During recording, Mneme serves device allocations from its own virtual address
-space, mapped with the HIP virtual memory API (`hipMemCreate`/`hipMemMap`).
+During recording, Mneme serves device allocations from its own mappings,
+created with the HIP virtual memory API (`hipMemCreate`/`hipMemMap`).
 Cray MPICH's GPU transport layer does not recognize these mappings as GPU memory
 and treats them as host memory. On AMD APUs (e.g. MI300A), on-node messages
 between ranks then go through MPICH's default XPMEM single-copy path, which
