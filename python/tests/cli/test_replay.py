@@ -1,5 +1,8 @@
 import json
+import os
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -141,3 +144,39 @@ def test_replay_chunked_allocations(
     assert mneme_main(["replay", "-rdb", str(records[0]), "default<O0>"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["Result"]["verified"], "Replay of chunked allocations not verified"
+
+
+@pytest.mark.parametrize("passes", ["default<O0>", "default<O3>"])
+def test_replay_device_globals(build_device_globals_program, passes, tmp_path):
+    directory = tmp_path / "records"
+    assert mneme_main(
+        [
+            "record",
+            "-rdb", str(directory),
+            "--", str(build_device_globals_program["binary"]), "1024",
+        ]
+    ) == 0
+
+    databases = list(directory.glob("*.json"))
+    assert len(databases) == 1
+
+    # Replay aborts the process when it cannot load a recorded global, so run
+    # it outside pytest.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("MNEME_") and key != "LD_PRELOAD"
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "mneme.cli", "replay", "-rdb", str(databases[0]), passes],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+    report, _ = json.JSONDecoder().raw_decode(
+        result.stdout[result.stdout.index('{\n  "Replay-config"'):]
+    )
+    assert report["Result"]["verified"]
+    assert not report["Result"]["noop_verifies"]

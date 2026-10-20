@@ -99,8 +99,14 @@ def build_cache():
     return {}
 
 
-def build_vecadd(
-    rdc_value, tmp_path_factory, call_mneme_config, has_amd_gpu, has_nvidia_gpu
+def build_program(
+    rdc_value,
+    tmp_path_factory,
+    call_mneme_config,
+    has_amd_gpu,
+    has_nvidia_gpu,
+    target_name="vecAdd",
+    source_file="vec_add.cu",
 ):
     has_nvidia = has_nvidia_gpu
     has_amd = has_amd_gpu
@@ -109,7 +115,7 @@ def build_vecadd(
     if has_nvidia:
         cuda_arch = detect_local_sm_via_nvidia_smi()
 
-    key = f"vecadd_{rdc_value.lower()}"
+    key = f"{target_name.lower()}_{rdc_value.lower()}"
     tmpdir = tmp_path_factory.mktemp(key)
 
     src_dir = pathlib.Path(__file__).parents[0] / "c_src" / "cmake"
@@ -137,6 +143,8 @@ def build_vecadd(
             f"-DCMAKE_CXX_COMPILER={mneme_cxx}",
             f"-DCMAKE_PREFIX_PATH={mneme_cmake_dir}",
             f"-DRDC={rdc_value}",
+            f"-DTEST_TARGET_NAME={target_name}",
+            f"-DTEST_SOURCE_FILE={source_file}",
             str(src_dir),
         ],
         cwd=tmpdir,
@@ -148,7 +156,7 @@ def build_vecadd(
     return {
         "src_dir": src_dir,
         "build_dir": tmpdir,
-        "binary": tmpdir / "vecAdd",
+        "binary": tmpdir / target_name,
         "rdc": rdc_value,
         "cc": mneme_cc,
         "cxx": mneme_cxx,
@@ -221,8 +229,29 @@ def build_test_program(
     key = f"vecadd_cached_{rdc}"
 
     if key not in build_cache:
-        build_cache[key] = build_vecadd(
+        build_cache[key] = build_program(
             rdc, tmp_path_factory, call_mneme_config, has_amd_gpu, has_nvidia_gpu
+        )
+
+    return build_cache[key]
+
+
+@pytest.fixture(params=["On", "Off"])
+def build_device_globals_program(
+    request, tmp_path_factory, build_cache, has_amd_gpu, has_nvidia_gpu
+):
+    rdc = request.param
+    key = f"device_globals_cached_{rdc}"
+
+    if key not in build_cache:
+        build_cache[key] = build_program(
+            rdc,
+            tmp_path_factory,
+            call_mneme_config,
+            has_amd_gpu,
+            has_nvidia_gpu,
+            target_name="deviceGlobals",
+            source_file="device_globals.cu",
         )
 
     return build_cache[key]
