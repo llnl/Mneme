@@ -16,10 +16,11 @@ theme:
 
 nav:
   - Home: index.md
-  - Getting Started: usage/getting-started.md
   - Usage:
       - Getting Started: usage/getting-started.md
       - CLI: usage/cli.md
+      - Record: usage/record.md
+      - Replay: usage/replay.md
       - Artifacts: usage/artifacts.md
       - Tune: usage/tune.md
       - Install: usage/install.md
