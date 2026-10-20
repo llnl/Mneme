@@ -45,7 +45,7 @@ def main():
 
     try:
         for name, scenario, iterations, occurrences in (
-            ("same-configuration", "blocked", [1], [1]),
+            ("same-configuration", "blocked", [1], [9]),
             ("distinct-configurations", "limit", [1, 3, 5], [1, 1, 1]),
         ):
             directory = check_case(
@@ -103,7 +103,7 @@ def main():
         )
         for database in directory.glob("*.json"):
             records = json.loads(database.read_text())["instances"]
-            assert sorted(r["Occurrences"] for r in records.values()) == [1, 2]
+            assert sorted(r["Occurrences"] for r in records.values()) == [2, 4]
 
         directory = check_case(
             binary, library, root, "full-limit", "none",
@@ -112,7 +112,7 @@ def main():
         )
         for database in directory.glob("*.json"):
             records = json.loads(database.read_text())["instances"]
-            assert next(iter(records.values()))["Occurrences"] == 1
+            assert next(iter(records.values()))["Occurrences"] == 9
 
         for name, ranks, overrides, expected in (
             ("yaml-excluded", [], {}, {}),
