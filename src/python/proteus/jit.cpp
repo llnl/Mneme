@@ -8,6 +8,7 @@
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Transforms/IPO/Internalize.h>
 #include <mneme/MnemeLogger.hpp>
 #include <optional>
 #include <proteus/CompilerInterfaceTypes.h>
@@ -53,17 +54,36 @@ OptimizationPipelineConfig makeOptimizationConfig(const char *OptLevel,
   return OptimizationPipelineConfig(OptLevelRef.str(), '3', CodegenOptLevel);
 }
 
+// Clang marks every host-visible __device__/__constant__ variable
+// externally_initialized. Replay writes their recorded values through
+// hipModuleGetGlobal/cuModuleGetGlobal, so they must keep the flag (or loads
+// from __constant__ fold to the initializer) and stay exported (or the lookup
+// fails).
+void pruneKeepingHostGlobals(llvm::Module &M) {
+  pruneIR(M, /*UnsetExternallyInitialized=*/false);
+}
+
+void internalizeKeepingHostGlobals(llvm::Module &M, llvm::StringRef KernelSym) {
+  auto *F = M.getFunction(KernelSym);
+  llvm::internalizeModule(M, [F](const llvm::GlobalValue &GV) {
+    if (&GV == F)
+      return true;
+    auto *GVar = llvm::dyn_cast<llvm::GlobalVariable>(&GV);
+    return GVar && GVar->isExternallyInitialized();
+  });
+}
+
 } // namespace
 
 extern "C" {
 API_EXPORT(void) ProteusPY_pruneIR(LLVMModuleRef Mod) {
-  pruneIR(*llvm::unwrap(Mod));
+  pruneKeepingHostGlobals(*llvm::unwrap(Mod));
 }
 
 API_EXPORT(void)
 ProteusPY_internalize(LLVMModuleRef Mod, const char *KernelSym) {
   auto *M = llvm::unwrap(Mod);
-  internalize(*M, KernelSym);
+  internalizeKeepingHostGlobals(*M, KernelSym);
 }
 
 API_EXPORT(void)
@@ -132,7 +152,7 @@ ProteusPY_linkModules(const char **LLVMIRFiles, int size,
                 llvm::toString(ModuleOrErr.takeError()));
 
     if (prune_flag) {
-      pruneIR(*ModuleOrErr->get());
+      pruneKeepingHostGlobals(*ModuleOrErr->get());
     }
 
     RecordedModules.emplace_back(std::move(ModuleOrErr.get()));
@@ -141,7 +161,7 @@ ProteusPY_linkModules(const char **LLVMIRFiles, int size,
   auto Mod = proteus::linkModules(*unwrap(context), std::move(RecordedModules));
 
   if (internalize_flag) {
-    internalize(*Mod.get(), KernelSym);
+    internalizeKeepingHostGlobals(*Mod.get(), KernelSym);
   }
 
   return wrap(Mod.release());

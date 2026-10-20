@@ -115,7 +115,9 @@ def pruneIR(mod: ModuleRef):
     Remove unused functions, globals, and dead IR from an LLVM module.
 
     This calls Proteus' C++ pruning pass through the FFI to eliminate dead IR and
-    reduce module size before further specialization or optimization.
+    reduce module size before further specialization or optimization. Device
+    globals keep their ``externally_initialized`` flag, since replay writes
+    their recorded values from the host.
 
     Parameters
     ----------
@@ -179,10 +181,12 @@ def optimize(mod: ModuleRef, device_arch: str, opt_level: str, codegen_opt_level
 
 def internalize(mod: ModuleRef, kernel_name: str):
     """
-    Mark all symbols except the given kernel as internal.
+    Mark all symbols except the given kernel and the device globals as internal.
 
-    This applies Proteus' internalization pass, restricting symbol visibility to
-    reduce linking overhead and enable more aggressive optimization.
+    This restricts symbol visibility to reduce linking overhead and enable more
+    aggressive optimization. Device globals (``externally_initialized``
+    ``__device__``/``__constant__`` variables) stay exported so replay can look
+    them up by name and restore their recorded values.
 
     Parameters
     ----------
