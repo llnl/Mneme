@@ -38,7 +38,7 @@ The database describes:
 
 A kernel gets a database once at least one of its launches is recorded.
 A kernel that is never recorded, for example because
-`MNEME_SKIP_RECORDINGS` exceeds its number of launches, leaves no files.
+`MNEME_SKIP_RECORDINGS` or the filter file's `skip` exceeds its number of launches, leaves no files.
 The databases are written after each recorded launch and once more when the application exits,
 so the launch counts cover the whole run.
 If the application crashes, the databases keep the counts from the last recorded launch.
