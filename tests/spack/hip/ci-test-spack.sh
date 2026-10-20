@@ -43,6 +43,14 @@ git -C ${PROTEUS_SRC} checkout --quiet FETCH_HEAD
 PROTEUS_SHA=$(git -C ${PROTEUS_SRC} rev-parse HEAD)
 spack repo add ${PROTEUS_SRC}/packaging/spack/spack_repo/proteus
 spack repo add ${CI_PROJECT_DIR}/packaging/spack/spack_repo/mneme
+# Fetch Mneme from the CI clone because a fork PR's commit is not on GitHub.
+spack config add -f <(envsubst <<'EOF'
+packages:
+  mneme:
+    package_attributes:
+      git: file://${CI_PROJECT_DIR}
+EOF
+)
 spack add mneme@git.${CI_COMMIT_SHA} ~python +rocm amdgpu_target=${MNEME_CI_AMDGPU_TARGET} ^hip@${MNEME_CI_ROCM_VERSION} ^hsa-rocr-dev@${MNEME_CI_ROCM_VERSION} ^llvm-amdgpu@${MNEME_CI_ROCM_VERSION} ^proteus@git.${PROTEUS_SHA}=main
 
 # Concretize and install.

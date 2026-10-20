@@ -45,6 +45,14 @@ git -C ${PROTEUS_SRC} checkout --quiet FETCH_HEAD
 PROTEUS_SHA=$(git -C ${PROTEUS_SRC} rev-parse HEAD)
 spack repo add ${PROTEUS_SRC}/packaging/spack/spack_repo/proteus
 spack repo add ${CI_PROJECT_DIR}/packaging/spack/spack_repo/mneme
+# Fetch Mneme from the CI clone because a fork PR's commit is not on GitHub.
+spack config add --file <(cat <<EOF
+packages:
+  mneme:
+    package_attributes:
+      git: file://${CI_PROJECT_DIR}
+EOF
+)
 spack add mneme@git.${CI_COMMIT_SHA} ~python +cuda cuda_arch=${MNEME_CI_CUDA_ARCH} ^cuda@${MNEME_CI_CUDA_VERSION} ^llvm@${MNEME_CI_LLVM_VERSION} ^proteus@git.${PROTEUS_SHA}=main
 
 # Concretize and install.
