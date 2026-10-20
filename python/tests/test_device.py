@@ -19,6 +19,8 @@ from mneme.mneme_types import dim3
 
 def test_device_module_from_membuffer_validates_type():
     buf = MemBufferRef.__new__(MemBufferRef)
+    # Never initialized, so keep its finalizer from disposing it.
+    buf._closed = True
 
     with patch("mneme.device.ffi.lib", autospec=True) as fake_lib:
         fake_lib.MnemePY_getDeviceObject = MagicMock(return_value=c_void_p(111))
