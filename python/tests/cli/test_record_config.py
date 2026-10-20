@@ -66,7 +66,7 @@ def test_config_record_and_replay(build_test_program, tmp_path):
     assert len(instances) == 1
     record_id, instance = next(iter(instances.items()))
 
-    assert instance["Occurrences"] == 1
+    assert instance["Occurrences"] == 10
     snapshot = directory / instance["Prologue"]
 
     # candidates are iterations 1, 4, and 7
