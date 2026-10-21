@@ -1,4 +1,5 @@
 #include "llvm/core.h"
+#include "trace.hpp"
 #include <cstring>
 #include <llvm/Support/CBindingWrapping.h>
 #include <llvm/Support/MemoryBuffer.h>
@@ -10,6 +11,7 @@ using namespace llvm;
 
 extern "C" {
 API_EXPORT(void *) MnemePY_getDeviceObject(LLVMMemoryBufferRef Buffer) {
+  trace::Scope Trace("module.load");
   llvm::MemoryBuffer *DeviceObject = llvm::unwrap(Buffer);
   auto VendorModule = DeviceVendorTraits::getDeviceModuleFromImage(
       DeviceObject->getBufferStart());
@@ -19,6 +21,7 @@ API_EXPORT(void *) MnemePY_getDeviceObject(LLVMMemoryBufferRef Buffer) {
 }
 
 API_EXPORT(void) MnemePY_DisposeDeviceObject(void *WModule) {
+  trace::Scope Trace("module.unload");
   auto VendorModule =
       reinterpret_cast<DeviceVendorTraits::DeviceModule_t>(WModule);
   DeviceVendorTraits::DeviceModuleUnload(VendorModule);
@@ -28,6 +31,7 @@ API_EXPORT(void) MnemePY_DisposeDeviceObject(void *WModule) {
 API_EXPORT(void *)
 MnemePY_getKernelFunctionFromImage(void *WrappedModule,
                                    const char *KernelName) {
+  trace::Scope Trace("module.resolve_kernel");
   auto Module =
       reinterpret_cast<DeviceVendorTraits::DeviceModule_t>(WrappedModule);
   std::string KName(KernelName);
@@ -125,35 +129,54 @@ MnemePy_profile(void *WrappedModule, void *Func, dim3 Grid, dim3 Block,
   if (EC)
     LOG_FATAL("Error when creating a stream for replay\n" + EC.value());
 
-  PrologueState->initializeGlobals(VendorModule);
+  {
+    trace::Scope Trace("state.globals");
+    PrologueState->initializeGlobals(VendorModule);
+  }
 
   for (int i = 0; i < repeats; i++) {
+    trace::Scope Iteration("iteration", i);
     LOG_DEBUG("Run {}/{}", i + 1, repeats);
 
-    PrologueState->reset();
+    {
+      trace::Scope Trace("state.restore");
+      PrologueState->reset();
+    }
     auto Args = PrologueState->getArgs();
 
-    EC = DeviceVendorTraits::DeviceErrorCheck(
-        DeviceVendorTraits::DeviceStreamSynchronize(ReplayStream));
+    {
+      trace::Scope Trace("sync.pre_launch");
+      EC = DeviceVendorTraits::DeviceErrorCheck(
+          DeviceVendorTraits::DeviceStreamSynchronize(ReplayStream));
+    }
 
     if (EC)
       LOG_FATAL("Error when synchronizing device stream " + EC.value());
 
-    EC = DeviceVendorTraits::DeviceErrorCheck(
-        DeviceVendorTraits::launchKernelFunction(DevFunc, Grid, Block, Args,
-                                                 SharedMemSize, ReplayStream));
+    {
+      trace::Scope Trace("launch");
+      EC = DeviceVendorTraits::DeviceErrorCheck(
+          DeviceVendorTraits::launchKernelFunction(DevFunc, Grid, Block, Args,
+                                                   SharedMemSize, ReplayStream));
+    }
     if (EC)
       LOG_FATAL("Error When Launching Kernel: " + EC.value());
 
-    EC = DeviceVendorTraits::DeviceErrorCheck(
-        DeviceVendorTraits::DeviceStreamSynchronize(ReplayStream));
+    {
+      trace::Scope Trace("sync.post_launch");
+      EC = DeviceVendorTraits::DeviceErrorCheck(
+          DeviceVendorTraits::DeviceStreamSynchronize(ReplayStream));
+    }
 
     if (EC)
       LOG_FATAL("Error When synchronizing with kernel stream: " + EC.value());
   }
 
-  EC = DeviceVendorTraits::DeviceErrorCheck(
-      DeviceVendorTraits::DeviceSynchronize());
+  {
+    trace::Scope Trace("sync.device");
+    EC = DeviceVendorTraits::DeviceErrorCheck(
+        DeviceVendorTraits::DeviceSynchronize());
+  }
 
   if (EC)
     LOG_FATAL("Error when synchronizing device" + EC.value());
