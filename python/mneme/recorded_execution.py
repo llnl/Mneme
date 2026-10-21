@@ -350,6 +350,25 @@ class KernelSource:
         return f"{self.file}:{self.line}-{self.end_line}"
 
 
+@dataclass(frozen=True)
+class LaunchTimes:
+    """
+    Sum, minimum and maximum GPU duration in nanoseconds of the timed launches
+    of a recorded kernel instance, stored in JSON as ``{"Sum", "Min", "Max"}``.
+    """
+
+    sum: int
+    min: int
+    max: int
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, int]) -> "LaunchTimes":
+        return cls(d["Sum"], d["Min"], d["Max"])
+
+    def to_dict(self) -> Dict[str, int]:
+        return {"Sum": self.sum, "Min": self.min, "Max": self.max}
+
+
 class RecordedExecution:
     """
     Description of a recorded kernel execution and its dynamic instances.
@@ -385,6 +404,13 @@ class RecordedExecution:
     total_launches : int, optional
         Number of times the kernel was launched during recording, or ``None``
         for records written before launches were counted.
+    total_time_ns : int, optional
+        Summed GPU duration in nanoseconds of the launches counted in
+        ``total_launches``, or ``None`` when recorded without
+        ``MNEME_KERNEL_TIMING``.
+    timing_source : str, optional
+        Timer that measured the durations, ``"profiler"``, or ``None`` when
+        recorded without ``MNEME_KERNEL_TIMING``.
     """
 
     class KernelInstance:
@@ -402,6 +428,12 @@ class RecordedExecution:
 
         The prologue/epilogue snapshots are exposed via :class:`MemStateRef` objects,
         which are opened on demand by the replay executor.
+
+        The timing fields are ``None`` for records made without
+        ``MNEME_KERNEL_TIMING``. ``time_ns`` summarizes the ``timed_launches``
+        launches of this instance and is ``None`` when none was timed, and
+        ``recorded_launch_time_ns`` is the duration of the launch that was
+        snapshotted.
         """
 
         def __init__(
@@ -417,6 +449,9 @@ class RecordedExecution:
             occ: int,
             prologue_fn: str,
             epilogue_fn: str,
+            timed_launches: Optional[int] = None,
+            time_ns: Optional[LaunchTimes] = None,
+            recorded_launch_time_ns: Optional[int] = None,
         ):
             self.static_hash = static_hash
             self.dynamic_hash = dynamic_hash
@@ -431,6 +466,9 @@ class RecordedExecution:
                 if v:
                     self.available_specializations.append(i)
             self.occ = occ
+            self.timed_launches = timed_launches
+            self.time_ns = time_ns
+            self.recorded_launch_time_ns = recorded_launch_time_ns
             # Set by the owning RecordedExecution so consumers handed only an
             # instance, such as custom search spaces, can reach kernel_source().
             self.execution: Optional["RecordedExecution"] = None
@@ -467,6 +505,12 @@ class RecordedExecution:
             res["BlockDims"] = self.block_dim.to_dict()
             res["GridDims"] = self.grid_dim.to_dict()
             res["Occurrences"] = self.occ
+            if self.timed_launches is not None:
+                res["TimedLaunches"] = self.timed_launches
+            if self.time_ns is not None:
+                res["TimeNs"] = self.time_ns.to_dict()
+            if self.recorded_launch_time_ns is not None:
+                res["RecordedLaunchTimeNs"] = self.recorded_launch_time_ns
             res["SharedMem"] = self.shared_mem
             res["Epilogue"] = _make_path_relative(self.epilogue.fn, base_dir)
             res["Prologue"] = _make_path_relative(self.prologue.fn, base_dir)
@@ -488,6 +532,8 @@ class RecordedExecution:
         source_line: Optional[int] = None,
         source_end_line: Optional[int] = None,
         total_launches: Optional[int] = None,
+        total_time_ns: Optional[int] = None,
+        timing_source: Optional[str] = None,
     ):
         self.static_hash = static_hash
         self.kernel_name = kernel_name
@@ -504,6 +550,8 @@ class RecordedExecution:
         self.source_line = source_line
         self.source_end_line = source_end_line
         self.total_launches = total_launches
+        self.total_time_ns = total_time_ns
+        self.timing_source = timing_source
         self._link_mod = None
 
     def __str__(self):
@@ -630,6 +678,10 @@ class RecordedExecution:
             res["SourceEndLine"] = self.source_end_line
         if self.total_launches is not None:
             res["TotalLaunches"] = self.total_launches
+        if self.total_time_ns is not None:
+            res["TotalTimeNs"] = self.total_time_ns
+        if self.timing_source is not None:
+            res["TimingSource"] = self.timing_source
         res["instances"] = {}
         for k, v in self.items():
             res["instances"][k] = v.to_dict(base_dir)
@@ -712,6 +764,11 @@ class RecordedExecution:
                 inst["Occurrences"],
                 _resolve(inst["Prologue"]),
                 _resolve(inst["Epilogue"]),
+                timed_launches=inst.get("TimedLaunches"),
+                time_ns=(
+                    LaunchTimes.from_dict(inst["TimeNs"]) if "TimeNs" in inst else None
+                ),
+                recorded_launch_time_ns=inst.get("RecordedLaunchTimeNs"),
             )
 
         resolved_modules = [_resolve(m) for m in record_db["Modules"]]
@@ -738,4 +795,6 @@ class RecordedExecution:
             source_line=record_db.get("SourceLine"),
             source_end_line=record_db.get("SourceEndLine"),
             total_launches=record_db.get("TotalLaunches"),
+            total_time_ns=record_db.get("TotalTimeNs"),
+            timing_source=record_db.get("TimingSource"),
         )

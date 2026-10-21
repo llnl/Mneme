@@ -31,6 +31,7 @@ void clearMnemeEnv() {
   unsetenv("MNEME_EPILOGUE_TYPE");
   unsetenv("MNEME_COPY_SOURCE");
   unsetenv("MNEME_CHUNK_SIZE");
+  unsetenv("MNEME_KERNEL_TIMING");
   unsetenv("MNEME_RECORD_RANKS");
   unsetenv("FLUX_TASK_RANK");
   unsetenv("OMPI_COMM_WORLD_RANK");
@@ -73,6 +74,8 @@ int main() {
     expect(!Conf.CopySource, "MNEME_COPY_SOURCE should default to false");
     expect(Conf.ChunkSize == 4ULL << 30,
            "MNEME_CHUNK_SIZE should default to 4 GiB");
+    expect(Conf.KernelTiming == KernelTimingType::Off,
+           "MNEME_KERNEL_TIMING should default to off");
   }
 
   auto TempDir = makeTempDir();
@@ -82,6 +85,7 @@ int main() {
   setenv("MNEME_EPILOGUE_TYPE", "diff", 1);
   setenv("MNEME_COPY_SOURCE", "1", 1);
   setenv("MNEME_CHUNK_SIZE", "8388608", 1);
+  setenv("MNEME_KERNEL_TIMING", "profiler", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.getDataDirectory() == std::filesystem::absolute(TempDir),
@@ -95,6 +99,8 @@ int main() {
     expect(Conf.CopySource, "MNEME_COPY_SOURCE should map 1 to true");
     expect(Conf.ChunkSize == 8ULL << 20,
            "MNEME_CHUNK_SIZE should use the configured value");
+    expect(Conf.KernelTiming == KernelTimingType::Profiler,
+           "MNEME_KERNEL_TIMING should map profiler");
   }
 
   for (auto [Value, Expected] :
@@ -124,28 +130,37 @@ int main() {
 
   setenv("MNEME_LOG_LEVEL", "verbose", 1);
   setenv("MNEME_COPY_SOURCE", "0", 1);
+  setenv("MNEME_KERNEL_TIMING", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.MnemeLogLevel == LogLevel::Info,
            "invalid MNEME_LOG_LEVEL should fall back to info");
     expect(!Conf.CopySource, "MNEME_COPY_SOURCE should map 0 to false");
+    expect(Conf.KernelTiming == KernelTimingType::Profiler,
+           "MNEME_KERNEL_TIMING should map 1 to profiler");
   }
 
   setenv("MNEME_EPILOGUE_TYPE", "bytes", 1);
   setenv("MNEME_COPY_SOURCE", "maybe", 1);
+  setenv("MNEME_KERNEL_TIMING", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.EpilogueType == EpilogueSnapshotType::Bytes,
            "MNEME_EPILOGUE_TYPE should map bytes");
     expect(!Conf.CopySource,
            "invalid MNEME_COPY_SOURCE should fall back to false");
+    expect(Conf.KernelTiming == KernelTimingType::Off,
+           "MNEME_KERNEL_TIMING should map 0 to off");
   }
 
   setenv("MNEME_EPILOGUE_TYPE", "best", 1);
+  setenv("MNEME_KERNEL_TIMING", "off", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.EpilogueType == EpilogueSnapshotType::Best,
            "MNEME_EPILOGUE_TYPE should map best");
+    expect(Conf.KernelTiming == KernelTimingType::Off,
+           "MNEME_KERNEL_TIMING should map off");
   }
 
   setenv("MNEME_EPILOGUE_TYPE", "delta", 1);
@@ -158,6 +173,19 @@ int main() {
       Threw = true;
     }
     expect(Threw, "invalid MNEME_EPILOGUE_TYPE should throw");
+  }
+
+  unsetenv("MNEME_EPILOGUE_TYPE");
+  setenv("MNEME_KERNEL_TIMING", "events", 1);
+  {
+    bool Threw = false;
+    try {
+      auto Conf = Config::createFromEnvironment();
+      (void)Conf;
+    } catch (const std::runtime_error &) {
+      Threw = true;
+    }
+    expect(Threw, "invalid MNEME_KERNEL_TIMING should throw");
   }
 
   clearMnemeEnv();

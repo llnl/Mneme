@@ -1,12 +1,33 @@
 
 set(MnemeCoreSrcDir ${CMAKE_CURRENT_SOURCE_DIR})
 set(AnnotationRuntimeSRC MnemeAnnotation.cpp MnemeRecordScope.cpp)
-set(RecordLibSRC MnemeAnnotationInternal.cpp MnemeCrashHandler.cpp MnemeRecordingPolicy.cpp)
+set(RecordLibSRC MnemeAnnotationInternal.cpp MnemeCrashHandler.cpp MnemeRecordingPolicy.cpp MnemeKernelTimer.cpp)
 
 if (MNEME_ENABLE_HIP)
   list(APPEND RecordLibSRC MnemeRecordPreloadHIP.cpp)
 elseif(MNEME_ENABLE_CUDA)
   list(APPEND RecordLibSRC MnemeRecordPreloadCUDA.cpp)
+endif()
+
+# Vendor profiler used to time kernels, by recording and by replay profiling.
+if (MNEME_ENABLE_HIP)
+  find_package(rocprofiler-sdk QUIET CONFIG)
+  if(rocprofiler-sdk_FOUND AND TARGET rocprofiler-sdk::rocprofiler-sdk)
+    set(MNEME_PROFILER_LIBS rocprofiler-sdk::rocprofiler-sdk)
+  else()
+    message(WARNING "CMake package for rocprofiler-sdk not found; falling back to manual include/lib lookup")
+    find_path(ROCPROFILER_SDK_INCLUDE_DIR rocprofiler-sdk/rocprofiler.h
+            HINTS "${ROCM_PATH}/include")
+    find_library(ROCPROFILER_SDK_LIBRARY NAMES rocprofiler-sdk
+               HINTS "${ROCM_PATH}/lib" "${ROCM_PATH}/lib64")
+    if(NOT ROCPROFILER_SDK_INCLUDE_DIR OR NOT ROCPROFILER_SDK_LIBRARY)
+      message(FATAL_ERROR "Could not find rocprofiler-sdk headers or library")
+    endif()
+    set(MNEME_PROFILER_INCLUDE_DIRS "${ROCPROFILER_SDK_INCLUDE_DIR}")
+    set(MNEME_PROFILER_LIBS "${ROCPROFILER_SDK_LIBRARY}")
+  endif()
+elseif(MNEME_ENABLE_CUDA)
+  set(MNEME_PROFILER_LIBS CUDA::cupti)
 endif()
 
 add_library(mnemert SHARED ${AnnotationRuntimeSRC})
@@ -30,6 +51,8 @@ endif()
 
 
 target_include_directories(record SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(record PRIVATE ${MNEME_PROFILER_INCLUDE_DIRS})
+target_link_libraries(record PRIVATE ${MNEME_PROFILER_LIBS})
 target_link_libraries(record PRIVATE mnemert)
 # Link record against proteus to avoid LLVM static initialization issues.
 # HIP: proteus is shared (version-script hides LLVM symbols).

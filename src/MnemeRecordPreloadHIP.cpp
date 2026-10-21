@@ -1,6 +1,7 @@
 #include "MnemeAnnotationRuntime.hpp"
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeCrashHandler.hpp"
+#include "mneme/MnemeKernelTimer.hpp"
 #include "mneme/MnemeLLVMUtils.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeRecord.hpp"
@@ -30,6 +31,15 @@ public:
 };
 
 using Recorder = MnemeRecorderHIPPreload;
+
+// Runs at load time because the HIP runtime may initialize before the first
+// intercepted call, and rocprofiler-sdk must be configured before that.
+__attribute__((constructor)) static void configureKernelTiming() {
+  const auto &Conf = Config::get();
+  if (Conf.KernelTiming == KernelTimingType::Profiler &&
+      Conf.isRecordingEnabledForCurrentRank())
+    KernelTimer::configure();
+}
 
 extern "C" {
 hipError_t hipMalloc(void **ptr, size_t size) {
