@@ -55,6 +55,8 @@ def check_case(
         record = json.loads(path.read_text())
         kernel = "foo" if "foo<" in record["DemangledName"] else "bar"
         assert kernel not in found, (name, record["DemangledName"])
+        # Every scenario launches each kernel nine times, recorded or not.
+        assert record["TotalLaunches"] == 9, (name, record["TotalLaunches"])
 
         iterations = []
         for dynamic_hash, instance in record["instances"].items():
