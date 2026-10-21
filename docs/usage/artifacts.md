@@ -120,9 +120,9 @@ Its value selects how launches are timed:
 
 The database names the timer that measured its durations in `TimingSource`.
 
-Mneme cannot use the vendor profiler when another tool such as `rocprofv3` or Nsight Systems already does.
+Mneme cannot use the vendor profiler when another tool such as `rocprofv3` or Nsight Compute already does.
 `profiler` then prints that kernel timing is disabled, and the run is recorded without timing.
-`events` works alongside such tools.
+`events` works alongside such tools, though under Nsight Compute its durations include the kernel replays.
 
 Launches on a stream that is being captured into a graph are counted but not timed, and launches of the graph are neither counted nor timed.
 Durations are collected asynchronously, so the databases written after each recorded launch can lack the most recent ones.
