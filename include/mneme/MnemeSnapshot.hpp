@@ -12,6 +12,7 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -92,14 +93,8 @@ public:
   explicit SourceFileInfo(const llvm::Module &Mod, llvm::StringRef KernelName) {
     const llvm::Function *F = Mod.getFunction(KernelName);
     const llvm::DISubprogram *SP = F ? F->getSubprogram() : nullptr;
-    if (!SP) {
-      // Printed without the logger so that default builds still tell the user
-      // why the record has no source fields.
-      std::cerr << "[mneme] Kernel " << KernelName.str()
-                << " has no line-table debug info; compile with "
-                   "-gline-tables-only to record its source location\n";
+    if (!SP)
       return;
-    }
 
     initFromSubprogram(*F, *SP);
   }
@@ -288,8 +283,22 @@ public:
       LOG_FATAL("Empty bitcode for kernel " + KName);
 
     extractArgInfoFromBitcode(Bitcode);
-    if (CopySource && Source.isKnown())
-      Source.copyTo(MnemeDirectory);
+    if (CopySource) {
+      if (Source.isKnown()) {
+        Source.copyTo(MnemeDirectory);
+      } else {
+        // Printed without the logger so that default builds still tell the
+        // user why the record has no source fields. One notice suffices since
+        // the fix is the same for every kernel.
+        static std::once_flag Warned;
+        std::call_once(Warned, [this] {
+          std::cerr << "[mneme] Kernel " << KName
+                    << " has no line-table debug info; compile with "
+                       "-gline-tables-only to record source locations "
+                       "(reported once)\n";
+        });
+      }
+    }
     ModuleFiles.emplace_back(StoreModuleBytes(
         Bitcode, MnemeDirectory, KInfo.getStaticHash()));
   }
