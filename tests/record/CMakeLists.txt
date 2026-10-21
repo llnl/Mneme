@@ -98,13 +98,11 @@ atexit.register(lambda: shutil.rmtree(exec_root, ignore_errors=False))
 MNEME_PRELOAD_LIB='${CMAKE_BINARY_DIR}/src/librecord.so'
 RR = lit_config.params['RR']
 CHECK_TIMING = lit_config.params['CHECK_TIMING']
-TIMING = lit_config.params.get('TIMING', 'profiler')
 EXT = lit_config.params['ext']
 FILECHECK = lit_config.params['FILECHECK']
 config.substitutions.append(('MNEME_PRELOAD_LIB', MNEME_PRELOAD_LIB))
 config.substitutions.append(('%RR', RR))
 config.substitutions.append(('%CHECK_TIMING', CHECK_TIMING))
-config.substitutions.append(('%TIMING', TIMING))
 config.substitutions.append(('%ext', EXT))
 config.substitutions.append(('%FILECHECK', FILECHECK))
 config.substitutions.append(('%build', '${CMAKE_CURRENT_BINARY_DIR}'))
@@ -135,11 +133,6 @@ CREATE_RDC_GPU_TEST(test_launch_counts test_launch_counts.cpp)
 
 CREATE_GPU_TEST(test_kernel_timing test_kernel_timing.cpp)
 CREATE_RDC_GPU_TEST(test_kernel_timing test_kernel_timing.cpp)
-# The tests above time kernels with the profiler, these with events.
-add_test(NAME test_kernel_timing.events COMMAND ${LIT} -a -vv -DFILECHECK=${FILECHECK} -D ext='' -D RR=${RECORD_READ_JSON} -D CHECK_TIMING=${CHECK_TIMING} -D TIMING=events test_kernel_timing.cpp)
-set_tests_properties(test_kernel_timing.events PROPERTIES LABELS "MnemeRecord::Link")
-add_test(NAME test_kernel_timing.events.rdc COMMAND ${LIT} -a -vv -DFILECHECK=${FILECHECK} -D ext=.rdc -D RR=${RECORD_READ_JSON} -D CHECK_TIMING=${CHECK_TIMING} -D TIMING=events test_kernel_timing.cpp)
-set_tests_properties(test_kernel_timing.events.rdc PROPERTIES LABELS "MnemeRecord::RDC")
 
 CREATE_GPU_TEST(test_multi_file multi_file1.cpp multi_file2.cpp)
 CREATE_RDC_GPU_TEST(test_multi_file multi_file1.cpp multi_file2.cpp)

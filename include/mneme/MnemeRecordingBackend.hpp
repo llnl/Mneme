@@ -81,7 +81,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return ret;
   }
 
-  void beginTimedLaunch(DeviceStream_t Stream, const TimedLaunch &Launch) {
+  void beginTimedLaunch(const TimedLaunch &Launch) {
     if (!TimedBackend) {
       TimedBackend = this;
       std::atexit([] {
@@ -91,7 +91,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     }
     Timer->collect(
         [this](const TimedLaunch &L, uint64_t Ns) { DB.addLaunchTime(L, Ns); });
-    Timer->begin(Stream, Launch);
+    Timer->begin(Launch);
   }
 
   // Launches after the drain are still counted but no longer timed.
@@ -264,13 +264,12 @@ public:
                              void **Args, size_t SharedMem,
                              DeviceStream_t Stream,
                              const std::optional<TimedLaunch> &Launch) {
-    // A captured launch only runs as part of its graph, where no duration
-    // can be attributed to it, and events recorded during the capture would
-    // become nodes of the graph.
+    // A captured launch dispatches nothing now, and its graph's later
+    // dispatches carry no token, so it would never get a duration.
     bool Timed =
         Timer && Launch && !MnemeDeviceRT::deviceStreamIsCapturing(Stream);
     if (Timed)
-      beginTimedLaunch(Stream, *Launch);
+      beginTimedLaunch(*Launch);
     auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
                                         SharedMem, Stream);
     if (Timed)

@@ -122,7 +122,7 @@ To override the default, pass `--record-ranks`:
     Launches that are skipped, not selected, or exceed the limit are still counted in the kernel's database, under `TotalLaunches` and the `Occurrences` of each recorded launch configuration.
 
 !!! note
-    Set the environment variable `MNEME_KERNEL_TIMING` to `profiler` or `events` to also record the GPU duration of the counted launches.
+    Set the environment variable `MNEME_KERNEL_TIMING=profiler` to also record the GPU duration of the counted launches.
     See [Artifacts → Kernel timing](artifacts.md#kernel-timing).
 
 !!! note

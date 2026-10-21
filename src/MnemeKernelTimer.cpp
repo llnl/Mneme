@@ -15,8 +15,7 @@ namespace {
 
 constexpr const char *UnavailableMessage =
     "[mneme] Kernel timing disabled: rocprofiler-sdk is unavailable, likely in "
-    "use by another tool such as rocprofv3. Set MNEME_KERNEL_TIMING=events to "
-    "time kernels with device events instead.\n";
+    "use by another tool such as rocprofv3.\n";
 
 int initializeTool(rocprofiler_client_finalize_t, void *) {
   KernelTimer::instance().start();
@@ -44,8 +43,7 @@ namespace {
 
 constexpr const char *UnavailableMessage =
     "[mneme] Kernel timing disabled: CUPTI is unavailable, likely in use by "
-    "another tool such as Nsight Compute. Set MNEME_KERNEL_TIMING=events to "
-    "time kernels with device events instead.\n";
+    "another tool such as Nsight Compute.\n";
 
 } // namespace
 

@@ -426,16 +426,6 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return hipEventElapsedTime(ms, start, stop);
   }
 
-  // Events used only for timing need no system-scope fence, which would add a
-  // cache flush to every timed interval.
-  static hipError_t deviceTimingEventCreate(hipEvent_t *event) {
-    return hipEventCreateWithFlags(event, hipEventDisableSystemFence);
-  }
-
-  static bool deviceEventIsComplete(hipEvent_t event) {
-    return hipEventQuery(event) == hipSuccess;
-  }
-
   static hipError_t deviceGetAttribute(hipFunction_t &Func,
                                        FuncAttributes Attribute, int &Value) {
     LOG_DEBUG("Going to request attributes of {}", (void *)Func);
@@ -801,16 +791,6 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   static DeviceError_t deviceEventElapsedTime(float *ms, DeviceEvent_t start,
                                               DeviceEvent_t stop) {
     return cudaEventElapsedTime(ms, start, stop);
-  }
-
-  static DeviceError_t deviceTimingEventCreate(DeviceEvent_t *event) {
-    return cudaEventCreate(event);
-  }
-
-  // The driver API keeps a not-ready result out of the runtime's last error,
-  // which the application may check after its own launch.
-  static bool deviceEventIsComplete(DeviceEvent_t event) {
-    return cuEventQuery(event) == CUDA_SUCCESS;
   }
 
   static DeviceError_t deviceGetSymbolAddress(void **devPtr,

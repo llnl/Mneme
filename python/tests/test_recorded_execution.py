@@ -509,13 +509,13 @@ def test_recorded_execution_loads_kernel_timing(tmp_path):
         },
         TotalLaunches=7,
         TotalTimeNs=100,
-        TimingSource="events",
+        TimingSource="profiler",
     )
 
     r = RecordedExecution.from_json(str(json_path))
 
     assert r.total_time_ns == 100
-    assert r.timing_source == "events"
+    assert r.timing_source == "profiler"
     assert r["H"].timed_launches == 3
     assert r["H"].time_ns == LaunchTimes(sum=60, min=10, max=30)
     assert r["H"].recorded_launch_time_ns == 30
@@ -524,7 +524,7 @@ def test_recorded_execution_loads_kernel_timing(tmp_path):
     r.to_json(str(out_path))
     written = json.loads(out_path.read_text())
     assert written["TotalTimeNs"] == 100
-    assert written["TimingSource"] == "events"
+    assert written["TimingSource"] == "profiler"
     assert written["instances"]["H"]["TimedLaunches"] == 3
     assert written["instances"]["H"]["TimeNs"] == time_ns
     assert written["instances"]["H"]["RecordedLaunchTimeNs"] == 30
