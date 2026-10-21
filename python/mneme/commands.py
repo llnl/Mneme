@@ -35,10 +35,17 @@ from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
 from mneme.pipeline import PipelineManager
 from mneme.profile import init_profiler
-from mneme.recorded_execution import RecordedExecution
+from mneme.recorded_execution import ComparePolicy, RecordedExecution
 from mneme.replay_executor import BaseExecutor, noop_verifies_warning
 from mneme.tuning.cli import add_tune_args, run_tune
 from mneme.utils import MnemeEncoder
+
+
+def _compare_policy_arg(fn):
+    try:
+        return ComparePolicy.from_file(fn)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _copy_or_move(sources, dest, move=False):
@@ -720,6 +727,14 @@ class Replay(BaseExecutor):
             required=False,
             default=None,
             help="Store the output LLVM IR to this file",
+        )
+
+        parser.add_argument(
+            "--compare-policy",
+            dest="compare_policy",
+            type=_compare_policy_arg,
+            default=None,
+            help="JSON file that overrides the recorded comparison metadata used for verification",
         )
 
         parser.set_defaults(func=Replay.run)

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #if MNEME_ENABLE_DEBUG
@@ -32,6 +33,13 @@ inline std::string readSizedString(const char *&Buffer) {
   std::string Name{Buffer, StrLen};
   Buffer += StrLen;
   return Name;
+}
+
+template <typename T> std::string pointerToHexString(T *ptr) {
+  std::ostringstream oss;
+  oss << "0x" << std::hex << std::setw(sizeof(void *) * 2) << std::setfill('0')
+      << reinterpret_cast<std::uintptr_t>(ptr);
+  return oss.str();
 }
 
 } // namespace util

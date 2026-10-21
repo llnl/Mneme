@@ -36,8 +36,7 @@ struct GlobalVarHeader {
   }
 };
 
-// Device-memory blob record prefix: | ActualSize | Size | DevAddr |. Metadata
-// is excluded because the bytes and diff layouts place it differently.
+// Device-memory blob record prefix: | ActualSize | Size | DevAddr |.
 struct BlobHeader {
   size_t ActualSize;
   size_t Size;

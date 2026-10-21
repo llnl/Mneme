@@ -1,5 +1,6 @@
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeAnnotation.hpp"
+#include "mneme/MnemeAnnotationInternal.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeSnapshot.hpp"
@@ -153,28 +154,8 @@ int main(int argc, char **argv) {
         return 1;
       }
 
-      if (RBlob.getMetadata().builtin != BuiltinDType::F64) {
-        std::cerr << "Metadata builtin differs\n";
-        return 1;
-      }
-
-      if (RBlob.getMetadata().norm != Norm::L2) {
-        std::cerr << "Metadata norm differs\n";
-        return 1;
-      }
-
-      if (RBlob.getMetadata().threshold != 0.5) {
-        std::cerr << "Metadata threshold differs\n";
-        return 1;
-      }
-
-      if (RBlob.getMetadata().threshold_kind != ThresholdKind::Relative) {
-        std::cerr << "Metadata threshold_kind differs\n";
-        return 1;
-      }
-
-      if (RBlob.getMetadata().tag.value() != "Test") {
-        std::cerr << "Metadata tag differs\n";
+      if (!metadata::isDefault(RBlob.getMetadata())) {
+        std::cerr << "Snapshot stored blob metadata\n";
         return 1;
       }
 
@@ -288,12 +269,8 @@ int main(int argc, char **argv) {
       return 16;
     }
 
-    if (RBlob.getMetadata().builtin != BuiltinDType::F64 ||
-        RBlob.getMetadata().norm != Norm::L2 ||
-        RBlob.getMetadata().threshold != 0.5 ||
-        RBlob.getMetadata().threshold_kind != ThresholdKind::Relative ||
-        RBlob.getMetadata().tag.value() != "Test") {
-      std::cerr << "Diff blob metadata differs\n";
+    if (!metadata::isDefault(RBlob.getMetadata())) {
+      std::cerr << "Diff snapshot stored blob metadata\n";
       return 16;
     }
 
@@ -469,16 +446,131 @@ int main(int argc, char **argv) {
 
     auto [PrologueHeader, PrologueOffset] = parseFilePrefix(SnapshotFN);
     if (PrologueHeader.Kind != SnapshotKind::Bytes ||
-        PrologueHeader.Version != 0 || PrologueOffset != 16) {
-      std::cerr << "Prologue file did not parse as {Bytes, 0, 16}\n";
+        PrologueHeader.Version != 1 || PrologueOffset != 16) {
+      std::cerr << "Prologue file did not parse as {Bytes, 1, 16}\n";
       return 256;
     }
 
     auto [DiffFileHeader, DiffFileOffset] = parseFilePrefix(DiffSnapshotFN);
     if (DiffFileHeader.Kind != SnapshotKind::Diff ||
-        DiffFileHeader.Version != 1 || DiffFileOffset != 16) {
-      std::cerr << "Diff file did not parse as {Diff, 1, 16}\n";
+        DiffFileHeader.Version != 2 || DiffFileOffset != 16) {
+      std::cerr << "Diff file did not parse as {Diff, 2, 16}\n";
       return 256;
+    }
+    return 0;
+  }();
+
+  // Older layouts follow each blob with its metadata, which replay of old
+  // recordings still compares with. A diff carries the epilogue's metadata.
+  auto ValidateLegacyMetadata = [&]() {
+    auto writeMetadata = [](llvm::raw_ostream &OS, const Metadata &M) {
+      util::writeScalar(OS, M.builtin);
+      util::writeScalar(OS, M.threshold);
+      util::writeScalar(OS, M.threshold_kind);
+      util::writeScalar(OS, M.norm);
+      util::writeScalar(OS, M.tag->size());
+      util::writeBytes(OS, llvm::StringRef(*M.tag));
+    };
+    // Two blobs and an argument, so a reader that skips a blob's metadata
+    // record misaligns.
+    void *Addr = reinterpret_cast<void *>(0x1000);
+    void *Addr2 = reinterpret_cast<void *>(0x2000);
+    uint8_t Data[16] = {};
+    uint8_t Data2[8] = {};
+    uint32_t Arg = 0xdeadbeef;
+    mneme::Metadata Md2 = Md;
+    Md2.threshold = 0.75;
+    Md2.tag = std::string("Second");
+    mneme::Metadata EpiMd = Md;
+    EpiMd.threshold = 0.25;
+    mneme::Metadata EpiMd2 = Md2;
+    EpiMd2.threshold = 0.125;
+
+    std::filesystem::path LegacyBytesFN("./test.legacy.bytes.mneme");
+    std::filesystem::path LegacyDiffFN("./test.legacy.diff.mneme");
+    {
+      std::error_code FileEC;
+      llvm::raw_fd_ostream OS(LegacyBytesFN.string(), FileEC);
+      util::writeScalar(OS, size_t{0});
+      util::writeScalar(OS, size_t{2});
+      BlobHeader{sizeof(Data), sizeof(Data), Addr}.write(OS);
+      util::writeBytes(OS, llvm::ArrayRef<uint8_t>(Data));
+      writeMetadata(OS, Md);
+      BlobHeader{sizeof(Data2), sizeof(Data2), Addr2}.write(OS);
+      util::writeBytes(OS, llvm::ArrayRef<uint8_t>(Data2));
+      writeMetadata(OS, Md2);
+      util::writeScalar(OS, size_t{1});
+      util::writeScalar(OS, sizeof(Arg));
+      util::writeScalar(OS, Arg);
+    }
+    {
+      std::error_code FileEC;
+      llvm::raw_fd_ostream OS(LegacyDiffFN.string(), FileEC);
+      OS << "MNEME_DIFF_V1";
+      util::writeScalar(OS, size_t{0});
+      util::writeScalar(OS, size_t{2});
+      BlobHeader{sizeof(Data), sizeof(Data), Addr}.write(OS);
+      writeMetadata(OS, EpiMd);
+      util::writeScalar(OS, size_t{1});
+      util::writeScalar(OS, size_t{3});
+      util::writeScalar(OS, size_t{1});
+      util::writeScalar(OS, uint8_t{0xab});
+      BlobHeader{sizeof(Data2), sizeof(Data2), Addr2}.write(OS);
+      writeMetadata(OS, EpiMd2);
+      util::writeScalar(OS, size_t{1});
+      util::writeScalar(OS, size_t{7});
+      util::writeScalar(OS, size_t{1});
+      util::writeScalar(OS, uint8_t{0xcd});
+    }
+
+    auto Bytes = SnapshotFormatRegistry<Vendor>::open(LegacyBytesFN.string())
+                     ->read(KernelName, BaseSnapshotSource<Vendor>());
+    auto Diff = SnapshotFormatRegistry<Vendor>::open(LegacyDiffFN.string())
+                    ->read(KernelName,
+                           BaseSnapshotSource<Vendor>(LegacyBytesFN.string()));
+    auto BytesIt = Bytes.DeviceMemory.find(Addr);
+    auto BytesIt2 = Bytes.DeviceMemory.find(Addr2);
+    auto DiffIt = Diff.DeviceMemory.find(Addr);
+    auto DiffIt2 = Diff.DeviceMemory.find(Addr2);
+    if (BytesIt == Bytes.DeviceMemory.end() ||
+        BytesIt2 == Bytes.DeviceMemory.end() ||
+        DiffIt == Diff.DeviceMemory.end() ||
+        DiffIt2 == Diff.DeviceMemory.end()) {
+      std::cerr << "Legacy snapshot is missing a blob\n";
+      return 1024;
+    }
+
+    const auto &BytesMd = BytesIt->second.getMetadata();
+    const auto &BytesMd2 = BytesIt2->second.getMetadata();
+    const auto &DiffMd = DiffIt->second.getMetadata();
+    const auto &DiffMd2 = DiffIt2->second.getMetadata();
+    if (BytesMd.builtin != BuiltinDType::F64 || BytesMd.norm != Norm::L2 ||
+        BytesMd.threshold != 0.5 ||
+        BytesMd.threshold_kind != ThresholdKind::Relative ||
+        BytesMd.tag != std::optional<std::string>("Test") ||
+        BytesMd2.threshold != 0.75 ||
+        BytesMd2.tag != std::optional<std::string>("Second") ||
+        DiffMd.threshold != 0.25 || DiffMd2.threshold != 0.125) {
+      std::cerr << "Legacy blob metadata differs\n";
+      return 1024;
+    }
+
+    const auto &KInfo = *Bytes.KInfo;
+    if (KInfo.KernelArgSizes.size() != 1 ||
+        KInfo.KernelArgSizes[0] != sizeof(Arg) ||
+        std::memcmp(KInfo.ArgData[0].get(), &Arg, sizeof(Arg)) != 0) {
+      std::cerr << "Legacy snapshot arguments differ\n";
+      return 1024;
+    }
+
+    Data[3] = 0xab;
+    Data2[7] = 0xcd;
+    if (std::memcmp(Data, DiffIt->second.getHostData().get(), sizeof(Data)) !=
+            0 ||
+        std::memcmp(Data2, DiffIt2->second.getHostData().get(),
+                    sizeof(Data2)) != 0) {
+      std::cerr << "Legacy diff did not reconstruct epilogue data\n";
+      return 1024;
     }
     return 0;
   }();
@@ -486,7 +578,8 @@ int main(int argc, char **argv) {
   auto Ret = ValidateGlobalMem | ValidateDeviceMem | ValidateKernelArgs |
              ValidateDiffGlobalMem | ValidateDiffDeviceMem |
              ValidateDiffKernelArgs | ValidateBestSparse |
-             ValidateBestFragmented | ValidateMeasure | ValidateHeaderParse;
+             ValidateBestFragmented | ValidateMeasure | ValidateHeaderParse |
+             ValidateLegacyMetadata;
 
   delete[] GlobalData.second;
   delete[] BlobData.second;

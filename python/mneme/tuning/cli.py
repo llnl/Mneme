@@ -95,6 +95,11 @@ def add_tune_args(parser: argparse.ArgumentParser) -> None:
         help="Number of replay workers used to evaluate candidates concurrently.",
     )
     replay.add_argument(
+        "--compare-policy",
+        default=None,
+        help="JSON file that overrides the recorded comparison metadata used to verify candidates.",
+    )
+    replay.add_argument(
         "--fail-fast",
         action="store_true",
         default=None,

@@ -144,8 +144,8 @@ These snapshots include:
 
 If the application has annotated any device pointer via
 `mneme::annotate()`, the associated metadata (data type, error
-threshold, norm, and optional tag) is captured alongside the memory
-content.  This metadata governs how Mneme compares the replayed output
+threshold, norm, and optional tag) is recorded in the record database
+alongside the snapshots.  This metadata governs how Mneme compares the replayed output
 against the recorded epilogue during the replay phase.  See
 [Usage → Verification](../usage/verification.md) for details.
 
@@ -286,8 +286,9 @@ Following execution, Mneme:
 
 When a recorded memory blob carries annotation metadata (set via
 `mneme::annotate()` before the corresponding kernel launch), Mneme
-uses the stored data type, threshold, and norm to perform a
-tolerance-aware comparison instead of a byte-exact check.  See
+uses the recorded data type, threshold, and norm, or the overrides of
+`--compare-policy`, to perform a tolerance-aware comparison instead of
+a byte-exact check.  See
 [Usage → Verification](../usage/verification.md) for the full
 semantics.
 

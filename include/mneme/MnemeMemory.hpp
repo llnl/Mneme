@@ -10,7 +10,6 @@
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeAnnotation.hpp"
-#include "mneme/MnemeAnnotationInternal.hpp"
 #include "mneme/MnemeComparators.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeSnapshotRecords.hpp"
@@ -114,7 +113,6 @@ public:
     Buffer += Header.Size;
     LOG_DEBUG("Read memory blob at address {} SIZE: {} ActualSize:{}",
               Header.DevAddr, Header.Size, Header.ActualSize);
-    Blob.PtrMD = metadata::fromBuffer(Buffer);
     return std::make_pair(Header.DevAddr, std::move(Blob));
   }
 
@@ -163,37 +161,37 @@ public:
 
   void setMetadata(Metadata Md) { PtrMD = Md; }
 
-  Metadata getMetadata() const { return PtrMD; }
-
-  bool operator==(const MnemeMemoryBlob<VendorTypes> &other) const {
-    if (getSize() != other.getSize()) {
-      LOG_WARN("Sizes Differ {} vs {}", getSize(), other.getSize());
-      return false;
-    }
-
-    auto Md = getMetadata();
-    auto Compare = compareDeviceBlobs((const char *)other.getBlobAddr(),
-                                      (const char *)getBlobAddr(), getSize(),
-                                      Md);
-
-    // Comparator semantics:
-    // - Norm::None  => per-element thresholding reports AnyFail/FirstBadIdx
-    // - Norm::L1/L2/Linf => aggregated error is reported in Agg
-    if (Md.norm == Norm::None)
-      return Compare.AnyFail == 0;
-
-    return Compare.Agg <= Md.threshold;
-  }
-  bool operator!=(const MnemeMemoryBlob<VendorTypes> &other) const {
-    return !(*this == other);
-  }
+  const Metadata &getMetadata() const { return PtrMD; }
 };
+
+// True if Actual is within Rule of Expected.
+template <DeviceVendors VendorTypes>
+bool blobMatches(const MnemeMemoryBlob<VendorTypes> &Expected,
+                 const MnemeMemoryBlob<VendorTypes> &Actual,
+                 const Metadata &Rule) {
+  if (Expected.getSize() != Actual.getSize()) {
+    LOG_WARN("Sizes Differ {} vs {}", Expected.getSize(), Actual.getSize());
+    return false;
+  }
+
+  auto Compare = compareDeviceBlobs((const char *)Actual.getBlobAddr(),
+                                    (const char *)Expected.getBlobAddr(),
+                                    Expected.getSize(), Rule);
+
+  // Comparator semantics:
+  // - Norm::None  => per-element thresholding reports AnyFail/FirstBadIdx
+  // - Norm::L1/L2/Linf => aggregated error is reported in Agg
+  if (Rule.norm == Norm::None)
+    return Compare.AnyFail == 0;
+
+  return Compare.Agg <= Rule.threshold;
+}
 
 template <DeviceVendors VendorTypes>
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
                               const MnemeMemoryBlob<VendorTypes> &Blob) {
   // The format in the binary is the following:
-  // | Var Actual Size | Var-Size | Device Address | Var Data | Metadata
+  // | Var Actual Size | Var-Size | Device Address | Var Data |
   BlobHeader{Blob.ActualSize, Blob.Size, Blob.BlobAddr}.write(OS);
 
   LOG_DEBUG("Serializing MemoryBlob, DevAddr:{} MirroredHostAddr:{} Size:{} "
@@ -213,8 +211,6 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
               EC.value() + "\n");
   OS << llvm::StringRef(
       reinterpret_cast<const char *>(Blob.getHostData().get()), Blob.Size);
-  auto MD = Blob.getMetadata();
-  mneme::metadata::serialize(OS, MD);
 
   return OS;
 }

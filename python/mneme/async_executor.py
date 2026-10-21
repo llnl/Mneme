@@ -12,6 +12,7 @@ from typing import Callable, Dict, Optional, Union
 
 from mneme.futures import EvalFuture
 from mneme.mneme_logging import logger
+from mneme.recorded_execution import ComparePolicy
 from mneme.replay_executor import TuneWorker
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
 
@@ -93,6 +94,7 @@ class TuneWorkerHandle:
         on_startup_failure_limit: Optional[
             Callable[["TuneWorkerHandle", str], None]
         ] = None,
+        compare_policy: Optional[ComparePolicy] = None,
     ):
         """
         Construct a worker handle and start the worker process + monitor thread.
@@ -119,6 +121,8 @@ class TuneWorkerHandle:
         max_startup_failures : int
             Maximum number of consecutive worker exits before readiness before this
             handle stops respawning the worker.
+        compare_policy : ComparePolicy, optional
+            Overrides of the recorded comparison metadata used to verify.
 
         Notes
         -----
@@ -144,6 +148,7 @@ class TuneWorkerHandle:
         self.max_startup_failures = max_startup_failures
         self._startup_failures = 0
         self._on_startup_failure_limit = on_startup_failure_limit
+        self.compare_policy = compare_policy
 
         self._state = None  # ProcessEvent
         self._process = None  # Process
@@ -189,6 +194,7 @@ class TuneWorkerHandle:
                 self.results_db_dir,
                 self._state,
                 self.warmup,
+                self.compare_policy,
             ),
             daemon=False,
         )
@@ -407,6 +413,7 @@ class AsyncReplayExecutor:
         num_workers: int,
         warmup: int = 2,
         max_startup_failures: int = 3,
+        compare_policy: Optional[ComparePolicy] = None,
     ):
         """
         Construct an asynchronous executor with a fixed-size worker pool.
@@ -428,6 +435,8 @@ class AsyncReplayExecutor:
         max_startup_failures : int
             Maximum number of consecutive pre-readiness startup failures allowed per
             worker before that worker stops respawning.
+        compare_policy : ComparePolicy, optional
+            Overrides of the recorded comparison metadata used to verify.
         """
         self.global_q = ThreadQueue()
         self._futures: Dict[int, EvalFuture] = {}
@@ -456,6 +465,7 @@ class AsyncReplayExecutor:
                     warmup=warmup,
                     max_startup_failures=max_startup_failures,
                     on_startup_failure_limit=self._handle_startup_failure_limit,
+                    compare_policy=compare_policy,
                 )
             )
 
