@@ -130,14 +130,14 @@ int main() {
 
   setenv("MNEME_LOG_LEVEL", "verbose", 1);
   setenv("MNEME_COPY_SOURCE", "0", 1);
-  setenv("MNEME_KERNEL_TIMING", "events", 1);
+  setenv("MNEME_KERNEL_TIMING", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.MnemeLogLevel == LogLevel::Info,
            "invalid MNEME_LOG_LEVEL should fall back to info");
     expect(!Conf.CopySource, "MNEME_COPY_SOURCE should map 0 to false");
-    expect(Conf.KernelTiming == KernelTimingType::Events,
-           "MNEME_KERNEL_TIMING should map events");
+    expect(Conf.KernelTiming == KernelTimingType::Profiler,
+           "MNEME_KERNEL_TIMING should map 1 to profiler");
   }
 
   setenv("MNEME_EPILOGUE_TYPE", "bytes", 1);
@@ -176,7 +176,7 @@ int main() {
   }
 
   unsetenv("MNEME_EPILOGUE_TYPE");
-  setenv("MNEME_KERNEL_TIMING", "1", 1);
+  setenv("MNEME_KERNEL_TIMING", "events", 1);
   {
     bool Threw = false;
     try {
@@ -185,7 +185,7 @@ int main() {
     } catch (const std::runtime_error &) {
       Threw = true;
     }
-    expect(Threw, "MNEME_KERNEL_TIMING=1 should throw since it names no timer");
+    expect(Threw, "invalid MNEME_KERNEL_TIMING should throw");
   }
 
   clearMnemeEnv();

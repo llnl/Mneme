@@ -409,8 +409,8 @@ class RecordedExecution:
         ``total_launches``, or ``None`` when recorded without
         ``MNEME_KERNEL_TIMING``.
     timing_source : str, optional
-        Timer that measured the durations, ``"profiler"`` or ``"events"``, or
-        ``None`` when recorded without ``MNEME_KERNEL_TIMING``.
+        Timer that measured the durations, ``"profiler"``, or ``None`` when
+        recorded without ``MNEME_KERNEL_TIMING``.
     """
 
     class KernelInstance:

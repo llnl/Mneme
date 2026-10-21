@@ -23,7 +23,7 @@ namespace mneme {
 enum class LogLevel { Trace, Debug, Info, Warn, Error, Critical, Off };
 enum class EpilogueSnapshotType { Bytes, Diff, Best };
 enum class FilterMode { Default, Scoped, Config };
-enum class KernelTimingType { Off, Profiler, Events };
+enum class KernelTimingType { Off, Profiler };
 
 namespace config_detail {
 
@@ -194,16 +194,13 @@ getEnvOrDefaultKernelTimingType(const char *VarName, KernelTimingType Default) {
   if (!EnvValue)
     return Default;
 
-  if (*EnvValue == "profiler")
+  if (*EnvValue == "profiler" || *EnvValue == "1")
     return KernelTimingType::Profiler;
-  if (*EnvValue == "events")
-    return KernelTimingType::Events;
   if (EnvValue->empty() || *EnvValue == "off" || *EnvValue == "0")
     return KernelTimingType::Off;
 
   throw std::runtime_error("Invalid " + std::string(VarName) + " value '" +
-                           *EnvValue +
-                           "'. Expected 'profiler', 'events', or 'off'.");
+                           *EnvValue + "'. Expected 'profiler' or 'off'.");
 }
 
 inline const char *getKernelTimingName(KernelTimingType Type) {
@@ -212,8 +209,6 @@ inline const char *getKernelTimingName(KernelTimingType Type) {
     return "off";
   case KernelTimingType::Profiler:
     return "profiler";
-  case KernelTimingType::Events:
-    return "events";
   }
   return "off";
 }
