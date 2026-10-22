@@ -6,6 +6,7 @@ import queue
 import time
 import types
 from dataclasses import dataclass
+from pathlib import Path
 import pytest
 
 
@@ -226,7 +227,10 @@ def _capture_tracing(monkeypatch):
 
 
 @pytest.mark.parametrize("verified", [False, True])
-def test_trace_pipeline_covers_stages_and_preserves_execution(monkeypatch, verified):
+@pytest.mark.parametrize("record_db", ["db", Path("db")], ids=["string", "path"])
+def test_trace_pipeline_covers_stages_and_preserves_execution(
+    monkeypatch, verified, record_db
+):
     """make sure tracing properly capturs the expected stages"""
 
     events, flushes = _capture_tracing(monkeypatch)
@@ -251,7 +255,7 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(monkeypatch, verif
         mod.DeviceModule, "from_MemBuffer",
         lambda _: FakeDeviceModule(device_func=function),
     )
-    executor = mod.BaseExecutor(record_db="db", record_id="rid", iterations=3)
+    executor = mod.BaseExecutor(record_db=record_db, record_id="rid", iterations=3)
     executor.link_ir()
     with executor:
         result = mod.ExperimentResult()
@@ -269,6 +273,9 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(monkeypatch, verif
         "ir.preprocess", "ir.optimize", "ir.codegen", "execution.verification",
         "execution.tracked", "verify.compare", "snapshot.cleanup", "experiment",
     } <= names
+    for name in ("metadata.load", "metadata.record"):
+        metadata, = [event for event in events if event["name"] == name]
+        assert metadata["args"]["record_database"] == str(record_db)
     experiment, = [e for e in events if e["name"] == "experiment"]
     assert experiment["args"]["config_hash"] == config.hash()
     assert experiment["args"]["configuration"] == config.to_dict()

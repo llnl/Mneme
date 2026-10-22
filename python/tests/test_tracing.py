@@ -6,6 +6,8 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
+
 
 def run_script(tmp_path, script, *, enabled=True):
 
@@ -191,6 +193,44 @@ def test_serialization_failure_preserves_completed_batches(tmp_path):
     events, = read_traces(tmp_path)
     assert "saved" in {event["name"] for event in events}
     assert "invalid" not in {event["name"] for event in events}
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 100])
+def test_partial_write_failure_preserves_completed_batches(tmp_path, extra_bytes):
+    result = run_script(tmp_path, """
+        import os
+        from pathlib import Path
+        import resource
+        import signal
+        from mneme import tracing
+
+        with tracing.span("saved", flush_after=True):
+            pass
+        path, = Path(os.environ["MNEME_TRACE_DIR"]).glob("*.json")
+        completed = path.read_bytes()
+
+        # Allow the append to overwrite the terminator before hitting EFBIG.
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        _, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        resource.setrlimit(
+            resource.RLIMIT_FSIZE, (len(completed) + EXTRA_BYTES, hard)
+        )
+        for _ in range(2):
+            with tracing.span(
+                "discarded", lambda: {"payload": "x" * 4096}, flush_after=True
+            ):
+                pass
+
+        assert tracing._native().MnemePy_TraceTimestamp() == 0
+        assert path.read_bytes() == completed
+        print("application completed")
+    """.replace("EXTRA_BYTES", str(extra_bytes)))
+
+    assert result.stdout.strip() == "application completed"
+    assert result.stderr.count("mneme: tracing disabled:") == 1
+    events, = read_traces(tmp_path)
+    assert "saved" in {event["name"] for event in events}
+    assert "discarded" not in {event["name"] for event in events}
 
 
 def test_fork_resets_native_state_and_avoids_inherited_python_lock(tmp_path):

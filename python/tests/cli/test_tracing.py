@@ -54,6 +54,7 @@ def test_replay_and_tuning_host_trace(recorded_execution, tmp_path):
         "-c", """
 import json
 import sys
+from pathlib import Path
 from mneme import cli  # Select the CLI's spawn multiprocessing context.
 from mneme.async_executor import AsyncReplayExecutor
 from mneme.mneme_types import ExperimentConfiguration
@@ -67,7 +68,7 @@ if __name__ == "__main__":
         grid=kernel.grid_dim, block=kernel.block_dim,
         shared_mem=kernel.shared_mem, passes="default<O0>",
     )
-    executor = AsyncReplayExecutor(sys.argv[1], record_id, 2, sys.argv[2], 1, warmup=1)
+    executor = AsyncReplayExecutor(Path(sys.argv[1]), record_id, 2, sys.argv[2], 1, warmup=1)
     try:
         results = [executor.submit(config).result(timeout=30) for _ in range(2)]
         assert all(result is not None and result.verified for result in results)
