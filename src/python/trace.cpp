@@ -281,7 +281,22 @@ void flush() noexcept {
     if (lseek(S->File, S->Tail, SEEK_SET) < 0)
       throw std::runtime_error("could not seek trace file");
 
-    writeAll(S->File, Batch + "]\n");
+    try {
+      writeAll(S->File, Batch + "]\n");
+    } catch (...) {
+      // partial appends may overwrite previous closing bracket; try to restore it
+      // if we can seek to the end of the previous batch
+      if (lseek(S->File, S->Tail, SEEK_SET) >= 0) {
+        try {
+          writeAll(S->File, "]\n");
+          while (ftruncate(S->File, S->Tail + 2) < 0 && errno == EINTR) {
+          }
+        } catch (...) {
+        }
+      }
+      throw;
+    }
+
     S->Tail += Batch.size();
     std::vector<Event>().swap(S->Pending);
   } catch (const std::exception &Error) {
