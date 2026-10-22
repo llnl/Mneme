@@ -234,9 +234,11 @@ public:
     getOrCreatePageManager();
 
     if (Config::get().RecordingFilterMode == FilterMode::Scoped &&
-        !detail::scopeAllowsRecording(func))
+        !detail::scopeAllowsRecording(func)) {
+      DB.countLaunch(func, GridDim, BlockDim, SharedMem);
       return Runtime.origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
                                       Stream);
+    }
 
     // NOTE: Here we do something conceptually different. We no longer go
     // through proteus. We call immediately the vendor launcher. Thus we avoid
@@ -299,6 +301,8 @@ public:
   }
 
   ~RecordingBackend() {
+    DB.flush();
+
     LOG_DEBUG("RecordingBackend destructor: releasing {} blobs", AllocatedBlobs.size());
 
     // Release all unreleased blobs before the DenseMap destructs
