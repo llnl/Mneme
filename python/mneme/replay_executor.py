@@ -38,6 +38,7 @@ from multiprocessing import Event, Queue
 from pathlib import Path
 from typing import Optional, Tuple
 
+from mneme import tracing
 from mneme.device import (
     DeviceFunction,
     DeviceModule,
@@ -114,6 +115,7 @@ class BaseExecutor:
       should clone before mutation if reusing across experiments.
     """
 
+    @tracing.traced("executor.initialize", flush_after=True)
     def __init__(
         self,
         record_db: str = "",
@@ -124,7 +126,10 @@ class BaseExecutor:
     ):
         self.record_db = record_db
         self.device_id = device_id
-        self.records = RecordedExecution.from_json(self.record_db)
+        with tracing.span(
+            "metadata.load", lambda: {"record_database": str(self.record_db)}
+        ):
+            self.records = RecordedExecution.from_json(self.record_db)
         if record_id is None:
             num_records = len(self.records)
             if num_records != 1:
@@ -151,12 +156,37 @@ class BaseExecutor:
             f"GPU Affinity of process was set to device:{self.device_id} out of {self.num_devices}"
         )
         jit.register_pass_plugin(MNEME_PASS_PLUGIN_LIB)
+        with tracing.span(
+            "metadata.record",
+            lambda: {
+                "record_database": str(self.record_db),
+                "record_id": self.record_id,
+                "kernel": self.kernel_descr.kernel_name,
+                "device_id": self.device_id,
+                "device_arch": self.device_arch,
+            },
+        ):
+            pass
 
+    @tracing.traced("snapshot.setup", flush_after=True)
     def open(self):
-        self._prologue = self.kernel_descr.prologue.open()
-        self._epilogue = self.kernel_descr.epilogue.open()
+        with tracing.span(
+            "snapshot.prologue.open",
+            lambda: {"path": self.kernel_descr.prologue.fn},
+        ):
+            self._prologue = self.kernel_descr.prologue.open()
+
+        with tracing.span(
+            "snapshot.epilogue.open",
+            lambda: {"path": self.kernel_descr.epilogue.fn},
+        ):
+            self._epilogue = self.kernel_descr.epilogue.open()
+
         # No kernel has run yet, so this asks whether doing nothing would verify.
-        self.noop_verifies = self._prologue.matches_unlaunched(self._epilogue)
+        with tracing.span("verify.noop") as event:
+            self.noop_verifies = self._prologue.matches_unlaunched(self._epilogue)
+            event.annotate(noop_verifies=self.noop_verifies)
+
         return self
 
     @property
@@ -167,12 +197,15 @@ class BaseExecutor:
     def epilogue(self):
         return self._epilogue
 
+    @tracing.traced("snapshot.cleanup", flush_after=True)
     def close(self):
         if self._epilogue is not None:
-            self._epilogue.close()
+            with tracing.span("snapshot.epilogue.close"):
+                self._epilogue.close()
             self._epilogue = None
         if self._prologue is not None:
-            self._prologue.close()
+            with tracing.span("snapshot.prologue.close"):
+                self._prologue.close()
             self._prologue = None
 
     def __enter__(self):
@@ -182,9 +215,11 @@ class BaseExecutor:
         self.close()
         return False
 
+    @tracing.traced("ir.link", flush_after=True)
     def link_ir(self):
         return self.records.link_llvm_modules(prune=True, internalize=True)
 
+    @tracing.traced("ir.replace", flush_after=True)
     def set_new_ir(self, ir_path_or_asm: str):
         if isinstance(ir_path_or_asm, str) and (ir_path_or_asm.endswith('.ll') or ir_path_or_asm.endswith('.bc')):
             ir_path = Path(ir_path_or_asm)
@@ -204,6 +239,7 @@ class BaseExecutor:
 
         return new_ir
 
+    @tracing.traced("ir.preprocess")
     @cond_time("preprocess_ir_time")
     def _preprocess_ir(
         self,
@@ -295,6 +331,7 @@ class BaseExecutor:
             )
         return code_hash, llvm_ir
 
+    @tracing.traced("ir.optimize")
     @cond_time("opt_time")
     def _optimize(
         self,
@@ -335,6 +372,7 @@ class BaseExecutor:
         """
         jit.optimize(ir_module, self.device_arch, config.passes, config.codegen_opt)
 
+    @tracing.traced("ir.codegen")
     @cond_time("codegen_time")
     def _codegen(
         self,
@@ -441,6 +479,7 @@ class BaseExecutor:
             iterations,
         )
 
+    @tracing.traced("ir.build")
     def _build(
         self,
         result: ExperimentResult,
@@ -507,6 +546,7 @@ class BaseExecutor:
             result.obj_size = mem_buffer.get_size()
         return mem_buffer
 
+    @tracing.traced("execution.run")
     def _run(
         self,
         result: ExperimentResult,
@@ -567,13 +607,30 @@ class BaseExecutor:
                 profile=track,
             )
             if verify:
-                result.verified = prologue == epilogue
-                result.noop_verifies = self.noop_verifies
+                with tracing.span("verify.compare") as event:
+                    result.verified = prologue == epilogue
+                    result.noop_verifies = self.noop_verifies
+
+                    event.annotate(
+                        verified=result.verified, noop_verifies=result.noop_verifies
+                    )
+
             if track:
                 result.reg_usage = device_func.reg_usage
                 result.const_mem_usage = device_func.const_mem
                 result.local_mem_usage = device_func.local_mem
 
+    @tracing.traced(
+        "experiment",
+        attributes=lambda self, result, config, ir_module: {
+            "record_id": self.record_id,
+            "config_hash": config.hash(),
+            "configuration": config.to_dict(),
+            "warmup": self._warmup,
+            "iterations": self._iterations,
+        },
+        flush_after=True,
+    )
     def _execute(
         self,
         result: ExperimentResult,
@@ -637,17 +694,30 @@ class BaseExecutor:
             raise RuntimeError("States should never be none when executing a kernel")
 
         # NOTE: 1. First we need to verify.
-        ver_mod = ir_module.clone()
-        mem_buffer = self._build(result, config, ver_mod, False)
-        self._run(result, config, mem_buffer, self.prologue, self.epilogue, True, False, 1)
+        with tracing.span("execution.verification"):
+            with tracing.span("ir.clone"):
+                ver_mod = ir_module.clone()
+
+            mem_buffer = self._build(result, config, ver_mod, False)
+            self._run(
+                result, config, mem_buffer, self.prologue, self.epilogue,
+                True, False, 1,
+            )
 
         # NOTE: 2-3. Build and run with tracking on. The tracked build prepends the
         # purge-autoinit pass (registered via Proteus' JIT pass plugin API) to strip
         # the Clang-inserted auto-init memsets; verification above ran without it.
-        ir_module = ir_module.clone()
-        tracked_config = replace(config, passes=f"purge-autoinit,{config.passes}")
-        mem_buffer = self._build(result, tracked_config, ir_module, True)
-        self._run(result, config, mem_buffer, self.prologue, self.epilogue, False, True, self._iterations + self._warmup)
+        with tracing.span("execution.tracked"):
+            with tracing.span("ir.clone"):
+                ir_module = ir_module.clone()
+
+            tracked_config = replace(config, passes=f"purge-autoinit,{config.passes}")
+            mem_buffer = self._build(result, tracked_config, ir_module, True)
+            self._run(
+                result, config, mem_buffer, self.prologue, self.epilogue,
+                False, True, self._iterations + self._warmup,
+            )
+
         result.executed = True
 
         return ir_module
@@ -744,6 +814,7 @@ class TuneWorker(BaseExecutor):
         return result, generated_ir
 
     @staticmethod
+    @tracing.traced("worker", flush_after=True)
     def run(
         request_q: Queue,
         response_q: Queue,
@@ -856,9 +927,17 @@ class TuneWorker(BaseExecutor):
                     logger.debug(
                         f"Worker {worker.device_id} received processing request {msg['exp_id']}"
                     )
-                    exp, ir = worker.process_payload(
-                        root_ir.clone(), ExperimentConfiguration.from_dict(msg["data"])
-                    )
+                    with tracing.span(
+                        "tuning.request",
+                        lambda: {"request_id": msg["exp_id"]},
+                        flush_after=True,
+                    ):
+                        with tracing.span("ir.clone"):
+                            request_ir = root_ir.clone()
+
+                        exp, ir = worker.process_payload(
+                            request_ir, ExperimentConfiguration.from_dict(msg["data"])
+                        )
                     # final = resdb.save_ir(ir, exp.hash())
                     logger.debug(
                         f"Worker {worker.device_id} finalized processing request {msg['exp_id']}"

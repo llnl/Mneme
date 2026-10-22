@@ -1,9 +1,12 @@
 # tests/test_replay_executor.py
 
 import importlib
+import json
 import queue
+import time
 import types
 from dataclasses import dataclass
+from pathlib import Path
 import pytest
 
 
@@ -38,6 +41,7 @@ class FakeSnapshot:
 class FakePrologueDescr:
     def __init__(self, snapshot):
         self._snapshot = snapshot
+        self.fn = "prologue.mneme"
 
     def open(self):
         return self._snapshot
@@ -46,6 +50,7 @@ class FakePrologueDescr:
 class FakeEpilogueDescr:
     def __init__(self, snapshot):
         self._snapshot = snapshot
+        self.fn = "epilogue.mneme"
 
     def open(self):
         return self._snapshot
@@ -195,6 +200,112 @@ def _patch_executor_init_dependencies(monkeypatch, mod, records):
 # --------------------------
 # Tests
 # --------------------------
+
+
+def _capture_tracing(monkeypatch):
+    from mneme import tracing
+
+    events = []
+    flushes = []
+
+    class NativeTrace:
+        def MnemePy_TraceTimestamp(self):
+            return time.monotonic_ns()
+
+        def MnemePy_TraceComplete(self, name, start, end, args):
+            events.append({"name": name.decode(), "args": json.loads(args)})
+
+        def MnemePy_TraceFlush(self):
+            flushes.append(len(events))
+
+        def MnemePy_TraceDisable(self, reason):
+            raise AssertionError(reason.decode())
+
+    monkeypatch.setattr(tracing, "enabled", True)
+    monkeypatch.setattr(tracing, "_native", lambda: NativeTrace())
+    return events, flushes
+
+
+@pytest.mark.parametrize("verified", [False, True])
+@pytest.mark.parametrize("record_db", ["db", Path("db")], ids=["string", "path"])
+def test_trace_pipeline_covers_stages_and_preserves_execution(
+    monkeypatch, verified, record_db
+):
+    """make sure tracing properly capturs the expected stages"""
+
+    events, flushes = _capture_tracing(monkeypatch)
+    mod = _reload_with_identity_decorators(monkeypatch)
+
+    class Snapshot(FakeSnapshot):
+        def __eq__(self, other):
+            return verified
+
+    kernel = FakeKernelDescr(prologue=Snapshot(), epilogue=Snapshot())
+    _patch_executor_init_dependencies(monkeypatch, mod, FakeRecordedExecution(kernel))
+    calls = []
+    monkeypatch.setattr(mod.jit, "optimize", lambda *args: calls.append("optimize"))
+
+    def codegen(*args):
+        calls.append("codegen")
+        return FakeMemBuffer()
+
+    monkeypatch.setattr(mod.jit, "codegen_object", codegen)
+    function = FakeDeviceFunction()
+    monkeypatch.setattr(
+        mod.DeviceModule, "from_MemBuffer",
+        lambda _: FakeDeviceModule(device_func=function),
+    )
+    executor = mod.BaseExecutor(record_db=record_db, record_id="rid", iterations=3)
+    executor.link_ir()
+    with executor:
+        result = mod.ExperimentResult()
+        config = mod.ExperimentConfiguration()
+        executor._execute(result, config, FakeModule())
+
+    assert result.verified is verified
+    assert result.executed
+    assert calls == ["optimize", "codegen", "optimize", "codegen"]
+    assert [call[-1] for call in function.profile_calls] == [1, 5]
+    names = {event["name"] for event in events}
+    assert {
+        "metadata.load", "metadata.record", "snapshot.prologue.open",
+        "snapshot.epilogue.open", "verify.noop", "ir.link", "ir.clone",
+        "ir.preprocess", "ir.optimize", "ir.codegen", "execution.verification",
+        "execution.tracked", "verify.compare", "snapshot.cleanup", "experiment",
+    } <= names
+    for name in ("metadata.load", "metadata.record"):
+        metadata, = [event for event in events if event["name"] == name]
+        assert metadata["args"]["record_database"] == str(record_db)
+    experiment, = [e for e in events if e["name"] == "experiment"]
+    assert experiment["args"]["config_hash"] == config.hash()
+    assert experiment["args"]["configuration"] == config.to_dict()
+    comparison, = [e for e in events if e["name"] == "verify.compare"]
+    assert comparison["args"]["verified"] is verified
+    assert len(flushes) >= 5
+
+
+def test_trace_flushes_when_an_executor_stage_raises(monkeypatch):
+    """make sure trace files are still flushed after an exception"""
+
+    events, flushes = _capture_tracing(monkeypatch)
+    mod = _reload_with_identity_decorators(monkeypatch)
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
+    )
+    executor = mod.BaseExecutor(record_db="db", record_id="rid")
+    executor.open()
+    flushes.clear()
+
+    def fail(*args):
+        raise RuntimeError("build failed")
+
+    monkeypatch.setattr(executor, "_build", fail)
+    with pytest.raises(RuntimeError, match="build failed"):
+        executor._execute(mod.ExperimentResult(), mod.ExperimentConfiguration(), FakeModule())
+    experiment, = [e for e in events if e["name"] == "experiment"]
+    assert experiment["args"]["error"] == "RuntimeError"
+    assert flushes == [len(events)]
+    executor.close()
 
 
 def test_baseexecutor_init_sets_gpu_affinity_and_loads_records(monkeypatch):
@@ -680,6 +791,7 @@ def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
 
 
 def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path):
+    events, flushes = _capture_tracing(monkeypatch)
     mod = _reload_with_identity_decorators(monkeypatch)
 
     # Save the real staticmethod BEFORE monkeypatching the class name.
@@ -765,6 +877,9 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path):
     assert msg["exp_id"] == 7
     assert isinstance(msg["data"], dict)
     assert msg["llvm_ir"] == ""
+    request, = [event for event in events if event["name"] == "tuning.request"]
+    assert request["args"]["request_id"] == 7
+    assert len(flushes) >= 2
 
 
 def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
