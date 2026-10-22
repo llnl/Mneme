@@ -1,8 +1,10 @@
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeAnnotation.hpp"
 #include "mneme/MnemeComparators.hpp"
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mneme/MnemeLogger.hpp>
 #include <type_traits>
 
@@ -93,6 +95,17 @@ template <class T> MNEME_DEV uint64_t ulp_distance(T a, T b) {
 template <class T>
 MNEME_DEV double element_error(T a, T b, ThresholdKind kind,
                                double rel_eps = 1e-12) {
+  if constexpr (std::is_floating_point_v<T> || std::is_same_v<T, __half>) {
+    const double da = (double)a;
+    const double db = (double)b;
+    if (!std::isfinite(da) || !std::isfinite(db)) {
+      // allow nans and same-sign infinities
+      return (da == db || (std::isnan(da) && std::isnan(db)))
+                 ? 0.0
+                 : std::numeric_limits<double>::infinity();
+    }
+  }
+
   const double abs_err = dabs(diff_as_double(a, b));
   if (kind == ThresholdKind::Absolute)
     return abs_err;
@@ -103,7 +116,9 @@ MNEME_DEV double element_error(T a, T b, ThresholdKind kind,
 }
 
 // Threshold check (per-element)
-MNEME_DEV bool element_pass(double err, double thr) { return err <= thr; }
+MNEME_DEV bool element_pass(double err, double thr) {
+  return std::isfinite(err) && err <= thr;
+}
 
 MNEME_DEV double atomicMaxDouble(double *addr, double val) {
 #if MNEME_ENABLE_CUDA

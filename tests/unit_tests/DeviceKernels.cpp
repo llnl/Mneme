@@ -1,6 +1,6 @@
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeAnnotation.hpp"
-#include "mneme/MnemeComparators.hpp"
+#include "mneme/MnemeMemory.hpp"
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -342,6 +342,109 @@ static void run_all_for_dtype(BuiltinDType dt) {
   }
 }
 
+template <class T, class Bits> static T value_from_bits(Bits bits) {
+  // helper to construct a float/double/__half from its bit pattern
+  static_assert(sizeof(T) == sizeof(Bits));
+  T value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+// check the inf/nan pairs are treated properly in correctness checking
+template <class T>
+static void run_pair_case(BuiltinDType dtype, T a, T b, ThresholdKind tk,
+                          Norm norm, double threshold, double expected_error,
+                          bool expect_pass, size_t N = 2048,
+                          size_t pair_idx = 777) {
+  std::vector<T> hA(N, (T)1.0), hB(N, (T)1.0);
+  hA[pair_idx] = a;
+  hB[pair_idx] = b;
+  const size_t NumBytes = N * sizeof(T);
+  auto check = [](auto status) {
+    auto EC = MnemeDeviceRT::DeviceErrorCheck(status);
+    if (EC)
+      LOG_FATAL("Pair comparison test failed: " + EC.value());
+  };
+
+  MnemeMemoryBlob<Vendor> A(NumBytes, nullptr, NumBytes);
+  MnemeMemoryBlob<Vendor> B(NumBytes, nullptr, NumBytes);
+  check(A.allocate(NumBytes));
+  check(B.allocate(NumBytes));
+  check(MnemeDeviceRT::DeviceCopy(A.getBlobAddr(), hA.data(), NumBytes,
+                                  MnemeDeviceRT::MemcpyHostToDeviceKind()));
+  check(MnemeDeviceRT::DeviceCopy(B.getBlobAddr(), hB.data(), NumBytes,
+                                  MnemeDeviceRT::MemcpyHostToDeviceKind()));
+
+  Metadata md;
+  md.builtin = dtype;
+  md.threshold_kind = tk;
+  md.norm = norm;
+  md.threshold = threshold;
+  A.setMetadata(md);
+  B.setMetadata(md);
+
+  CompareResult r = compareDeviceBlobs(
+      reinterpret_cast<const char *>(A.getBlobAddr()),
+      reinterpret_cast<const char *>(B.getBlobAddr()), NumBytes, md);
+  if (std::isfinite(expected_error))
+    assert(std::isfinite(r.MaxErr) && approx(r.MaxErr, expected_error));
+  else
+    assert(r.MaxErr == expected_error);
+
+  assert(r.AnyFail == (norm == Norm::None && !expect_pass));
+  if (norm == Norm::None) {
+    if (expect_pass)
+      assert(r.FirstBadIdx >= N);
+    else
+      assert(r.FirstBadIdx == pair_idx);
+  } else if (std::isfinite(expected_error)) {
+    assert(std::isfinite(r.Agg) && approx(r.Agg, expected_error));
+  } else {
+    assert(r.Agg == expected_error);
+  }
+  assert((A == B) == expect_pass);
+  assert((B == A) == expect_pass);
+
+  check(A.release());
+  check(B.release());
+}
+
+template <class T>
+static void run_nonfinite_cases(BuiltinDType dtype, T nan_a, T nan_b) {
+  const double inf = std::numeric_limits<double>::infinity();
+  struct PairCase {
+    T a, b;
+    bool equal;
+  };
+
+  // nan_a and nan_b have different signs and payloads in each tested format.
+  const PairCase Cases[] = {
+      {nan_a, nan_a, true},    {nan_a, nan_b, true},
+      {(T)inf, (T)inf, true},  {(T)-inf, (T)-inf, true},
+      {nan_a, (T)1.0, false},  {nan_a, (T)inf, false},
+      {nan_a, (T)-inf, false}, {(T)inf, (T)-inf, false},
+      {(T)inf, (T)1.0, false}, {(T)-inf, (T)1.0, false},
+  };
+
+  for (auto tk : {ThresholdKind::Absolute, ThresholdKind::Relative}) {
+    for (auto norm : {Norm::None, Norm::L1, Norm::L2, Norm::Linf}) {
+      for (const auto &c : Cases) {
+        for (double threshold : {0.0, inf}) {
+          run_pair_case<T>(dtype, c.a, c.b, tk, norm, threshold,
+                           c.equal ? 0.0 : inf, c.equal);
+        }
+      }
+
+
+      const double error = tk == ThresholdKind::Absolute ? 0.25 : 0.2;
+      run_pair_case<T>(dtype, (T)1.0, (T)1.25, tk, norm, 0.1, error,
+                       false);
+      run_pair_case<T>(dtype, (T)1.0, (T)1.25, tk, norm, 0.5, error,
+                       true);
+    }
+  }
+}
+
 // Byte comparison of buffers larger than 2 GiB must still see a difference
 // past byte 2^31.
 static void run_large_u8_case() {
@@ -388,6 +491,23 @@ int main() {
   run_all_for_dtype(BuiltinDType::F16);
   run_all_for_dtype(BuiltinDType::F32);
   run_all_for_dtype(BuiltinDType::F64);
+
+  run_nonfinite_cases<__half>(BuiltinDType::F16,
+                              value_from_bits<__half>(uint16_t{0x7e01}),
+                              value_from_bits<__half>(uint16_t{0xfe02}));
+  run_nonfinite_cases<float>(BuiltinDType::F32,
+                             value_from_bits<float>(uint32_t{0x7fc00001}),
+                             value_from_bits<float>(uint32_t{0xffc00002}));
+  run_nonfinite_cases<double>(
+      BuiltinDType::F64, value_from_bits<double>(uint64_t{0x7ff8000000000001}),
+      value_from_bits<double>(uint64_t{0xfff8000000000002}));
+
+  // go beyond 2^31 threads to ensure the reduction sees the NaN and the matching pair.
+  run_pair_case<float>(BuiltinDType::F32,
+                       std::numeric_limits<float>::quiet_NaN(), 1.0f,
+                       ThresholdKind::Absolute, Norm::Linf, 0.0,
+                       std::numeric_limits<double>::infinity(),
+                       false, 8192 * 256 + 1, 0);
 
   std::cout << "All tests passed.\n";
   return 0;

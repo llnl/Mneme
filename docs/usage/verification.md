@@ -151,6 +151,10 @@ Determines how per-element errors are aggregated across the buffer.
 When `norm` is `L1`, `L2`, or `Linf`, the aggregated value is compared
 against `threshold` to determine pass/fail.
 
+For typed floating-point comparisons (`F16`, `F32`, and `F64`), two NaNs
+match, and infinities match only when their signs agree. NaNs and 
+infinities that don't match are invalid.
+
 ### `tag` (optional)
 
 A free-form string stored alongside the buffer snapshot.  Tags are
