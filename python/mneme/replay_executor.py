@@ -127,7 +127,7 @@ class BaseExecutor:
         self.record_db = record_db
         self.device_id = device_id
         with tracing.span(
-            "metadata.load", lambda: {"record_database": self.record_db}
+            "metadata.load", lambda: {"record_database": str(self.record_db)}
         ):
             self.records = RecordedExecution.from_json(self.record_db)
         if record_id is None:
@@ -159,7 +159,7 @@ class BaseExecutor:
         with tracing.span(
             "metadata.record",
             lambda: {
-                "record_database": self.record_db,
+                "record_database": str(self.record_db),
                 "record_id": self.record_id,
                 "kernel": self.kernel_descr.kernel_name,
                 "device_id": self.device_id,
