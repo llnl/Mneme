@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <llvm/ADT/StringRef.h>
@@ -182,7 +183,7 @@ public:
     if (Md.norm == Norm::None)
       return Compare.AnyFail == 0;
 
-    return Compare.Agg <= Md.threshold;
+    return std::isfinite(Compare.Agg) && Compare.Agg <= Md.threshold;
   }
   bool operator!=(const MnemeMemoryBlob<VendorTypes> &other) const {
     return !(*this == other);
