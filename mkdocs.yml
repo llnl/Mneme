@@ -36,6 +36,7 @@ nav:
   - Develop:
       - Python: dev/python.md
       - C++: dev/cpp.md
+      - Tracing: dev/tracing.md
   - Examples: examples.md
   - Limitations: limitations.md
 plugins:
