@@ -1,3 +1,4 @@
+import inspect
 import queue
 import pytest
 
@@ -368,6 +369,48 @@ def test_submit_after_executor_broken_returns_failed_future(monkeypatch):
 # -----------------------------------------------------------------------------
 # AsyncReplayExecutor
 # -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("short_circuit", [False, True])
+def test_async_executor_preserves_short_circuit_on_worker_respawn(
+    monkeypatch, short_circuit
+):
+    import mneme.async_executor as mod
+
+    worker_options = []
+
+    def make_process(target, args, daemon):
+        options = inspect.signature(target).bind(*args).arguments
+        worker_options.append(options["short_circuit"])
+        return DummyProcess()
+
+    monkeypatch.setattr(mod.threading, "Thread", NoopThread, raising=True)
+    monkeypatch.setattr(mod, "Process", make_process)
+    monkeypatch.setattr(mod, "ProcessEvent", DummyEvent)
+    monkeypatch.setattr(mod, "ProcessQueue", DummyQueue)
+
+    exe = mod.AsyncReplayExecutor(
+        record_db="db",
+        record_id="rid",
+        iterations=3,
+        results_db_dir="/tmp",
+        num_workers=1,
+        short_circuit=short_circuit,
+    )
+    worker = exe.workers[0]
+    worker._state.set()
+    worker._process._alive = False
+    spawn_process = worker._spawn_process
+
+    def stop_after_respawn():
+        spawn_process()
+        worker._shutdown_event.set()
+        worker._process._alive = False
+
+    monkeypatch.setattr(worker, "_spawn_process", stop_after_respawn)
+    worker._shadow_process_loop()
+
+    assert worker_options == [short_circuit, short_circuit]
 
 
 def test_async_executor_submit(monkeypatch):

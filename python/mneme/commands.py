@@ -722,6 +722,24 @@ class Replay(BaseExecutor):
             help="Store the output LLVM IR to this file",
         )
 
+        parser.add_argument(
+            "--warmup",
+            "-wu",
+            required=False,
+            type=int,
+            help="The number of warmup iterations to run before the actual timing runs",
+            default=2,
+        )
+
+        parser.add_argument(
+            "--short-circuit",
+            "-sc",
+            required=False,
+            action=argparse.BooleanOptionalAction,
+            help="Skip timing runs if verification fails",
+            default=False,
+        )
+
         parser.set_defaults(func=Replay.run)
 
     def __init__(self, *args, **kwargs):

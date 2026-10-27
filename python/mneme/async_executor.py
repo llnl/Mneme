@@ -93,6 +93,7 @@ class TuneWorkerHandle:
         on_startup_failure_limit: Optional[
             Callable[["TuneWorkerHandle", str], None]
         ] = None,
+        short_circuit: bool = False,
     ):
         """
         Construct a worker handle and start the worker process + monitor thread.
@@ -119,6 +120,8 @@ class TuneWorkerHandle:
         max_startup_failures : int
             Maximum number of consecutive worker exits before readiness before this
             handle stops respawning the worker.
+        short_circuit : bool
+            Whether to skip timing runs when verification fails.
 
         Notes
         -----
@@ -141,6 +144,7 @@ class TuneWorkerHandle:
         self.iterations = iterations
         self.results_db_dir = results_db_dir
         self.warmup = warmup
+        self.short_circuit = short_circuit
         self.max_startup_failures = max_startup_failures
         self._startup_failures = 0
         self._on_startup_failure_limit = on_startup_failure_limit
@@ -189,6 +193,7 @@ class TuneWorkerHandle:
                 self.results_db_dir,
                 self._state,
                 self.warmup,
+                self.short_circuit,
             ),
             daemon=False,
         )
@@ -407,6 +412,7 @@ class AsyncReplayExecutor:
         num_workers: int,
         warmup: int = 2,
         max_startup_failures: int = 3,
+        short_circuit: bool = False,
     ):
         """
         Construct an asynchronous executor with a fixed-size worker pool.
@@ -428,6 +434,8 @@ class AsyncReplayExecutor:
         max_startup_failures : int
             Maximum number of consecutive pre-readiness startup failures allowed per
             worker before that worker stops respawning.
+        short_circuit : bool
+            Whether to skip timing runs when verification fails.
         """
         self.global_q = ThreadQueue()
         self._futures: Dict[int, EvalFuture] = {}
@@ -437,6 +445,7 @@ class AsyncReplayExecutor:
         self._ir_data = None
         self.iterations = iterations
         self.warmup = warmup
+        self.short_circuit = short_circuit
         self.max_startup_failures = max_startup_failures
         self._num_workers = num_workers
         self._failed_workers = set()
@@ -456,6 +465,7 @@ class AsyncReplayExecutor:
                     warmup=warmup,
                     max_startup_failures=max_startup_failures,
                     on_startup_failure_limit=self._handle_startup_failure_limit,
+                    short_circuit=short_circuit,
                 )
             )
 

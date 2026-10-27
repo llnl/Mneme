@@ -67,6 +67,7 @@ class TuneOptions:
     # Replay execution.
     iterations: int = 5
     warmup: int = 2
+    short_circuit: bool = False
     workers: int = 1
 
     # Output location, scoring, and reproducibility.
@@ -897,6 +898,7 @@ class TuningSession:
                 results_db_dir=self.options.results_dir,
                 num_workers=self.options.workers,
                 warmup=self.options.warmup,
+                short_circuit=self.options.short_circuit,
             )
         # the main tuning phase
         try:
