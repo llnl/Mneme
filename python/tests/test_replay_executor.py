@@ -679,7 +679,8 @@ def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
     assert isinstance(out_ir, FakeModule)
 
 
-def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path):
+@pytest.mark.parametrize("short_circuit", [False, True])
+def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circuit):
     mod = _reload_with_identity_decorators(monkeypatch)
 
     # Save the real staticmethod BEFORE monkeypatching the class name.
@@ -691,14 +692,18 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path):
 
     set_ir_calls = []
     process_ir_names = []
+    worker_options = []
 
     class FakeWorker:
-        def __init__(self, record_db, record_id, device_id, iterations, warmup):
+        def __init__(
+            self, record_db, record_id, device_id, iterations, warmup, short_circuit
+        ):
             self.record_db = record_db
             self.record_id = record_id
             self.device_id = device_id
             self.iterations = iterations
             self.warmup = warmup
+            worker_options.append(short_circuit)
 
         def link_ir(self):
             return FakeModule("root_ir")
@@ -755,8 +760,10 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path):
         iterations=3,
         results_db_dir=str(tmp_path),
         state=state,
+        short_circuit=short_circuit,
     )
 
+    assert worker_options == [short_circuit]
     assert state.set_called == 1
     assert set_ir_calls == ["replacement asm"]
     assert process_ir_names == ["replacement_ir_clone"]
@@ -781,7 +788,9 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
     )
 
     class FakeWorker:
-        def __init__(self, record_db, record_id, device_id, iterations, warmup):
+        def __init__(
+            self, record_db, record_id, device_id, iterations, warmup, short_circuit
+        ):
             self.device_id = device_id
 
         def link_ir(self):
