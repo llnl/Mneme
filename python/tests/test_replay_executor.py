@@ -587,10 +587,13 @@ def test_run_records_resource_usage_when_track_true(monkeypatch):
     assert res.local_mem_usage == device_func.local_mem
 
 
-def test_execute_orchestrates_verification_and_tracked_run(monkeypatch):
+@pytest.mark.parametrize("short_circuit", [False, True])
+@pytest.mark.parametrize("verified", [False, True])
+def test_execute_orchestrates_verification_and_tracked_run(
+    monkeypatch, short_circuit, verified
+):
     mod = _reload_with_identity_decorators(monkeypatch)
 
-    # prologue == epilogue => verified True
     shared_snap = FakeSnapshot(state="S")
     kernel = FakeKernelDescr(prologue=shared_snap, epilogue=shared_snap)
     rec = FakeRecordedExecution(kernel)
@@ -604,18 +607,22 @@ def test_execute_orchestrates_verification_and_tracked_run(monkeypatch):
 
     # Spy on _build and _run
     build_calls = []
+    built_modules = []
     run_calls = []
 
     def fake_build(result, cfg, ir_mod, track):
         build_calls.append((track, cfg.passes))
+        built_modules.append(ir_mod)
         return FakeMemBuffer()
 
     def fake_run(result, cfg, mem_buf, prologue, epilogue, verify, track, iters):
         if verify:
-            result.verified = True
+            result.verified = verified
         run_calls.append((track, iters))
 
-    ex = mod.BaseExecutor(record_db="x", record_id="rid", iterations=3)
+    ex = mod.BaseExecutor(
+        record_db="x", record_id="rid", iterations=3, short_circuit=short_circuit
+    )
     ex.open()  # load prologue/epilogue
 
     monkeypatch.setattr(ex, "_build", fake_build, raising=True)
@@ -627,17 +634,19 @@ def test_execute_orchestrates_verification_and_tracked_run(monkeypatch):
 
     out_ir = ex._execute(res, cfg, ir)
 
-    # Verification stage: track=False, iterations=1
-    # Tracked stage: track=True, iterations=self._iterations + 2 = 5
-    assert run_calls == [(False, 1), (True, 5)]
-    assert res.executed is True
-    assert res.verified is True
+    timing_skipped = short_circuit and not verified
+    expected_runs = [(False, 1)]
+    expected_builds = [(False, "default<O3>")]
+    if not timing_skipped:
+        expected_runs.append((True, 5))
+        expected_builds.append((True, "purge-autoinit,default<O3>"))
+    assert run_calls == expected_runs
+    assert build_calls == expected_builds
+    assert res.executed is (not timing_skipped)
+    assert res.verified is verified
 
-    # The verification build uses the caller's pipeline; the tracked build
-    # prepends the purge pass.
-    assert build_calls == [(False, "default<O3>"), (True, "purge-autoinit,default<O3>")]
-
-    # The returned module is a clone; the caller's module is left untouched.
+    # A skipped timing run returns the verification module.
+    assert out_ir is built_modules[-1]
     assert out_ir is not ir
 
     ex.close()
