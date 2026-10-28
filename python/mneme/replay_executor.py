@@ -123,6 +123,7 @@ class BaseExecutor:
         iterations: int = 3,
         device_id: int = 0,
         warmup: int = 2,
+        short_circuit: bool = False
     ):
         self.record_db = record_db
         self.device_id = device_id
@@ -150,6 +151,7 @@ class BaseExecutor:
         self.noop_verifies = False
         self._iterations = iterations
         self._warmup = warmup
+        self._short_circuit = short_circuit
         self.num_devices = get_device_count()
         set_device(device_id)
         logger.debug(
@@ -704,6 +706,13 @@ class BaseExecutor:
                 True, False, 1,
             )
 
+        if self._short_circuit and not result.verified:
+            logger.warning(
+                f"Verification failed for record {self.record_id} under config {config}. "
+                "Skipping tracked execution."
+            )
+            return ver_mod
+
         # NOTE: 2-3. Build and run with tracking on. The tracked build prepends the
         # purge-autoinit pass (registered via Proteus' JIT pass plugin API) to strip
         # the Clang-inserted auto-init memsets; verification above ran without it.
@@ -825,6 +834,7 @@ class TuneWorker(BaseExecutor):
         results_db_dir: str,
         state: Event,
         warmup: int = 2,
+        short_circuit: bool = False,
     ):
         """
         Worker process entry point: initialize resources and serve requests from a queue.
@@ -869,6 +879,8 @@ class TuneWorker(BaseExecutor):
             on the executor pipeline).
         warmup : int
             Number of warmup iterations to execute before measured iterations.
+        short_circuit : bool
+            Whether to skip timing runs when verification fails.
         results_db_dir : str
             Directory where per-worker logs and output artifacts are written.
         state : multiprocessing.Event
@@ -898,6 +910,7 @@ class TuneWorker(BaseExecutor):
             device_id=device_id,
             iterations=iterations,
             warmup=warmup,
+            short_circuit=short_circuit,
         )
         # Open GPU memory, setup prologue epilogue and create a single
         # LLVM IR file to start working on optimizations

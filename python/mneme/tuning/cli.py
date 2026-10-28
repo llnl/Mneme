@@ -89,6 +89,12 @@ def add_tune_args(parser: argparse.ArgumentParser) -> None:
         help="Warmup replay iterations to run before collecting timing samples.",
     )
     replay.add_argument(
+        "--short-circuit",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Controls individual Mneme replays. Don't run any timing runs for a candidate if verification fails. Default: disabled.",
+    )
+    replay.add_argument(
         "--workers",
         type=int,
         default=None,

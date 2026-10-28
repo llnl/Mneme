@@ -198,6 +198,30 @@ def test_tune_cli_baseline_policy_precedence(tmp_path, configured, flag, expecte
     assert json.loads(output_path.read_text())["require_verified_baseline"] is expected
 
 
+@pytest.mark.parametrize("flag, expected", [
+    (None, True),
+    ("--no-short-circuit", False),
+])
+def test_tune_cli_short_circuit_precedence(tmp_path, flag, expected):
+    from mneme.tuning import cli as tune_cli
+
+    config = {
+        "record_database": "db.json",
+        "record_id": "rid",
+        "trials": 3,
+        "short_circuit": True,
+    }
+    input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    input_path.write_text(json.dumps(config))
+    parser = tune_cli.argparse.ArgumentParser(prog="mneme tune")
+    tune_cli.add_tune_args(parser)
+    argv = ["--config", str(input_path), "--dump-config", str(output_path)]
+    if flag:
+        argv.append(flag)
+    assert tune_cli.run_tune(parser.parse_args(argv), None) == 0
+    assert json.loads(output_path.read_text())["short_circuit"] is expected
+
+
 def test_tune_cli_rejects_baseline_continuation_with_speedup():
     from mneme.tuning import cli as tune_cli
 
