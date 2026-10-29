@@ -14,7 +14,7 @@ Workflow:
 
 Notes:
   - This example intentionally keeps the API usage explicit and minimal.
-  - The Optuna objective is configured as direction="minimize" and the script
+  - The Optuna objective is configured as direction="maximize" and the script
     reports a speedup value to Optuna, exactly as shown in the original example.
 """
 
@@ -204,7 +204,7 @@ def tune(executor, record_db, record_id, num_trials):
     start = time.time()
     for i, (config, ctrial) in enumerate(SS):
         if not config.is_valid():
-            study.tell(ctrial, (1 << 64) - 1)
+            study.tell(ctrial, state=optuna.trial.TrialState.FAIL)
             continue
 
         val = executor.evaluate(config)
@@ -220,7 +220,7 @@ def tune(executor, record_db, record_id, num_trials):
                 f" Experiment {i} with hash:{config.hash()} has speedup of {speedup} and total time is {avg_time}"
             )
         else:
-            study.tell(ctrial, (1 << 64) - 1)
+            study.tell(ctrial, state=optuna.trial.TrialState.FAIL)
             print(i, config.hash(), f"Experiment failed with {val.error}")
 
     best = study.best_trial
