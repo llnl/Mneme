@@ -250,8 +250,7 @@ public:
     keepRecordedCopies();
   }
 
-  // Restores blobs from device-side copies, which leaves the kernel's inputs in
-  // the GPU caches as in the app; a host-to-device copy leaves them cold.
+  // Restores blobs from device-side copies.
   void reset() override {
     for (const auto &C : RecordedCopies) {
       auto EC = MnemeDeviceRT::DeviceErrorCheck(
