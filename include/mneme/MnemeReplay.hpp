@@ -98,7 +98,7 @@ public:
 
   virtual void load() = 0;
 
-  void reset() {
+  virtual void reset() {
     copyToDevice();
     copyGlobals();
   }
@@ -247,12 +247,67 @@ public:
     }
 
     this->copyToDevice();
+    keepRecordedCopies();
+  }
+
+  // Restores blobs from device-side copies, which leaves the kernel's inputs in
+  // the GPU caches as in the app; a host-to-device copy leaves them cold.
+  void reset() override {
+    for (const auto &C : RecordedCopies) {
+      auto EC = MnemeDeviceRT::DeviceErrorCheck(
+          MnemeDeviceRT::DeviceCopy(C.BlobAddr, C.CopyAddr, C.Size,
+                                    MnemeDeviceRT::MemcpyDeviceToDeviceKind()));
+      if (EC)
+        LOG_FATAL("Could not restore memory blob at {}: {}", C.BlobAddr,
+                  EC.value());
+    }
+    this->copyGlobals();
+  }
+
+  ~PrologueState() override {
+    for (const auto &C : RecordedCopies) {
+      auto EC = MnemeDeviceRT::DeviceErrorCheck(
+          MnemeDeviceRT::DeviceFree(C.CopyAddr));
+      if (EC)
+        LOG_WARN("Could not free recorded copy of blob at {}: {}", C.BlobAddr,
+                 EC.value());
+    }
   }
 
   PrologueState<VendorTypes> *asPrologue() override { return this; }
 
 protected:
   bool isPrologue() const override { return true; }
+
+private:
+  struct RecordedCopy {
+    void *BlobAddr;
+    void *CopyAddr;
+    uint64_t Size;
+  };
+  std::vector<RecordedCopy> RecordedCopies;
+
+  void keepRecordedCopies() {
+    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState) {
+      if (MemBlob.getSize() == 0)
+        continue;
+      void *CopyAddr = nullptr;
+      auto EC = MnemeDeviceRT::DeviceErrorCheck(
+          MnemeDeviceRT::DeviceMalloc(&CopyAddr, MemBlob.getSize()));
+      if (EC)
+        LOG_FATAL("Could not allocate a {}-byte device copy of the blob at {} "
+                  "for restores: {}",
+                  MemBlob.getSize(), MemBlob.getBlobAddr(), EC.value());
+      RecordedCopies.push_back(
+          {MemBlob.getBlobAddr(), CopyAddr, MemBlob.getSize()});
+      EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
+          CopyAddr, MemBlob.getBlobAddr(), MemBlob.getSize(),
+          MnemeDeviceRT::MemcpyDeviceToDeviceKind()));
+      if (EC)
+        LOG_FATAL("Could not copy the blob at {} for restores: {}",
+                  MemBlob.getBlobAddr(), EC.value());
+    }
+  }
 };
 
 // Replay state for the expected kernel output. Unlike the prologue, load()
