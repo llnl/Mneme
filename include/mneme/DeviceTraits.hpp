@@ -255,6 +255,10 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return hipMemcpyDeviceToHost;
   }
 
+  static constexpr hipMemcpyKind MemcpyDeviceToDeviceKind() {
+    return hipMemcpyDeviceToDevice;
+  }
+
   // On integrated GPUs, applications expect device memory to be
   // host-accessible, but VMM mappings are GPU-only by default. Grant the CPU
   // access through ROCr, since hipMemSetAccess may ignore host locations.
@@ -673,6 +677,10 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
 
   static constexpr cudaMemcpyKind MemcpyDeviceToHostKind() {
     return cudaMemcpyDeviceToHost;
+  }
+
+  static constexpr cudaMemcpyKind MemcpyDeviceToDeviceKind() {
+    return cudaMemcpyDeviceToDevice;
   }
 
   static uint64_t getMinPageSize(int DeviceID) {
