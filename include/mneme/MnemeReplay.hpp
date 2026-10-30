@@ -173,8 +173,7 @@ public:
 
   // Maps every blob at its recorded address. Blobs closer than a large page
   // share one mapping, owned by the lowest blob and rounded to whole large
-  // pages and driver VA blocks, or to pages if those do not fit. On MI300A,
-  // mappings rounded only to pages made a strided kernel about a third slower.
+  // pages and driver VA blocks, or to pages if those do not fit.
   void load() override {
     std::vector<std::pair<uintptr_t, Blob *>> Blobs;
     for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
