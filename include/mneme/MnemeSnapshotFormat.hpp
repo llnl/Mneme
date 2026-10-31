@@ -174,6 +174,108 @@ private:
   std::string Filename;
 };
 
+// Section decoders shared by the readers. A helper decodes a section as it
+// appears in every layout that calls it. When a new layout changes a section,
+// add a new helper instead of changing one an older reader calls.
+
+inline void
+readGlobals(const char *&Buffer,
+            std::unordered_map<std::string, ReplayGlobalVar> &GlobalVars) {
+  size_t TotalGlobals = util::extractScalar<size_t>(Buffer);
+  LOG_DEBUG("Snapshot contains {} Globals", TotalGlobals);
+  for (size_t I = 0; I < TotalGlobals; ++I) {
+    auto [Name, RGV] = readGlobalVarRecord(Buffer);
+    GlobalVars.try_emplace(Name, std::move(RGV));
+  }
+}
+
+inline void readArgs(const char *&Buffer, KernelInfo &KInfo) {
+  size_t TotalArguments = util::extractScalar<size_t>(Buffer);
+  LOG_DEBUG("Snapshot contains {} total arguments", TotalArguments);
+  KInfo.KernelArgSizes.resize(TotalArguments);
+  KInfo.ArgData.resize(TotalArguments);
+  for (size_t A = 0; A < TotalArguments; ++A) {
+    KInfo.KernelArgSizes[A] = util::extractScalar<size_t>(Buffer);
+    KInfo.setArgData(Buffer, A);
+  }
+}
+
+template <DeviceVendors VendorTypes>
+Snapshot<VendorTypes> loadDiffBase(const BaseSnapshotSource<VendorTypes> &Base,
+                                   const std::string &KernelName,
+                                   const std::string &Filename) {
+  if (Base.empty())
+    LOG_FATAL("Mneme diff snapshot " + Filename +
+              " requires a base prologue snapshot");
+  return Base.load(KernelName);
+}
+
+inline void expectCount(size_t Actual, size_t Expected,
+                        const std::string &Filename, const char *What) {
+  if (Actual != Expected)
+    LOG_FATAL("Mneme diff " + Filename + " does not match prologue " + What +
+              " count");
+}
+
+// A range count followed by that many (offset, size, bytes) ranges.
+inline void applyDiffRanges(const char *&Buffer,
+                            llvm::MutableArrayRef<uint8_t> Target) {
+  size_t NumRanges = util::extractScalar<size_t>(Buffer);
+  for (size_t R = 0; R < NumRanges; ++R) {
+    size_t Offset = util::extractScalar<size_t>(Buffer);
+    size_t Size = util::extractScalar<size_t>(Buffer);
+    if (Offset > Target.size() || Size > Target.size() - Offset)
+      LOG_FATAL("Malformed Mneme diff range: offset " + std::to_string(Offset) +
+                " size " + std::to_string(Size) + " exceeds target size " +
+                std::to_string(Target.size()));
+    std::memcpy(Target.data() + Offset, Buffer, Size);
+    Buffer += Size;
+  }
+}
+
+inline void
+applyGlobalDiffs(const char *&Buffer,
+                 std::unordered_map<std::string, ReplayGlobalVar> &GlobalVars,
+                 const std::string &Filename) {
+  size_t TotalGlobals = util::extractScalar<size_t>(Buffer);
+  expectCount(TotalGlobals, GlobalVars.size(), Filename, "global");
+  for (size_t I = 0; I < TotalGlobals; ++I) {
+    GlobalVarHeader GVH = GlobalVarHeader::read(Buffer);
+    auto It = GlobalVars.find(GVH.Name);
+    if (It == GlobalVars.end())
+      LOG_FATAL("Mneme diff references global missing from prologue: " +
+                GVH.Name);
+    if (It->second.VarSize != GVH.Size)
+      LOG_FATAL("Mneme diff global size mismatch for: " + GVH.Name);
+    It->second.DevAddr = GVH.DevAddr;
+    applyDiffRanges(Buffer, llvm::MutableArrayRef<uint8_t>(
+                                static_cast<uint8_t *>(It->second.HostAddr),
+                                It->second.VarSize));
+  }
+}
+
+// Reads a diff blob header and returns the base blob it refers to.
+template <DeviceVendors VendorTypes>
+MnemeMemoryBlob<VendorTypes> &readDiffBlobHeader(
+    const char *&Buffer,
+    llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory) {
+  BlobHeader BH = BlobHeader::read(Buffer);
+  auto It = DeviceMemory.find(BH.DevAddr);
+  if (It == DeviceMemory.end())
+    LOG_FATAL("Mneme diff references device allocation missing from "
+              "prologue");
+  auto &Blob = It->second;
+  if (Blob.getActualSize() != BH.ActualSize || Blob.getSize() != BH.Size)
+    LOG_FATAL("Mneme diff memory blob size mismatch");
+  return Blob;
+}
+
+template <DeviceVendors VendorTypes>
+llvm::MutableArrayRef<uint8_t> hostBytes(MnemeMemoryBlob<VendorTypes> &Blob) {
+  return llvm::MutableArrayRef<uint8_t>(Blob.getHostData().get(),
+                                        Blob.getSize());
+}
+
 template <DeviceVendors VendorTypes>
 class BytesReaderV0 : public SnapshotReader<VendorTypes> {
 public:
@@ -188,45 +290,20 @@ public:
        const BaseSnapshotSource<VendorTypes> &) const override {
     Snapshot<VendorTypes> Snap;
     Snap.KInfo = std::make_shared<KernelInfo>(KernelName);
+    const char *CurrentPtr = this->payload();
 
-    auto &GlobalVars = Snap.GlobalVars;
-    auto &DeviceMemory = Snap.DeviceMemory;
-    auto &KInfo = Snap.KInfo;
-
-    auto *Start = this->payload();
-    auto *CurrentPtr = Start;
-    size_t TotalGlobals = util::extractScalar<size_t>(CurrentPtr);
-    LOG_DEBUG("Snapshot contains {} Globals at location {}", TotalGlobals,
-              (uintptr_t)CurrentPtr - (uintptr_t)Start);
-    for (auto I = 0; I < TotalGlobals; I++) {
-      auto [Name, RGV] = readGlobalVarRecord(CurrentPtr);
-      GlobalVars.try_emplace(Name, std::move(RGV));
-    }
-
-    auto TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
-
-    LOG_DEBUG("Snapshot contains {} Memory Blobs starting at location {}",
-              TotalMemBlobs, (uintptr_t)CurrentPtr - (uintptr_t)Start);
-
-    for (auto M = 0; M < TotalMemBlobs; M++) {
-      DeviceMemory.insert(MnemeMemoryBlob<VendorTypes>::fromBuffer(CurrentPtr));
-    }
-
-    // Get kernel arguments.
-    auto TotalArguments = util::extractScalar<size_t>(CurrentPtr);
-    LOG_DEBUG("Snapshot contains {} total arguments starting at location {}",
-              TotalArguments, (uintptr_t)CurrentPtr - (uintptr_t)Start);
-    KInfo->KernelArgSizes.resize(TotalArguments);
-    KInfo->ArgData.resize(TotalArguments);
-    for (auto A = 0; A < TotalArguments; A++) {
-      KInfo->KernelArgSizes[A] = util::extractScalar<size_t>(CurrentPtr);
-      KInfo->setArgData(CurrentPtr, A);
-    }
-
+    readGlobals(CurrentPtr, Snap.GlobalVars);
+    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
+    for (size_t I = 0; I < TotalMemBlobs; ++I)
+      Snap.DeviceMemory.insert(
+          MnemeMemoryBlob<VendorTypes>::fromBuffer(CurrentPtr));
+    readArgs(CurrentPtr, *Snap.KInfo);
     return Snap;
   }
 };
 
+// A diff stores only changed ranges, so the diff readers reconstruct the full
+// base prologue first and then overlay the diff onto it.
 template <DeviceVendors VendorTypes>
 class DiffReaderV1 : public SnapshotReader<VendorTypes> {
 public:
@@ -239,85 +316,19 @@ public:
   Snapshot<VendorTypes>
   read(const std::string &KernelName,
        const BaseSnapshotSource<VendorTypes> &Base) const override {
-    if (Base.empty())
-      LOG_FATAL("Mneme diff snapshot " + this->Filename +
-                " requires a base prologue snapshot");
+    Snapshot<VendorTypes> Snap = loadDiffBase(Base, KernelName, this->Filename);
+    const char *CurrentPtr = this->payload();
 
-    // A diff stores only changed ranges, so reconstruct the full base prologue
-    // first and then overlay the diff onto it.
-    Snapshot<VendorTypes> Snap = Base.load(KernelName);
-    const std::string &Filename = this->Filename;
-    auto &GlobalVars = Snap.GlobalVars;
-    auto &DeviceMemory = Snap.DeviceMemory;
-
-    auto *CurrentPtr = this->payload();
-    size_t TotalGlobals = util::extractScalar<size_t>(CurrentPtr);
-    expectCount(TotalGlobals, GlobalVars.size(), Filename, "global");
-
-    for (size_t I = 0; I < TotalGlobals; ++I) {
-      GlobalVarHeader GVH = GlobalVarHeader::read(CurrentPtr);
-      size_t NumRanges = util::extractScalar<size_t>(CurrentPtr);
-
-      auto It = GlobalVars.find(GVH.Name);
-      if (It == GlobalVars.end())
-        LOG_FATAL("Mneme diff references global missing from prologue: " +
-                  GVH.Name);
-      if (It->second.VarSize != GVH.Size)
-        LOG_FATAL("Mneme diff global size mismatch for: " + GVH.Name);
-      It->second.DevAddr = GVH.DevAddr;
-      applyDiffRanges(
-          CurrentPtr,
-          llvm::MutableArrayRef<uint8_t>(
-              static_cast<uint8_t *>(It->second.HostAddr), It->second.VarSize),
-          NumRanges);
-    }
-
+    applyGlobalDiffs(CurrentPtr, Snap.GlobalVars, this->Filename);
     size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
-    expectCount(TotalMemBlobs, DeviceMemory.size(), Filename, "memory blob");
-
+    expectCount(TotalMemBlobs, Snap.DeviceMemory.size(), this->Filename,
+                "memory blob");
     for (size_t I = 0; I < TotalMemBlobs; ++I) {
-      BlobHeader BH = BlobHeader::read(CurrentPtr);
-      auto MD = metadata::fromBuffer(CurrentPtr);
-      size_t NumRanges = util::extractScalar<size_t>(CurrentPtr);
-
-      auto It = DeviceMemory.find(BH.DevAddr);
-      if (It == DeviceMemory.end())
-        LOG_FATAL("Mneme diff references device allocation missing from "
-                  "prologue");
-      auto &Blob = It->second;
-      if (Blob.getActualSize() != BH.ActualSize || Blob.getSize() != BH.Size)
-        LOG_FATAL("Mneme diff memory blob size mismatch");
-      Blob.setMetadata(MD);
-      applyDiffRanges(CurrentPtr,
-                      llvm::MutableArrayRef<uint8_t>(Blob.getHostData().get(),
-                                                     Blob.getSize()),
-                      NumRanges);
+      auto &Blob = readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
+      Blob.setMetadata(metadata::fromBuffer(CurrentPtr));
+      applyDiffRanges(CurrentPtr, hostBytes(Blob));
     }
-
     return Snap;
-  }
-
-private:
-  static void expectCount(size_t Actual, size_t Expected,
-                          const std::string &Filename, const char *What) {
-    if (Actual != Expected)
-      LOG_FATAL("Mneme diff " + Filename + " does not match prologue " + What +
-                " count");
-  }
-
-  static void applyDiffRanges(const char *&Buffer,
-                              llvm::MutableArrayRef<uint8_t> Target,
-                              size_t NumRanges) {
-    for (size_t R = 0; R < NumRanges; ++R) {
-      size_t Offset = util::extractScalar<size_t>(Buffer);
-      size_t Size = util::extractScalar<size_t>(Buffer);
-      if (Offset > Target.size() || Size > Target.size() - Offset)
-        LOG_FATAL("Malformed Mneme diff range: offset " +
-                  std::to_string(Offset) + " size " + std::to_string(Size) +
-                  " exceeds target size " + std::to_string(Target.size()));
-      std::memcpy(Target.data() + Offset, Buffer, Size);
-      Buffer += Size;
-    }
   }
 };
 
