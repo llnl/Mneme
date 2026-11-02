@@ -209,7 +209,7 @@ RecordingPolicy RecordingPolicy::load(const Config &Conf) {
         fromJSONValue(llvm::json::Object{{"recording", std::move(Recording)}},
                       Conf.getRecordingRankPolicy());
   } else {
-    Result.EnabledThisRank = Conf.isRecordingEnabledForCurrentRank();
+    Result.EnabledThisRank = Conf.getRecordingRankPolicy().isEnabled();
   }
 
   // Preserve the original environment regex's support for both name forms.

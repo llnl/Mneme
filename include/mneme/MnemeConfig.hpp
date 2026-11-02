@@ -302,10 +302,6 @@ public:
   const uint64_t ChunkSize;
   const KernelTimingType KernelTiming;
 
-  bool isRecordingEnabledForCurrentRank() const {
-    return RankPolicy.isEnabled();
-  }
-
   const config_detail::RecordingRankPolicy &getRecordingRankPolicy() const {
     return RankPolicy;
   }
