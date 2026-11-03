@@ -8,6 +8,7 @@
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/Support/FormatVariadic.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MD5.h>
 #include <llvm/Support/MemoryBuffer.h>
@@ -32,6 +33,7 @@
 #include <type_traits>
 
 #include "mneme/DeviceTraits.hpp"
+#include "mneme/MnemeArgValueProfile.hpp"
 #include "mneme/MnemeConfig.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
 #include "mneme/MnemeLLVMUtils.hpp"
@@ -256,24 +258,29 @@ class KernelInstancesCollection {
   const std::string KName;
   SourceFileInfo Source;
   bool CopySource;
+  std::optional<KernelArgProfile> ArgProfile;
 
 private:
-  // Parse Proteus's serialized bitcode in a Mneme-owned LLVMContext and
-  // extract per-argument metadata. Operating on a Mneme-owned Module
-  // keeps Mneme's LLVM runtime from touching any
+  // Parse Proteus's serialized bitcode in a Mneme-owned LLVMContext. Operating
+  // on a Mneme-owned Module keeps Mneme's LLVM runtime from touching any
   // Proteus-owned LLVM C++ object across the DSO boundary.
-  void extractArgInfoFromBitcode(llvm::StringRef Bitcode) {
-    auto Ctx = std::make_unique<llvm::LLVMContext>();
+  std::unique_ptr<llvm::Module> parseKernelModule(llvm::StringRef Bitcode,
+                                                  llvm::LLVMContext &Ctx) {
     llvm::MemoryBufferRef BufRef(Bitcode, KName);
-    auto ModOrErr = llvm::parseBitcodeFile(BufRef, *Ctx);
+    auto ModOrErr = llvm::parseBitcodeFile(BufRef, Ctx);
     if (!ModOrErr)
       LOG_FATAL("parseBitcodeFile failed for kernel " + KName + ": " +
                 llvm::toString(ModOrErr.takeError()));
     std::unique_ptr<llvm::Module> Mod = std::move(*ModOrErr);
-
-    llvm::Function *F = Mod->getFunction(KName);
-    if (!F)
+    if (!Mod->getFunction(KName))
       LOG_FATAL("Function " + KName + " not found in parsed bitcode");
+    return Mod;
+  }
+
+  void extractArgInfoFromBitcode(llvm::StringRef Bitcode) {
+    llvm::LLVMContext Ctx;
+    auto Mod = parseKernelModule(Bitcode, Ctx);
+    llvm::Function *F = Mod->getFunction(KName);
 
     KernelArgSizes = mneme::getFuncDescr(*F);
     KernelArgNames = mneme::getArgNames(*F);
@@ -335,6 +342,33 @@ public:
 
   bool hasRecords() const { return NumRecords > 0; }
   const std::string &getName() const { return KName; }
+
+  // Several kernel addresses can share a record, so only the first one starts
+  // the profile.
+  void startArgProfile(const proteus::runtime::KernelMetadata &KInfo,
+                       size_t Cap) {
+    if (ArgProfile)
+      return;
+    const auto &BitcodeBytes = KInfo.getBitcode();
+    llvm::LLVMContext Ctx;
+    auto Mod = parseKernelModule(
+        llvm::StringRef(BitcodeBytes.data(), BitcodeBytes.size()), Ctx);
+    ArgProfile.emplace(getKernelArgLayout(*Mod->getFunction(KName)), Cap);
+  }
+
+  void profileArgs(void **Args, const dim3 &BlockDim) {
+    if (ArgProfile)
+      ArgProfile->observe(Args, BlockDim);
+  }
+
+  std::optional<llvm::json::Object> argProfileJSON() const {
+    if (!ArgProfile)
+      return std::nullopt;
+    auto JSON = ArgProfile->toJSON();
+    JSON["KernelName"] = KName;
+    JSON["DemangledName"] = util::demangleKernelName(KName);
+    return JSON;
+  }
 
   void addLaunchTime(const LaunchHandle &Launch, uint64_t Ns) {
     TotalTimeNs += Ns;
@@ -486,13 +520,42 @@ class RecordDatabase {
   EpilogueSnapshotType EpilogueType;
   bool CopySource;
   KernelTimingType Timing;
+  // Profiling argument values is off without a cap.
+  std::optional<size_t> ArgValueCap;
+
+  void writeArgProfileJSON() const {
+    llvm::json::Object Kernels;
+    for (const auto &Entry : KernelRecords)
+      if (auto JSON = Entry.second.argProfileJSON())
+        Kernels[std::to_string(Entry.first)] = std::move(*JSON);
+    if (Kernels.empty())
+      return;
+
+    // Record readers treat every JSON file in the data directory as a kernel
+    // record, so the profile lives in a subdirectory.
+    auto Directory = MnemeDirectory / "profile";
+    std::error_code EC;
+    std::filesystem::create_directories(Directory, EC);
+    if (EC)
+      LOG_FATAL("Failed to create " + Directory.string() + ": " + EC.message());
+    auto Filename = Directory / "ArgValues.json";
+    llvm::raw_fd_ostream OS(Filename.string(), EC);
+    if (EC)
+      LOG_FATAL("Failed to open " + Filename.string() + ": " + EC.message());
+    OS << llvm::formatv("{0:2}", llvm::json::Value(llvm::json::Object{
+                                     {"Kernels", std::move(Kernels)}}));
+    OS.close();
+    if (OS.has_error())
+      LOG_FATAL("Failed to write " + Filename.string() + ": " +
+                OS.error().message());
+  }
 
 public:
   RecordDatabase(std::filesystem::path MnemeDirectory,
                  EpilogueSnapshotType EpilogueType, bool CopySource,
-                 KernelTimingType Timing)
+                 KernelTimingType Timing, std::optional<size_t> ArgValueCap)
       : MnemeDirectory(std::move(MnemeDirectory)), EpilogueType(EpilogueType),
-        CopySource(CopySource), Timing(Timing) {
+        CopySource(CopySource), Timing(Timing), ArgValueCap(ArgValueCap) {
     // Logging here constructs the logger first so it outlives flush() at exit.
     LOG_DEBUG("Recording into {}", MnemeDirectory.string());
   }
@@ -530,6 +593,7 @@ public:
     for (const auto &Entry : KernelRecords)
       if (Entry.second.hasRecords())
         writeKernelJSON(Entry.first);
+    writeArgProfileJSON();
   }
 
   // Only a kernel's first launch resolves its policy, because kernels that can
@@ -570,17 +634,22 @@ public:
   std::optional<LaunchHandle> registerLaunch(const void *Kernel,
                                              const dim3 &GridDim,
                                              const dim3 &BlockDim,
-                                             size_t SharedMem) {
+                                             size_t SharedMem, void **Args) {
     auto [It, Inserted] = CountedKernels.try_emplace(Kernel);
     if (Inserted) {
       auto KInfo = proteus::runtime::captureKernelMetadata(Kernel);
-      if (KInfo && findOrCreateRecord(*KInfo))
-        It->second = KInfo->getStaticHash();
+      if (KInfo)
+        if (auto *Record = findOrCreateRecord(*KInfo)) {
+          It->second = KInfo->getStaticHash();
+          if (ArgValueCap)
+            Record->startArgProfile(*KInfo, *ArgValueCap);
+        }
     }
     if (!It->second)
       return std::nullopt;
-    return KernelRecords.find(*It->second)
-        ->second.registerLaunch(GridDim, BlockDim, SharedMem);
+    auto &Record = KernelRecords.find(*It->second)->second;
+    Record.profileArgs(Args, BlockDim);
+    return Record.registerLaunch(GridDim, BlockDim, SharedMem);
   }
 
   template <DeviceVendors VendorTypes>

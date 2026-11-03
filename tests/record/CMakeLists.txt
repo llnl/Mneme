@@ -163,3 +163,6 @@ CREATE_RDC_GPU_TEST(test_source_file test_source_file.cpp)
 CREATE_GPU_TEST(test_source_file_no_debug test_source_file_no_debug.cpp)
 # Disable debug info to check that the missing-line-table warning prints.
 target_compile_options(test_source_file_no_debug PRIVATE -g0)
+
+CREATE_GPU_TEST(test_arg_values test_arg_values.cpp)
+CREATE_RDC_GPU_TEST(test_arg_values test_arg_values.cpp)

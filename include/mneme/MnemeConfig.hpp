@@ -221,6 +221,19 @@ getEnvOrDefaultKernelTimingType(const char *VarName, KernelTimingType Default) {
                            *EnvValue + "'. Expected 'profiler' or 'off'.");
 }
 
+inline uint64_t getEnvOrDefaultPositiveInteger(const char *VarName,
+                                               uint64_t Default) {
+  auto EnvValue = getEnvOrDefaultString(VarName);
+  if (!EnvValue)
+    return Default;
+
+  auto Parsed = parseInteger(*EnvValue);
+  if (!Parsed || *Parsed <= 0)
+    throw std::runtime_error("Invalid " + std::string(VarName) + " value '" +
+                             *EnvValue + "'. Expected a positive integer.");
+  return *Parsed;
+}
+
 inline bool defaultRecordingPolicy(const std::optional<int> &DistributedRank) {
   if (!DistributedRank)
     return true;
@@ -301,6 +314,9 @@ public:
   const bool CopySource;
   const uint64_t ChunkSize;
   const KernelTimingType KernelTiming;
+  const bool ProfileArgValues;
+  // Distinct values kept per argument leaf, and distinct tuples per kernel.
+  const uint64_t ArgValueCap;
 
   const config_detail::RecordingRankPolicy &getRecordingRankPolicy() const {
     return RankPolicy;
@@ -340,6 +356,10 @@ private:
                                                           4ULL << 30)),
         KernelTiming(config_detail::getEnvOrDefaultKernelTimingType(
             "MNEME_KERNEL_TIMING", KernelTimingType::Off)),
+        ProfileArgValues(config_detail::getEnvOrDefaultBool(
+            "MNEME_PROFILE_ARG_VALUES", false)),
+        ArgValueCap(config_detail::getEnvOrDefaultPositiveInteger(
+            "MNEME_ARG_VALUE_CAP", 1024)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")) {
 

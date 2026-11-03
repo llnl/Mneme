@@ -222,7 +222,10 @@ public:
   RecordingBackend()
       : Timer(createLaunchTimer<VendorTypes>(Config::get().KernelTiming)),
         DB(Config::get().getDataDirectory(), Config::get().EpilogueType,
-           Config::get().CopySource, Config::get().KernelTiming) {}
+           Config::get().CopySource, Config::get().KernelTiming,
+           Config::get().ProfileArgValues
+               ? std::optional<size_t>(Config::get().ArgValueCap)
+               : std::nullopt) {}
 
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
     if (!ptr)
@@ -383,7 +386,7 @@ public:
                                DeviceStream_t Stream) override {
     getOrCreatePageManager();
 
-    auto Launch = DB.registerLaunch(func, GridDim, BlockDim, SharedMem);
+    auto Launch = DB.registerLaunch(func, GridDim, BlockDim, SharedMem, Args);
     if (!Launch) {
       LOG_DEBUG("Kernel {} has no record", func);
       return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
