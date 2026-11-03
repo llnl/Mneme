@@ -99,6 +99,24 @@ public:
     Ptr = DevPtr;
     Location = MemoryLocation::Device;
   }
+
+  // Copies the bytes into new host memory and frees the device memory.
+  void moveToHost() {
+    if (Location == MemoryLocation::Host)
+      return;
+    auto *HostPtr = new uint8_t[Size];
+    if (Size) {
+      auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
+          HostPtr, Ptr, Size, MnemeDeviceRT::MemcpyDeviceToHostKind()));
+      if (EC) {
+        delete[] HostPtr;
+        LOG_FATAL("Could not copy {} bytes to the host: {}", Size, EC.value());
+      }
+    }
+    free();
+    Ptr = HostPtr;
+    Location = MemoryLocation::Host;
+  }
 };
 
 template <DeviceVendors VendorTypes> class MnemeMemoryBlob {
@@ -186,6 +204,9 @@ public:
 
   // Moves the blob's recorded bytes from host to device memory.
   void moveDataToDevice() { Data.moveToDevice(); }
+
+  // Moves the blob's recorded bytes from device to host memory.
+  void moveDataToHost() { Data.moveToHost(); }
 
   ~MnemeMemoryBlob() {
     if (BlobAddr != 0 && IsMapped) {
