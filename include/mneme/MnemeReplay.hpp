@@ -254,8 +254,7 @@ public:
       I = J;
     }
 
-    // Nothing reads a blob's host copy once it and its restore copy are on the
-    // device, so free it right away to hold at most one blob three times.
+    // Free each blob's host copy as soon as its device copies are filled.
     for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState) {
       this->copyToDevice(MemBlob);
       keepRecordedCopy(MemBlob);
