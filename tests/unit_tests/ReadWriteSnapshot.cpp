@@ -178,8 +178,8 @@ int main(int argc, char **argv) {
         return 1;
       }
 
-      uint8_t *WData = WBlob.getHostData().get();
-      uint8_t *RData = RBlob.getHostData().get();
+      uint8_t *WData = WBlob.getHostData();
+      uint8_t *RData = RBlob.getHostData();
       if (std::memcmp(reinterpret_cast<void *>(WData),
                       reinterpret_cast<void *>(RData), 128) != 0) {
         std::cerr << "Memory differs between GV and GVR\n";
@@ -297,7 +297,7 @@ int main(int argc, char **argv) {
       return 16;
     }
 
-    if (std::memcmp(BlobData.second, RBlob.getHostData().get(), 128) != 0) {
+    if (std::memcmp(BlobData.second, RBlob.getHostData(), 128) != 0) {
       std::cerr << "Diff device memory did not reconstruct epilogue data\n";
       return 16;
     }
@@ -327,8 +327,7 @@ int main(int argc, char **argv) {
   auto ResetBlobBase = [&]() {
     auto PrologueBlobIt = ReadDeviceMemMap.find((void *)BlobData.first);
     auto HostData = std::unique_ptr<uint8_t[]>(new uint8_t[128]);
-    std::memcpy(HostData.get(), PrologueBlobIt->second.getHostData().get(),
-                128);
+    std::memcpy(HostData.get(), PrologueBlobIt->second.getHostData(), 128);
     DeviceMemMap[(void *)BlobData.first].setHostData(std::move(HostData));
   };
 
@@ -350,8 +349,7 @@ int main(int argc, char **argv) {
             ->read(KernelName, BaseSnapshotSource<Vendor>(SnapshotFN.string()));
     auto It = BestSparseSnap.DeviceMemory.find((void *)BlobData.first);
     if (It == BestSparseSnap.DeviceMemory.end() ||
-        std::memcmp(BlobData.second, It->second.getHostData().get(), 128) !=
-            0) {
+        std::memcmp(BlobData.second, It->second.getHostData(), 128) != 0) {
       std::cerr << "Best sparse snapshot did not reconstruct epilogue data\n";
       return 64;
     }
@@ -360,7 +358,7 @@ int main(int argc, char **argv) {
 
   auto PrologueBlobIt = ReadDeviceMemMap.find((void *)BlobData.first);
   auto PrologueGlobalIt = ReadGVars.find("Test");
-  auto *PrologueBlob = PrologueBlobIt->second.getHostData().get();
+  auto *PrologueBlob = PrologueBlobIt->second.getHostData();
   auto *PrologueGlobal =
       static_cast<uint8_t *>(PrologueGlobalIt->second.HostAddr);
   // Alternating changes force many one-byte diff ranges, making the bytes
@@ -399,8 +397,7 @@ int main(int argc, char **argv) {
             ->read(KernelName, BaseSnapshotSource<Vendor>(SnapshotFN.string()));
     auto It = BestFragmentedSnap.DeviceMemory.find((void *)BlobData.first);
     if (It == BestFragmentedSnap.DeviceMemory.end() ||
-        std::memcmp(BlobData.second, It->second.getHostData().get(), 128) !=
-            0) {
+        std::memcmp(BlobData.second, It->second.getHostData(), 128) != 0) {
       std::cerr
           << "Best fragmented snapshot did not reconstruct epilogue data\n";
       return 128;

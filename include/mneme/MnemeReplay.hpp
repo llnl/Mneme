@@ -50,27 +50,6 @@ protected:
     Args = copyOutArgs();
   }
 
-  void copyToDevice(MnemeMemoryBlob<VendorTypes> &MemBlob) {
-    if (!MemBlob.getHostData())
-      LOG_FATAL("The {} blob at {} was freed from host memory after loading",
-                isPrologue() ? "prologue" : "epilogue", MemBlob.getBlobAddr());
-    LOG_DEBUG("Copying {} from Address {} to device address {} {}",
-              isPrologue() ? "Prologue" : "Epilogue",
-              (void *)MemBlob.getHostData().get(), MemBlob.getBlobAddr(),
-              MemBlob.getSize());
-    auto CEC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
-        MemBlob.getBlobAddr(), MemBlob.getHostData().get(), MemBlob.getSize(),
-        MnemeDeviceRT::MemcpyHostToDeviceKind()));
-    if (CEC)
-      LOG_FATAL("Could not copy Memory Blob to device EC: " + CEC.value() +
-                "\n");
-  }
-
-  void copyToDevice() {
-    for (auto &[DevAddr, MemBlob] : DeviceMemoryState)
-      copyToDevice(MemBlob);
-  }
-
   void copyGlobals() {
     for (auto &[GVName, GVI] : GlobalVars) {
       LOG_DEBUG("Copying data of variable {} to device addr {} and of size {}",
@@ -83,9 +62,6 @@ protected:
                   " to device EC: " + CEC.value() + "\n");
     }
   }
-
-  // Distinguishes the two concrete roles for diagnostic logging.
-  virtual bool isPrologue() const = 0;
 
 private:
   std::unique_ptr<void *[]> copyOutArgs() const {
@@ -106,10 +82,7 @@ public:
 
   // Restores the recorded state; work queued on Stream must finish before the
   // state is valid.
-  virtual void reset(DeviceStream_t /*Stream*/) {
-    copyToDevice();
-    copyGlobals();
-  }
+  virtual void reset(DeviceStream_t Stream) = 0;
 
   void release() {
     for (auto &[DevAddr, MemBlob] : DeviceMemoryState) {
@@ -254,73 +227,44 @@ public:
       I = J;
     }
 
-    // Free each blob's host copy as soon as its device copies are filled.
+    // Each blob's host memory is freed as soon as its data is on the device.
     for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState) {
-      this->copyToDevice(MemBlob);
-      keepRecordedCopy(MemBlob);
-      MemBlob.dropHostData();
+      MemBlob.moveDataToDevice();
+      restore(MemBlob, nullptr);
     }
+    auto EC = MnemeDeviceRT::DeviceErrorCheck(
+        MnemeDeviceRT::DeviceStreamSynchronize(nullptr));
+    if (EC)
+      LOG_FATAL("Could not finish loading the prologue: {}", EC.value());
   }
 
-  // Restores blobs from device-side copies, queued on Stream.
+  // Restores blobs from their recorded data, queued on Stream.
   void reset(typename MnemeDeviceRT::DeviceStream_t Stream) override {
-    for (const auto &C : RecordedCopies) {
-      auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopyAsync(
-          C.BlobAddr, C.CopyAddr, C.Size,
-          MnemeDeviceRT::MemcpyDeviceToDeviceKind(), Stream));
-      if (EC)
-        LOG_FATAL("Could not restore memory blob at {}: {}", C.BlobAddr,
-                  EC.value());
-    }
+    for (const auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
+      restore(MemBlob, Stream);
     this->copyGlobals();
-  }
-
-  ~PrologueState() override {
-    for (const auto &C : RecordedCopies) {
-      auto EC = MnemeDeviceRT::DeviceErrorCheck(
-          MnemeDeviceRT::DeviceFree(C.CopyAddr));
-      if (EC)
-        LOG_WARN("Could not free recorded copy of blob at {}: {}", C.BlobAddr,
-                 EC.value());
-    }
   }
 
   PrologueState<VendorTypes> *asPrologue() override { return this; }
 
-protected:
-  bool isPrologue() const override { return true; }
-
 private:
-  struct RecordedCopy {
-    void *BlobAddr;
-    void *CopyAddr;
-    uint64_t Size;
-  };
-  std::vector<RecordedCopy> RecordedCopies;
-
-  void keepRecordedCopy(const Blob &MemBlob) {
+  // Queues a copy of the blob's recorded data over its mapping on Stream.
+  void restore(const Blob &MemBlob,
+               typename MnemeDeviceRT::DeviceStream_t Stream) {
     if (MemBlob.getSize() == 0)
       return;
-    void *CopyAddr = nullptr;
-    auto EC = MnemeDeviceRT::DeviceErrorCheck(
-        MnemeDeviceRT::DeviceMalloc(&CopyAddr, MemBlob.getSize()));
+    auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopyAsync(
+        MemBlob.getBlobAddr(), MemBlob.getDeviceData(), MemBlob.getSize(),
+        MnemeDeviceRT::MemcpyDeviceToDeviceKind(), Stream));
     if (EC)
-      LOG_FATAL("Could not allocate a {}-byte device copy of the blob at {} "
-                "for restores: {}",
-                MemBlob.getSize(), MemBlob.getBlobAddr(), EC.value());
-    RecordedCopies.push_back(
-        {MemBlob.getBlobAddr(), CopyAddr, MemBlob.getSize()});
-    EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
-        CopyAddr, MemBlob.getBlobAddr(), MemBlob.getSize(),
-        MnemeDeviceRT::MemcpyDeviceToDeviceKind()));
-    if (EC)
-      LOG_FATAL("Could not copy the blob at {} for restores: {}",
+      LOG_FATAL("Could not restore memory blob at {}: {}",
                 MemBlob.getBlobAddr(), EC.value());
   }
 };
 
 // Replay state for the expected kernel output. Unlike the prologue, load()
-// allocates fresh device memory rather than mapping to recorded addresses.
+// only moves each blob's recorded data to the device, mapping nothing at the
+// recorded addresses.
 template <DeviceVendors VendorTypes>
 class EpilogueState : public ReplayMemState<VendorTypes> {
 public:
@@ -328,15 +272,13 @@ public:
       : ReplayMemState<VendorTypes>(std::move(SnapshotState)) {}
 
   void load() override {
-    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState) {
-      auto EC = DeviceTraits<VendorTypes>::DeviceErrorCheck(
-          MemBlob.allocate(MemBlob.getSize()));
-      if (EC)
-        LOG_FATAL("Error raised during mapping prologue memeory:" + EC.value());
-      // Comparisons read the device copy, so the host copy is not needed.
-      this->copyToDevice(MemBlob);
-      MemBlob.dropHostData();
-    }
+    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
+      MemBlob.moveDataToDevice();
+  }
+
+  // The blobs are never written, so only the globals need restoring.
+  void reset(typename DeviceTraits<VendorTypes>::DeviceStream_t) override {
+    this->copyGlobals();
   }
 
   EpilogueState<VendorTypes> *asEpilogue() override { return this; }
@@ -353,9 +295,6 @@ public:
   bool matchesUnlaunched(const PrologueState<VendorTypes> &Prologue) const {
     return compare(Prologue, /*GlobalsOnDevice=*/false);
   }
-
-protected:
-  bool isPrologue() const override { return false; }
 
 private:
   // Globals reach the device only when a replay module is loaded, so before any
@@ -378,7 +317,7 @@ private:
         LOG_WARN("Sizes Differ {} vs {}", ProBlob.getSize(), EpiBlob.getSize());
         return false;
       }
-      if (EpiBlob != ProBlob)
+      if (!EpiBlob.recordedDataMatches(ProBlob))
         Correct = false;
     }
 

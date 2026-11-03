@@ -288,10 +288,10 @@ public:
       if (Blob.getActualSize() != BH.ActualSize || Blob.getSize() != BH.Size)
         LOG_FATAL("Mneme diff memory blob size mismatch");
       Blob.setMetadata(MD);
-      applyDiffRanges(CurrentPtr,
-                      llvm::MutableArrayRef<uint8_t>(Blob.getHostData().get(),
-                                                     Blob.getSize()),
-                      NumRanges);
+      applyDiffRanges(
+          CurrentPtr,
+          llvm::MutableArrayRef<uint8_t>(Blob.getHostData(), Blob.getSize()),
+          NumRanges);
     }
 
     return Snap;
@@ -714,7 +714,7 @@ private:
     std::unique_ptr<uint8_t[]> Scratch(new uint8_t[DiffChunkSize]);
     llvm::SmallVector<char, 0> DiffBytes;
     llvm::raw_svector_ostream DiffOS(DiffBytes);
-    auto *Base = Blob.getHostData().get();
+    auto *Base = Blob.getHostData();
     auto *DevAddr = static_cast<uint8_t *>(Blob.getBlobAddr());
     size_t NumRanges = 0;
 

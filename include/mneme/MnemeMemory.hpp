@@ -18,6 +18,89 @@
 #include "mneme/MnemeUtils.hpp"
 
 namespace mneme {
+enum class MemoryLocation { Host, Device };
+
+// Owns a buffer of bytes that lives in either host or device memory.
+template <DeviceVendors VendorTypes> class MnemeBuffer {
+  using MnemeDeviceRT = DeviceTraits<VendorTypes>;
+
+  void *Ptr = nullptr;
+  uint64_t Size = 0;
+  MemoryLocation Location = MemoryLocation::Host;
+
+  void free() {
+    if (!Ptr)
+      return;
+    if (Location == MemoryLocation::Host) {
+      delete[] static_cast<uint8_t *>(Ptr);
+    } else {
+      auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceFree(Ptr));
+      if (EC)
+        LOG_WARN("Could not free the device buffer at {}: {}", Ptr, EC.value());
+    }
+    Ptr = nullptr;
+  }
+
+public:
+  explicit MnemeBuffer(uint64_t Size = 0)
+      : Ptr(new uint8_t[Size]), Size(Size) {}
+  MnemeBuffer(std::unique_ptr<uint8_t[]> HostData, uint64_t Size)
+      : Ptr(HostData.release()), Size(Size) {}
+  ~MnemeBuffer() { free(); }
+
+  MnemeBuffer(const MnemeBuffer &) = delete;
+  MnemeBuffer &operator=(const MnemeBuffer &) = delete;
+  MnemeBuffer(MnemeBuffer &&Other) noexcept
+      : Ptr(std::exchange(Other.Ptr, nullptr)), Size(Other.Size),
+        Location(Other.Location) {}
+  MnemeBuffer &operator=(MnemeBuffer &&Other) noexcept {
+    if (this != &Other) {
+      free();
+      Ptr = std::exchange(Other.Ptr, nullptr);
+      Size = Other.Size;
+      Location = Other.Location;
+    }
+    return *this;
+  }
+
+  MemoryLocation location() const { return Location; }
+
+  uint8_t *hostData() const {
+    if (Location != MemoryLocation::Host)
+      LOG_FATAL("Reading the host data of a buffer that was moved to the "
+                "device");
+    return static_cast<uint8_t *>(Ptr);
+  }
+
+  void *deviceData() const {
+    if (Location != MemoryLocation::Device)
+      LOG_FATAL("Reading the device data of a buffer that is on the host");
+    return Ptr;
+  }
+
+  // Copies the bytes into new device memory and frees the host memory.
+  void moveToDevice() {
+    if (Location == MemoryLocation::Device)
+      return;
+    void *DevPtr = nullptr;
+    if (Size) {
+      auto EC = MnemeDeviceRT::DeviceErrorCheck(
+          MnemeDeviceRT::DeviceMalloc(&DevPtr, Size));
+      if (EC)
+        LOG_FATAL("Could not allocate {} bytes of device memory: {}", Size,
+                  EC.value());
+      EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
+          DevPtr, Ptr, Size, MnemeDeviceRT::MemcpyHostToDeviceKind()));
+      if (EC)
+        LOG_FATAL("Could not copy {} bytes to the device: {}", Size,
+                  EC.value());
+    }
+    free();
+    Ptr = DevPtr;
+    Location = MemoryLocation::Device;
+  }
+};
+
 template <DeviceVendors VendorTypes> class MnemeMemoryBlob {
 public:
   using MnemeDeviceRT = DeviceTraits<VendorTypes>;
@@ -32,7 +115,8 @@ protected:
   uint64_t ActualSize;
   void *BlobAddr;
   uint64_t Size;
-  std::unique_ptr<uint8_t[]> HostData;
+  // The recorded bytes, on the host until replay moves them to the device.
+  MnemeBuffer<VendorTypes> Data;
   bool IsMapped;
   // Non-zero when this blob owns the MappedSize-byte mapping at MapAddr.
   uint64_t MappedSize = 0;
@@ -43,8 +127,8 @@ protected:
 public:
   MnemeMemoryBlob(uint64_t ActualSize = 0, void *BlobAddr = nullptr,
                   uint64_t Size = 0)
-      : ActualSize(ActualSize), BlobAddr(BlobAddr), Size(Size),
-        HostData(new uint8_t[Size]), IsMapped(false) {}
+      : ActualSize(ActualSize), BlobAddr(BlobAddr), Size(Size), Data(Size),
+        IsMapped(false) {}
 
   // Maps MapSize bytes of new device memory at exactly MapVA, owned by this
   // blob, and places the blob at VA inside it.
@@ -97,11 +181,11 @@ public:
   }
 
   void setHostData(std::unique_ptr<uint8_t[]> HostData) {
-    this->HostData = std::move(HostData);
+    Data = MnemeBuffer<VendorTypes>(std::move(HostData), Size);
   }
 
-  // Frees the host copy of the blob's data.
-  void dropHostData() { HostData.reset(); }
+  // Moves the blob's recorded bytes from host to device memory.
+  void moveDataToDevice() { Data.moveToDevice(); }
 
   ~MnemeMemoryBlob() {
     if (BlobAddr != 0 && IsMapped) {
@@ -114,7 +198,7 @@ public:
   fromBuffer(const char *&Buffer) {
     BlobHeader Header = BlobHeader::read(Buffer);
     auto Blob = MnemeMemoryBlob<VendorTypes>(Header.ActualSize, 0, Header.Size);
-    std::memcpy(Blob.getHostData().get(), Buffer, Header.Size);
+    std::memcpy(Blob.getHostData(), Buffer, Header.Size);
     Buffer += Header.Size;
     LOG_DEBUG("Read memory blob at address {} SIZE: {} ActualSize:{}",
               Header.DevAddr, Header.Size, Header.ActualSize);
@@ -132,7 +216,7 @@ public:
       BlobAddr = other.BlobAddr;
       Size = other.Size;
       ActualSize = other.ActualSize;
-      HostData = std::move(other.HostData);
+      Data = std::move(other.Data);
       IsMapped = other.IsMapped;
       MappedSize = other.MappedSize;
       MapAddr = other.MapAddr;
@@ -140,20 +224,17 @@ public:
       PtrMD = other.PtrMD;
       other.BlobAddr = 0;
       other.MappedSize = 0;
-      other.HostData = nullptr;
     }
     return *this;
   }
 
   MnemeMemoryBlob(MnemeMemoryBlob &&other) noexcept
       : PtrMD(other.PtrMD), ActualSize(other.ActualSize),
-        BlobAddr(other.BlobAddr), Size(other.Size),
-        HostData(std::move(other.HostData)), IsMapped(other.IsMapped),
-        MappedSize(other.MappedSize), MapAddr(other.MapAddr),
-        Handle(other.Handle) {
+        BlobAddr(other.BlobAddr), Size(other.Size), Data(std::move(other.Data)),
+        IsMapped(other.IsMapped), MappedSize(other.MappedSize),
+        MapAddr(other.MapAddr), Handle(other.Handle) {
     other.BlobAddr = 0;
     other.MappedSize = 0;
-    other.HostData = nullptr;
   }
 
   template <DeviceVendors VendorTypes_>
@@ -163,7 +244,9 @@ public:
   void *getBlobAddr() const { return BlobAddr; }
   uint64_t getActualSize() const { return ActualSize; }
   uint64_t getSize() const { return Size; }
-  const std::unique_ptr<uint8_t[]> &getHostData() const { return HostData; }
+  MemoryLocation getDataLocation() const { return Data.location(); }
+  uint8_t *getHostData() const { return Data.hostData(); }
+  void *getDeviceData() const { return Data.deviceData(); }
 
   void setMetadata(Metadata Md) { PtrMD = Md; }
 
@@ -174,11 +257,28 @@ public:
       LOG_WARN("Sizes Differ {} vs {}", getSize(), other.getSize());
       return false;
     }
+    return matchesWithinTolerance(other.getBlobAddr(), getBlobAddr());
+  }
 
+  // True if the memory of Replayed matches this blob's device-resident
+  // recorded data within this blob's tolerance.
+  bool recordedDataMatches(const MnemeMemoryBlob<VendorTypes> &Replayed) const {
+    if (getSize() != Replayed.getSize()) {
+      LOG_WARN("Sizes Differ {} vs {}", getSize(), Replayed.getSize());
+      return false;
+    }
+    return matchesWithinTolerance(Replayed.getBlobAddr(), getDeviceData());
+  }
+
+  bool operator!=(const MnemeMemoryBlob<VendorTypes> &other) const {
+    return !(*this == other);
+  }
+
+private:
+  bool matchesWithinTolerance(const void *Actual, const void *Expected) const {
     auto Md = getMetadata();
-    auto Compare = compareDeviceBlobs((const char *)other.getBlobAddr(),
-                                      (const char *)getBlobAddr(), getSize(),
-                                      Md);
+    auto Compare = compareDeviceBlobs((const char *)Actual,
+                                      (const char *)Expected, getSize(), Md);
 
     // Comparator semantics:
     // - Norm::None  => per-element thresholding reports AnyFail/FirstBadIdx
@@ -187,9 +287,6 @@ public:
       return Compare.AnyFail == 0;
 
     return std::isfinite(Compare.Agg) && Compare.Agg <= Md.threshold;
-  }
-  bool operator!=(const MnemeMemoryBlob<VendorTypes> &other) const {
-    return !(*this == other);
   }
 };
 
@@ -202,21 +299,20 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
 
   LOG_DEBUG("Serializing MemoryBlob, DevAddr:{} MirroredHostAddr:{} Size:{} "
             "ActualSize:{}",
-            (void *)Blob.BlobAddr,
-            reinterpret_cast<void *>(Blob.getHostData().get()), Blob.getSize(),
-            Blob.getActualSize());
+            (void *)Blob.BlobAddr, reinterpret_cast<void *>(Blob.getHostData()),
+            Blob.getSize(), Blob.getActualSize());
 
   auto EC = DeviceTraits<VendorTypes>::DeviceErrorCheck(
       DeviceTraits<VendorTypes>::DeviceCopy(
-          static_cast<void *>(Blob.getHostData().get()),
+          static_cast<void *>(Blob.getHostData()),
           reinterpret_cast<void *>(Blob.BlobAddr), Blob.getSize(),
           DeviceTraits<VendorTypes>::MemcpyDeviceToHostKind()));
   if (EC)
     LOG_FATAL("Error in copying data from device when serializing context on "
               "output stream\nDevice Error Msg: " +
               EC.value() + "\n");
-  OS << llvm::StringRef(
-      reinterpret_cast<const char *>(Blob.getHostData().get()), Blob.Size);
+  OS << llvm::StringRef(reinterpret_cast<const char *>(Blob.getHostData()),
+                        Blob.Size);
   auto MD = Blob.getMetadata();
   mneme::metadata::serialize(OS, MD);
 
