@@ -92,7 +92,8 @@ public:
     // Make sure CUDA is initialized
     CHECK_CUDA(cudaFree(nullptr));
 
-    CHECK_CUPTI(tracer_.create(&recordDuration, nullptr));
+    if (!tracer_.start(&recordDuration, nullptr))
+      std::abort();
 
     initialized_ = true;
     LOG_DEBUG("Initialized CUPTI activity profiling");
@@ -126,7 +127,11 @@ public:
       return it == profilesByToken_.end() ? 0 : it->second.size();
     };
     waitForRecords(
-        lk, recordsCv_, [&] { CHECK_CUPTI(tracer_.flush()); },
+        lk, recordsCv_,
+        [&] {
+          if (!tracer_.flush())
+            std::abort();
+        },
         [&] { return have() >= expected; }, RecordWaitTimeout);
     return have();
   }
@@ -141,7 +146,8 @@ public:
     }
 
     CHECK_CUDA(cudaDeviceSynchronize());
-    CHECK_CUPTI(tracer_.flush());
+    if (!tracer_.flush())
+      std::abort();
 
     std::vector<int64_t> out;
     {

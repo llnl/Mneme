@@ -75,24 +75,12 @@ KernelTimer *KernelTimer::get() {
 }
 
 void KernelTimer::start() {
-#if defined(MNEME_ENABLE_HIP)
-  Tracer->create(&KernelTimer::onDispatch, this);
-  Tracer->start();
-#else
-  if (CUptiResult Result = Tracer->create(&KernelTimer::onDispatch, this);
-      Result != CUPTI_SUCCESS) {
-    std::cerr << "[mneme] CUPTI error: " << cuptiResultString(Result) << "\n";
-    return;
-  }
-#endif
-  Running = true;
+  Running = Tracer->start(&KernelTimer::onDispatch, this);
 }
 
 void KernelTimer::stop() {
   Running = false;
-#if defined(MNEME_ENABLE_HIP)
   Tracer->stop();
-#endif
 }
 
 void KernelTimer::onDispatch(void *Data, const DispatchRecord &Record) {

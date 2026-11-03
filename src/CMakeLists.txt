@@ -5,9 +5,12 @@ set(RecordLibSRC MnemeAnnotationInternal.cpp MnemeCrashHandler.cpp MnemeRecordin
 
 if (MNEME_ENABLE_HIP)
   list(APPEND RecordLibSRC MnemeRecordPreloadHIP.cpp)
+  set(MnemeDispatchTracerSRC ${MnemeCoreSrcDir}/MnemeDispatchTracerHIP.cpp)
 elseif(MNEME_ENABLE_CUDA)
   list(APPEND RecordLibSRC MnemeRecordPreloadCUDA.cpp)
+  set(MnemeDispatchTracerSRC ${MnemeCoreSrcDir}/MnemeDispatchTracerCUDA.cpp)
 endif()
+list(APPEND RecordLibSRC ${MnemeDispatchTracerSRC})
 
 # Vendor profiler used to time kernels, by recording and by replay profiling.
 if (MNEME_ENABLE_HIP)

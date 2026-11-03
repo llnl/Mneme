@@ -7,31 +7,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
+#include <memory>
 #include <mutex>
-
-#if defined(MNEME_ENABLE_HIP)
 #include <optional>
 #include <string>
-#include <unordered_map>
-
-#include <rocprofiler-sdk/buffer.h>
-#include <rocprofiler-sdk/buffer_tracing.h>
-#include <rocprofiler-sdk/callback_tracing.h>
-#include <rocprofiler-sdk/context.h>
-#include <rocprofiler-sdk/external_correlation.h>
-#include <rocprofiler-sdk/rocprofiler.h>
-#elif defined(MNEME_ENABLE_CUDA)
-#include <unordered_map>
-#include <vector>
-
-#include <cuda.h>
-#include <cupti.h>
-#include <cupti_activity.h>
-
-#include "mneme/MnemeLogger.hpp"
-#endif
 
 namespace mneme {
 
@@ -66,245 +45,32 @@ bool waitForRecords(std::unique_lock<std::mutex> &Lock,
   return Done();
 }
 
-#if defined(MNEME_ENABLE_HIP)
-
-#define CHECK_ROCP(x)                                                          \
-  do {                                                                         \
-    auto _st = (x);                                                            \
-    if (_st != ROCPROFILER_STATUS_SUCCESS) {                                   \
-      const char *msg = rocprofiler_get_status_name(_st);                      \
-      const char *str = rocprofiler_get_status_string(_st);                    \
-      fprintf(stderr, "rocprof err %d status:'%s' string:'%s' at %s:%d: %s\n", \
-              (int)_st, msg, str, __FILE__, __LINE__, #x);                     \
-      std::abort();                                                            \
-    }                                                                          \
-  } while (0)
-
+// Errors that the caller can act on are printed and returned as false; any
+// other profiler error aborts.
 class DispatchTracer {
-  rocprofiler_context_id_t Context{};
-  rocprofiler_buffer_id_t Buffer{};
-  DispatchSink Sink = nullptr;
-  void *SinkData = nullptr;
-  std::mutex NamesMutex;
-  std::unordered_map<uint64_t, std::string> KernelNames;
-
-  static void registerKernel(rocprofiler_callback_tracing_record_t Record,
-                             rocprofiler_user_data_t *, void *Data) {
-    if (Record.kind != ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT ||
-        Record.operation !=
-            ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER ||
-        Record.phase != ROCPROFILER_CALLBACK_PHASE_LOAD)
-      return;
-    auto *Symbol = static_cast<
-        const rocprofiler_callback_tracing_code_object_kernel_symbol_register_data_t
-            *>(Record.payload);
-    if (!Symbol->kernel_name)
-      return;
-    auto *Tracer = static_cast<DispatchTracer *>(Data);
-    std::lock_guard<std::mutex> Lock(Tracer->NamesMutex);
-    Tracer->KernelNames[Symbol->kernel_id] = Symbol->kernel_name;
-  }
-
-  static void deliver(rocprofiler_context_id_t, rocprofiler_buffer_id_t,
-                      rocprofiler_record_header_t **Headers, size_t NumHeaders,
-                      void *Data, uint64_t) {
-    auto *Tracer = static_cast<DispatchTracer *>(Data);
-    for (size_t I = 0; I < NumHeaders; ++I) {
-      if (Headers[I]->category != ROCPROFILER_BUFFER_CATEGORY_TRACING ||
-          Headers[I]->kind != ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH)
-        continue;
-      auto *Record = static_cast<
-          const rocprofiler_buffer_tracing_kernel_dispatch_record_t *>(
-          Headers[I]->payload);
-      Tracer->Sink(Tracer->SinkData,
-                   {Record->correlation_id.external.value,
-                    Record->dispatch_info.kernel_id, Record->start_timestamp,
-                    Record->end_timestamp});
-    }
-  }
-
 public:
-  // Must run in a rocprofiler tool's initialize callback. The context is
-  // started separately so that callers can add services to it first.
-  void create(DispatchSink S, void *Data) {
-    Sink = S;
-    SinkData = Data;
-    CHECK_ROCP(rocprofiler_create_context(&Context));
-    CHECK_ROCP(rocprofiler_create_buffer(Context, 256 * 1024, 0,
-                                         ROCPROFILER_BUFFER_POLICY_LOSSLESS,
-                                         &deliver, this, &Buffer));
-    CHECK_ROCP(rocprofiler_configure_buffer_tracing_service(
-        Context, ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH, nullptr, 0,
-        Buffer));
-    rocprofiler_tracing_operation_t SymbolRegister =
-        ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER;
-    CHECK_ROCP(rocprofiler_configure_callback_tracing_service(
-        Context, ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT, &SymbolRegister, 1,
-        &registerKernel, this));
-  }
+  DispatchTracer();
+  ~DispatchTracer();
+  DispatchTracer(const DispatchTracer &) = delete;
+  DispatchTracer &operator=(const DispatchTracer &) = delete;
 
-  void start() { CHECK_ROCP(rocprofiler_start_context(Context)); }
+  // Returns false when the profiler is unavailable, e.g. because another tool
+  // uses it. On HIP this must run in a rocprofiler tool's initialize callback;
+  // on CUDA only one tracer per process may start.
+  bool start(DispatchSink Sink, void *Data);
+  // Runs in the HIP tool's finalize callback, so errors are ignored.
+  void stop();
 
-  // Runs in the tool's finalize callback, so errors are ignored.
-  void stop() {
-    (void)rocprofiler_stop_context(Context);
-    (void)rocprofiler_flush_buffer(Buffer);
-    (void)rocprofiler_destroy_buffer(Buffer);
-  }
+  void push(uint64_t Token);
+  uint64_t pop();
+  bool flush();
 
-  void push(uint64_t Token) {
-    rocprofiler_thread_id_t Tid{};
-    CHECK_ROCP(rocprofiler_get_thread_id(&Tid));
-    rocprofiler_user_data_t Data{};
-    Data.value = Token;
-    CHECK_ROCP(rocprofiler_push_external_correlation_id(Context, Tid, Data));
-  }
+  // CUDA dispatch records carry no kernel id, so there it returns nullopt.
+  std::optional<std::string> kernelName(uint64_t KernelId);
 
-  void pop() {
-    rocprofiler_thread_id_t Tid{};
-    CHECK_ROCP(rocprofiler_get_thread_id(&Tid));
-    rocprofiler_user_data_t Popped{};
-    CHECK_ROCP(rocprofiler_pop_external_correlation_id(Context, Tid, &Popped));
-  }
-
-  rocprofiler_status_t flush() { return rocprofiler_flush_buffer(Buffer); }
-
-  std::optional<std::string> kernelName(uint64_t KernelId) {
-    std::lock_guard<std::mutex> Lock(NamesMutex);
-    auto It = KernelNames.find(KernelId);
-    if (It == KernelNames.end())
-      return std::nullopt;
-    return It->second;
-  }
+private:
+  struct Impl;
+  std::unique_ptr<Impl> State;
 };
-
-#elif defined(MNEME_ENABLE_CUDA)
-
-inline const char *cuptiResultString(CUptiResult r) {
-  const char *s = nullptr;
-  cuptiGetResultString(r, &s);
-  return s ? s : "<unknown>";
-}
-
-#define CHECK_CUPTI(call)                                                      \
-  do {                                                                         \
-    CUptiResult _r = (call);                                                   \
-    if (_r != CUPTI_SUCCESS) {                                                 \
-      fprintf(stderr, "CUPTI error %d (%s) at %s:%d: %s\n", (int)_r,           \
-              mneme::cuptiResultString(_r), __FILE__, __LINE__, #call);        \
-      std::abort();                                                            \
-    }                                                                          \
-  } while (0)
-
-class DispatchTracer {
-  using KernelRec = CUpti_ActivityKernel9;
-
-  static constexpr size_t BufferSize = 1 << 20;
-  static constexpr CUpti_ExternalCorrelationKind ExternalKind =
-      CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0;
-
-  // CUPTI delivers buffers to process-wide callbacks, so they reach the one
-  // created tracer through this pointer.
-  static inline DispatchTracer *Active = nullptr;
-
-  std::mutex Mutex;
-  DispatchSink Sink = nullptr;
-  void *SinkData = nullptr;
-  // Filled from EXTERNAL_CORRELATION records, which precede the kernel's.
-  std::unordered_map<uint32_t, uint64_t> TokenByCorrelation;
-
-  static void CUPTIAPI requestBuffer(uint8_t **Buffer, size_t *Size,
-                                     size_t *MaxNumRecords) {
-    *Buffer = static_cast<uint8_t *>(std::malloc(BufferSize));
-    *Size = BufferSize;
-    *MaxNumRecords = 0;
-  }
-
-  static void CUPTIAPI completeBuffer(CUcontext Ctx, uint32_t StreamId,
-                                      uint8_t *Buffer, size_t,
-                                      size_t ValidSize) {
-    auto &Tracer = *Active;
-
-    size_t Dropped = 0;
-    CHECK_CUPTI(cuptiActivityGetNumDroppedRecords(Ctx, StreamId, &Dropped));
-    if (Dropped)
-      LOG_WARN("CUPTI dropped {} records", Dropped);
-
-    std::vector<std::pair<uint32_t, uint64_t>> Correlations;
-    std::vector<DispatchRecord> Kernels;
-    std::vector<uint32_t> KernelCorrelations;
-
-    CUpti_Activity *Rec = nullptr;
-    CUptiResult St = CUPTI_SUCCESS;
-    while ((St = cuptiActivityGetNextRecord(Buffer, ValidSize, &Rec)) ==
-           CUPTI_SUCCESS) {
-      if (!Rec)
-        break;
-      if (Rec->kind == CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION) {
-        auto *E =
-            reinterpret_cast<const CUpti_ActivityExternalCorrelation *>(Rec);
-        Correlations.emplace_back(E->correlationId, E->externalId);
-      } else if (Rec->kind == CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) {
-        auto *K = reinterpret_cast<const KernelRec *>(Rec);
-        Kernels.push_back({0, 0, (uint64_t)K->start, (uint64_t)K->end});
-        KernelCorrelations.push_back(K->correlationId);
-      }
-    }
-    if (St != CUPTI_SUCCESS && St != CUPTI_ERROR_MAX_LIMIT_REACHED)
-      LOG_WARN("cuptiActivityGetNextRecord returned {}", (int)St);
-    std::free(Buffer);
-
-    {
-      std::lock_guard<std::mutex> Lock(Tracer.Mutex);
-      for (auto &[Correlation, Token] : Correlations)
-        Tracer.TokenByCorrelation[Correlation] = Token;
-      for (size_t I = 0; I < Kernels.size(); ++I) {
-        auto It = Tracer.TokenByCorrelation.find(KernelCorrelations[I]);
-        if (It == Tracer.TokenByCorrelation.end())
-          continue;
-        Kernels[I].Token = It->second;
-        Tracer.TokenByCorrelation.erase(It);
-      }
-    }
-
-    for (const DispatchRecord &Kernel : Kernels)
-      if (Kernel.Token)
-        Tracer.Sink(Tracer.SinkData, Kernel);
-  }
-
-public:
-  // Only one tracer per process may be created. Fails when CUPTI is
-  // unavailable, e.g. because another tool uses it.
-  CUptiResult create(DispatchSink S, void *Data) {
-    Sink = S;
-    SinkData = Data;
-    Active = this;
-    CUptiResult Result =
-        cuptiActivityRegisterCallbacks(&requestBuffer, &completeBuffer);
-    if (Result != CUPTI_SUCCESS)
-      return Result;
-    for (CUpti_ActivityKind Kind :
-         {CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION,
-          CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, CUPTI_ACTIVITY_KIND_RUNTIME,
-          CUPTI_ACTIVITY_KIND_DRIVER})
-      if ((Result = cuptiActivityEnable(Kind)) != CUPTI_SUCCESS)
-        return Result;
-    return CUPTI_SUCCESS;
-  }
-
-  void push(uint64_t Token) {
-    CHECK_CUPTI(cuptiActivityPushExternalCorrelationId(ExternalKind, Token));
-  }
-
-  uint64_t pop() {
-    uint64_t Popped = 0;
-    CHECK_CUPTI(cuptiActivityPopExternalCorrelationId(ExternalKind, &Popped));
-    return Popped;
-  }
-
-  CUptiResult flush() { return cuptiActivityFlushAll(0); }
-};
-
-#endif
 
 } // namespace mneme

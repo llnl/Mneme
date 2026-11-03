@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <hip/hip_runtime.h>
 #include <mutex>
 #include <unordered_map>
@@ -106,7 +107,11 @@ public:
       return It == profilesByToken.end() ? 0 : It->second.size();
     };
     waitForRecords(
-        lk, recordsCv, [&] { CHECK_ROCP(Tracer.flush()); },
+        lk, recordsCv,
+        [&] {
+          if (!Tracer.flush())
+            std::abort();
+        },
         [&] { return Have() >= Expected; }, RecordWaitTimeout);
     return Have();
   }
@@ -151,8 +156,8 @@ int tool_init(rocprofiler_client_finalize_t /*fini*/, void *data_v) {
   LOG_DEBUG("Initializer ROCPrrofiler");
   auto &Tracer = mneme::MnemeRocProfiler::instance().getTracer();
   // Service to pick duration of kernel
-  Tracer.create(dispatch_cb, nullptr);
-  Tracer.start();
+  if (!Tracer.start(dispatch_cb, nullptr))
+    std::abort();
   return 0;
 }
 
