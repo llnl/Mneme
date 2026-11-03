@@ -96,10 +96,10 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     });
   }
 
-  void beginTimedLaunch(const TimedLaunch &Launch) {
+  bool beginTimedLaunch(const TimedLaunch &Launch, DeviceStream_t Stream) {
     registerExitDrain();
     Timer->collect(addToDatabase());
-    Timer->begin(Launch, DB.kernelName(Launch.StaticHash));
+    return Timer->begin(Launch, DB.kernelName(Launch.StaticHash), Stream);
   }
 
   // Launches after the drain are still counted but no longer timed.
@@ -115,16 +115,11 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                              void **Args, size_t SharedMem,
                              DeviceStream_t Stream,
                              const std::optional<TimedLaunch> &Launch) {
-    // A captured launch dispatches nothing now, and its graph's later
-    // dispatches carry no token, so it would never get a duration.
-    bool Timed =
-        Timer && Launch && !MnemeDeviceRT::deviceStreamIsCapturing(Stream);
-    if (Timed)
-      beginTimedLaunch(*Launch);
+    bool Timed = Timer && Launch && beginTimedLaunch(*Launch, Stream);
     auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
                                         SharedMem, Stream);
     if (Timed)
-      Timer->end(ret == MnemeDeviceRT::DeviceSuccess);
+      Timer->end(ret);
     return ret;
   }
 
@@ -372,7 +367,8 @@ public:
       TimedBackend = nullptr;
     DB.flush();
 
-    LOG_DEBUG("RecordingBackend destructor: releasing {} blobs", AllocatedBlobs.size());
+    LOG_DEBUG("RecordingBackend destructor: releasing {} blobs",
+              AllocatedBlobs.size());
 
     // Release all unreleased blobs before the DenseMap destructs
     for (auto &Entry : AllocatedBlobs) {

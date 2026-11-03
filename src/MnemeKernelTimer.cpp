@@ -109,13 +109,14 @@ void KernelTimer::onDispatch(void *Data, const DispatchRecord &Record) {
   Timer->Arrived.notify_all();
 }
 
-void KernelTimer::begin(const TimedLaunch &Launch, llvm::StringRef KernelName) {
+bool KernelTimer::begin(const TimedLaunch &Launch, llvm::StringRef KernelName) {
   if (!Running)
-    return;
+    return false;
   // rocprofiler names a kernel by its descriptor symbol, which ends in ".kd".
   KernelNames.try_emplace(Launch.StaticHash, (KernelName + ".kd").str());
   Pending.try_emplace(++LastToken, Launch);
   Tracer->push(LastToken);
+  return true;
 }
 
 void KernelTimer::end(bool Launched) {

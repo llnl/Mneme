@@ -33,7 +33,8 @@ public:
   // Returns nullptr when the profiler is unavailable.
   static KernelTimer *get();
 
-  void begin(const TimedLaunch &Launch, llvm::StringRef KernelName);
+  // Returns whether the launch is timed, in which case end() must follow it.
+  bool begin(const TimedLaunch &Launch, llvm::StringRef KernelName);
   void end(bool Launched);
   void collect(AddFn Add);
   // Waits for the durations of all launches, which must have completed.
