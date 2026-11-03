@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -233,6 +234,15 @@ class KernelArgProfile {
     return static_cast<int64_t>(Bits << Shift) >> Shift;
   }
 
+  // JSON has no infinity or NaN, so those are written as strings.
+  static llvm::json::Value decodeFloat(double D) {
+    if (std::isnan(D))
+      return "nan";
+    if (std::isinf(D))
+      return D > 0 ? "inf" : "-inf";
+    return D;
+  }
+
   static llvm::json::Value decode(const ArgLeaf &Leaf, uint64_t Bits) {
     switch (Leaf.Kind) {
     case ArgLeafKind::Integer:
@@ -241,12 +251,12 @@ class KernelArgProfile {
       if (Leaf.Size == sizeof(double)) {
         double D;
         std::memcpy(&D, &Bits, sizeof(D));
-        return D;
+        return decodeFloat(D);
       }
       if (Leaf.Size == sizeof(float)) {
         float F;
         std::memcpy(&F, &Bits, sizeof(F));
-        return static_cast<double>(F);
+        return decodeFloat(F);
       }
       break;
     case ArgLeafKind::Pointer:

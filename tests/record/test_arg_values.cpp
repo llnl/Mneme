@@ -2,6 +2,7 @@
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_PROFILE_ARG_VALUES=1 MNEME_FILTER_MODE=scoped LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_arg_values%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %PYTHON %S/read-arg-values.py "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-PROFILE
+// RUN: %PYTHON %S/read-arg-values.py "%t.$$.mneme" --top 6 | %FILECHECK %s --check-prefix=CHECK-INF
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_PROFILE_ARG_VALUES=1 MNEME_ARG_VALUE_CAP=4 MNEME_FILTER_MODE=scoped LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_arg_values%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %PYTHON %S/read-arg-values.py "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-CAP
@@ -15,6 +16,7 @@
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -71,6 +73,8 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-PROFILE-NEXT: Leaf:arg0.1 Kind:float Type:double Distinct:1 Saturated:False Changes:0 Top:2(2)
 // CHECK-PROFILE-NEXT: Leaf:n Kind:int Type:i32 Distinct:1 Saturated:False Changes:0 Top:64(2)
 // CHECK-PROFILE-NOT: Unsupported
+
+// CHECK-INF: Leaf:factor {{.*}} Top:0.5(1),1(1),1.5(1),2(1),2.5(1),inf(1){{$}}
 
 // Values past the cap are not tracked, but launches still count as changes.
 // CHECK-CAP: Kernel: scale_kernel(double*, double, int) Launches: 6
@@ -148,8 +152,9 @@ int main() {
   MnemeDeviceRT::DeviceMemset(Buf, 0, sizeof(float));
 
   const int Sizes[] = {64, 64, 64, 128, 128, 256};
+  // The last factor checks that infinity still makes valid JSON.
   for (int I = 0; I < 6; I++)
-    scale_kernel<<<1, 256>>>(Out, 0.5 * (I + 1), Sizes[I]);
+    scale_kernel<<<1, 256>>>(Out, I < 5 ? 0.5 * (I + 1) : INFINITY, Sizes[I]);
 
   for (int I = 0; I < 4; I++) {
     Params P;
