@@ -89,7 +89,7 @@ public:
 
   // The profiler reports a dispatch only after it completes.
   void drain(RecordDatabase &DB) override {
-    (void)DeviceTraits<VendorTypes>::DeviceSynchronize();
+    (void)DevTraits::DeviceSynchronize();
     Profiler.drain(DB);
   }
 };

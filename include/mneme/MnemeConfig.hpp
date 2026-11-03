@@ -25,6 +25,26 @@ enum class EpilogueSnapshotType { Bytes, Diff, Best };
 enum class FilterMode { Default, Scoped, Config };
 enum class KernelTimingType { Off, Profiler };
 
+// Parses a MNEME_KERNEL_TIMING value; returns nullopt for an invalid one.
+inline std::optional<KernelTimingType>
+parseKernelTiming(std::string_view Value) {
+  if (Value == "profiler" || Value == "1")
+    return KernelTimingType::Profiler;
+  if (Value == "off" || Value == "0")
+    return KernelTimingType::Off;
+  return std::nullopt;
+}
+
+inline const char *getKernelTimingName(KernelTimingType Type) {
+  switch (Type) {
+  case KernelTimingType::Off:
+    return "off";
+  case KernelTimingType::Profiler:
+    return "profiler";
+  }
+  return "off";
+}
+
 namespace config_detail {
 
 inline std::optional<int> parseInteger(std::string_view Text) {
@@ -194,23 +214,11 @@ getEnvOrDefaultKernelTimingType(const char *VarName, KernelTimingType Default) {
   if (!EnvValue)
     return Default;
 
-  if (*EnvValue == "profiler" || *EnvValue == "1")
-    return KernelTimingType::Profiler;
-  if (EnvValue->empty() || *EnvValue == "off" || *EnvValue == "0")
-    return KernelTimingType::Off;
+  if (auto Type = parseKernelTiming(*EnvValue))
+    return *Type;
 
   throw std::runtime_error("Invalid " + std::string(VarName) + " value '" +
                            *EnvValue + "'. Expected 'profiler' or 'off'.");
-}
-
-inline const char *getKernelTimingName(KernelTimingType Type) {
-  switch (Type) {
-  case KernelTimingType::Off:
-    return "off";
-  case KernelTimingType::Profiler:
-    return "profiler";
-  }
-  return "off";
 }
 
 inline bool defaultRecordingPolicy(const std::optional<int> &DistributedRank) {

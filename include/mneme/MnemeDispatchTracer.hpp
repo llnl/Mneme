@@ -28,25 +28,8 @@ using DispatchSink = void (*)(void *Data, const DispatchRecord &Record);
 
 inline constexpr auto RecordWaitTimeout = std::chrono::seconds(10);
 
-// Flushes the profiler until Done() holds or Timeout passes and returns Done().
-// Lock guards the state Done() reads and is the lock the sink takes.
-template <typename FlushFn, typename DoneFn>
-bool waitForRecords(std::unique_lock<std::mutex> &Lock,
-                    std::condition_variable &Arrived, FlushFn Flush,
-                    DoneFn Done, std::chrono::steady_clock::duration Timeout) {
-  auto Deadline = std::chrono::steady_clock::now() + Timeout;
-  while (!Done() && std::chrono::steady_clock::now() < Deadline) {
-    // Flushing may run the sink on this thread, which takes Lock.
-    Lock.unlock();
-    Flush();
-    Lock.lock();
-    Arrived.wait_for(Lock, std::chrono::milliseconds(10), Done);
-  }
-  return Done();
-}
-
-// Errors that the caller can act on are printed and returned as false; any
-// other profiler error aborts.
+// Only start() reports failure, by returning false; any other profiler error
+// aborts.
 class DispatchTracer {
 public:
   virtual ~DispatchTracer() = default;
@@ -60,7 +43,7 @@ public:
 
   virtual void push(uint64_t Token) = 0;
   virtual uint64_t pop() = 0;
-  virtual bool flush() = 0;
+  virtual void flush() = 0;
 
   // Returns whether Record is a dispatch of the kernel whose source symbol is
   // KernelName. A launch can produce more than one dispatch with its token,
@@ -72,6 +55,22 @@ public:
   // Why start() can fail or never run, for the error that stops recording.
   virtual const char *unavailableReason() const = 0;
 };
+
+// Flushes Tracer until Done() holds or Timeout passes. Lock guards the state
+// Done() reads and is the lock the sink takes.
+template <typename DoneFn>
+void waitForRecords(std::unique_lock<std::mutex> &Lock,
+                    std::condition_variable &Arrived, DispatchTracer &Tracer,
+                    DoneFn Done, std::chrono::steady_clock::duration Timeout) {
+  auto Deadline = std::chrono::steady_clock::now() + Timeout;
+  while (!Done() && std::chrono::steady_clock::now() < Deadline) {
+    // Flushing may run the sink on this thread, which takes Lock.
+    Lock.unlock();
+    Tracer.flush();
+    Lock.lock();
+    Arrived.wait_for(Lock, std::chrono::milliseconds(10), Done);
+  }
+}
 
 using ToolCallback = void (*)();
 

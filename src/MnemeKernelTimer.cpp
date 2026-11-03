@@ -145,7 +145,7 @@ void KernelTimer::collect(RecordDatabase &DB) {
 void KernelTimer::drain(RecordDatabase &DB) {
   std::unique_lock<std::mutex> Lock(Mutex);
   waitForRecords(
-      Lock, Arrived, [&] { (void)Tracer->flush(); },
+      Lock, Arrived, *Tracer,
       [&] {
         addMeasured(DB);
         return Pending.empty() || !Running;

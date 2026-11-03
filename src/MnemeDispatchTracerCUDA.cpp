@@ -140,8 +140,8 @@ public:
     return Popped;
   }
 
-  bool flush() override {
-    return succeeded(cuptiActivityFlushAll(0), "cuptiActivityFlushAll");
+  void flush() override {
+    check(cuptiActivityFlushAll(0), "cuptiActivityFlushAll");
   }
 
   // CUPTI's dispatch records carry no kernel id to check.

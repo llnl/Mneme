@@ -74,7 +74,7 @@ struct KernelInstance {
     JSONDim["z"] = Dim.z;
     return JSONDim;
   }
-  bool isRecorded() const { return !PrologueFn.empty(); }
+  bool isRecorded() const { return RecordedLaunchIndex.has_value(); }
   void addLaunchTime(uint64_t Ns, uint64_t LaunchIndex) {
     TimeMinNs = TimedLaunches ? std::min(TimeMinNs, Ns) : Ns;
     TimeMaxNs = std::max(TimeMaxNs, Ns);
@@ -303,7 +303,7 @@ public:
     Collection["TotalLaunches"] = TotalLaunches;
     bool KernelTiming = Timing != KernelTimingType::Off;
     if (KernelTiming) {
-      Collection["TimingSource"] = config_detail::getKernelTimingName(Timing);
+      Collection["TimingSource"] = getKernelTimingName(Timing);
       Collection["TotalTimeNs"] = TotalTimeNs;
     }
     llvm::json::Object JSONInstances;
@@ -327,9 +327,8 @@ public:
     TotalTimeNs += Ns;
     if (!Launch.DynamicHash)
       return;
-    auto It = Instances.find(*Launch.DynamicHash);
-    if (It != Instances.end())
-      It->second.addLaunchTime(Ns, Launch.LaunchIndex);
+    Instances.find(*Launch.DynamicHash)
+        ->second.addLaunchTime(Ns, Launch.LaunchIndex);
   }
 
   // Deferred to the first recording so unrecorded kernels write nothing.
@@ -602,9 +601,7 @@ public:
   }
 
   void addLaunchTime(const LaunchHandle &Launch, uint64_t Ns) {
-    auto It = KernelRecords.find(Launch.StaticHash);
-    if (It != KernelRecords.end())
-      It->second.addLaunchTime(Launch, Ns);
+    KernelRecords.find(Launch.StaticHash)->second.addLaunchTime(Launch, Ns);
   }
 };
 

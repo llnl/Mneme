@@ -1,20 +1,17 @@
 // MnemeCuptiProfiler.cpp
+#include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <algorithm>
 
-#include <cuda.h>
 #include <cuda_runtime.h>
 
 #include "mneme/MnemeDispatchTracer.hpp"
@@ -128,12 +125,8 @@ public:
       return it == profilesByToken_.end() ? 0 : it->second.size();
     };
     waitForRecords(
-        lk, recordsCv_,
-        [&] {
-          if (!tracer_->flush())
-            std::abort();
-        },
-        [&] { return have() >= expected; }, RecordWaitTimeout);
+        lk, recordsCv_, *tracer_, [&] { return have() >= expected; },
+        RecordWaitTimeout);
     return have();
   }
 
@@ -147,8 +140,7 @@ public:
     }
 
     CHECK_CUDA(cudaDeviceSynchronize());
-    if (!tracer_->flush())
-      std::abort();
+    tracer_->flush();
 
     std::vector<int64_t> out;
     {

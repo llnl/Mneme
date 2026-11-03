@@ -176,8 +176,8 @@ int main() {
   }
 
   unsetenv("MNEME_EPILOGUE_TYPE");
-  setenv("MNEME_KERNEL_TIMING", "events", 1);
-  {
+  for (const char *Invalid : {"events", ""}) {
+    setenv("MNEME_KERNEL_TIMING", Invalid, 1);
     bool Threw = false;
     try {
       auto Conf = Config::createFromEnvironment();
@@ -185,7 +185,8 @@ int main() {
     } catch (const std::runtime_error &) {
       Threw = true;
     }
-    expect(Threw, "invalid MNEME_KERNEL_TIMING should throw");
+    expect(Threw, std::string("invalid MNEME_KERNEL_TIMING '") + Invalid +
+                      "' should throw");
   }
 
   clearMnemeEnv();

@@ -8,7 +8,6 @@
 #include <cstdlib>
 #include <dlfcn.h>
 #include <hip/hip_runtime.h>
-#include <string_view>
 #include <utility>
 
 using namespace mneme;
@@ -36,14 +35,11 @@ using Recorder = MnemeRecorderHIPPreload;
 
 // Runs at load time because the HIP runtime may initialize before the first
 // intercepted call, and rocprofiler-sdk must be configured before that. It
-// reads only MNEME_KERNEL_TIMING, because an invalid setting would throw from
-// Config here, where the program cannot catch it.
+// parses only MNEME_KERNEL_TIMING and ignores an invalid value, because Config
+// would throw here, where the program cannot catch it; Config reports it later.
 __attribute__((constructor)) static void configureKernelTiming() {
   const char *Timing = std::getenv("MNEME_KERNEL_TIMING");
-  if (!Timing)
-    return;
-  std::string_view Value = Timing;
-  if (Value == "profiler" || Value == "1")
+  if (Timing && parseKernelTiming(Timing) == KernelTimingType::Profiler)
     KernelTimer::configure();
 }
 

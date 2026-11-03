@@ -19,8 +19,6 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DenseSet.h>
 
-#include <proteus/KernelMetadata.h>
-
 namespace mneme {
 
 template <DeviceVendors VendorTypes>

@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -21,7 +20,6 @@
 
 #ifdef MNEME_ENABLE_HIP
 using DeviceVendorTraits = mneme::DeviceTraits<mneme::DeviceVendors::HIP>;
-constexpr mneme::DeviceVendors Vendor = mneme::DeviceVendors::HIP;
 #endif
 
 #if defined(_MSC_VER)
@@ -105,12 +103,8 @@ public:
       return It == profilesByToken.end() ? 0 : It->second.size();
     };
     waitForRecords(
-        lk, recordsCv,
-        [&] {
-          if (!Tracer->flush())
-            std::abort();
-        },
-        [&] { return Have() >= Expected; }, RecordWaitTimeout);
+        lk, recordsCv, *Tracer, [&] { return Have() >= Expected; },
+        RecordWaitTimeout);
     return Have();
   }
 
@@ -209,8 +203,7 @@ API_EXPORT(int64_t) MnemePy_getNumRecords(int64_t token, int64_t expected) {
   return records;
 }
 
-API_EXPORT(void) MnemePy_initProfiler() {
-  // Triggers rocprofiler to collect all rocprofiler_configure() symbols
-  //  CHECK_ROCP(rocprofiler_force_configure(rocprofiler_configure));
-}
+// rocprofiler starts the tracer through rocprofiler_configure when the runtime
+// initializes, so there is nothing to do here.
+API_EXPORT(void) MnemePy_initProfiler() {}
 }

@@ -124,9 +124,8 @@ public:
     return Popped.value;
   }
 
-  bool flush() override {
-    return succeeded(rocprofiler_flush_buffer(Buffer),
-                     "rocprofiler_flush_buffer");
+  void flush() override {
+    check(rocprofiler_flush_buffer(Buffer), "rocprofiler_flush_buffer");
   }
 
   bool isDispatchOf(const DispatchRecord &Record,
