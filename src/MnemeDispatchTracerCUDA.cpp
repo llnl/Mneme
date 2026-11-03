@@ -36,12 +36,10 @@ void check(CUptiResult Result, const char *Call) {
     std::abort();
 }
 
-} // namespace
-
-struct DispatchTracer::Impl {
+class CUDADispatchTracer final : public DispatchTracer {
   // CUPTI delivers buffers to process-wide callbacks, so they reach the one
   // started tracer through this pointer.
-  static inline Impl *Active = nullptr;
+  static inline CUDADispatchTracer *Active = nullptr;
 
   std::mutex Mutex;
   DispatchSink Sink = nullptr;
@@ -59,7 +57,7 @@ struct DispatchTracer::Impl {
   static void CUPTIAPI completeBuffer(CUcontext Ctx, uint32_t StreamId,
                                       uint8_t *Buffer, size_t,
                                       size_t ValidSize) {
-    Impl &Self = *Active;
+    CUDADispatchTracer &Self = *Active;
 
     size_t Dropped = 0;
     check(cuptiActivityGetNumDroppedRecords(Ctx, StreamId, &Dropped),
@@ -108,49 +106,59 @@ struct DispatchTracer::Impl {
       if (Kernel.Token)
         Self.Sink(Self.SinkData, Kernel);
   }
+
+public:
+  bool start(DispatchSink OnDispatch, void *Data) override {
+    Sink = OnDispatch;
+    SinkData = Data;
+    Active = this;
+    if (!succeeded(
+            cuptiActivityRegisterCallbacks(&CUDADispatchTracer::requestBuffer,
+                                           &CUDADispatchTracer::completeBuffer),
+            "cuptiActivityRegisterCallbacks"))
+      return false;
+    for (CUpti_ActivityKind Kind :
+         {CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION,
+          CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, CUPTI_ACTIVITY_KIND_RUNTIME,
+          CUPTI_ACTIVITY_KIND_DRIVER})
+      if (!succeeded(cuptiActivityEnable(Kind), "cuptiActivityEnable"))
+        return false;
+    return true;
+  }
+
+  void stop() override {}
+
+  void push(uint64_t Token) override {
+    check(cuptiActivityPushExternalCorrelationId(ExternalKind, Token),
+          "cuptiActivityPushExternalCorrelationId");
+  }
+
+  uint64_t pop() override {
+    uint64_t Popped = 0;
+    check(cuptiActivityPopExternalCorrelationId(ExternalKind, &Popped),
+          "cuptiActivityPopExternalCorrelationId");
+    return Popped;
+  }
+
+  bool flush() override {
+    return succeeded(cuptiActivityFlushAll(0), "cuptiActivityFlushAll");
+  }
+
+  std::optional<std::string> kernelName(uint64_t) override {
+    return std::nullopt;
+  }
 };
 
-DispatchTracer::DispatchTracer() : State(std::make_unique<Impl>()) {}
+} // namespace
 
-DispatchTracer::~DispatchTracer() = default;
-
-bool DispatchTracer::start(DispatchSink Sink, void *Data) {
-  State->Sink = Sink;
-  State->SinkData = Data;
-  Impl::Active = State.get();
-  if (!succeeded(cuptiActivityRegisterCallbacks(&Impl::requestBuffer,
-                                                &Impl::completeBuffer),
-                 "cuptiActivityRegisterCallbacks"))
-    return false;
-  for (CUpti_ActivityKind Kind :
-       {CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION,
-        CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, CUPTI_ACTIVITY_KIND_RUNTIME,
-        CUPTI_ACTIVITY_KIND_DRIVER})
-    if (!succeeded(cuptiActivityEnable(Kind), "cuptiActivityEnable"))
-      return false;
-  return true;
+extern "C" DispatchTracer *mnemeCreateDispatchTracer() {
+  return new CUDADispatchTracer();
 }
 
-void DispatchTracer::stop() {}
-
-void DispatchTracer::push(uint64_t Token) {
-  check(cuptiActivityPushExternalCorrelationId(ExternalKind, Token),
-        "cuptiActivityPushExternalCorrelationId");
-}
-
-uint64_t DispatchTracer::pop() {
-  uint64_t Popped = 0;
-  check(cuptiActivityPopExternalCorrelationId(ExternalKind, &Popped),
-        "cuptiActivityPopExternalCorrelationId");
-  return Popped;
-}
-
-bool DispatchTracer::flush() {
-  return succeeded(cuptiActivityFlushAll(0), "cuptiActivityFlushAll");
-}
-
-std::optional<std::string> DispatchTracer::kernelName(uint64_t) {
-  return std::nullopt;
+// CUPTI needs no registration before the runtime initializes.
+extern "C" void mnemeConfigureDispatchTool(ToolCallback Initialize,
+                                           ToolCallback) {
+  Initialize();
 }
 
 } // namespace mneme

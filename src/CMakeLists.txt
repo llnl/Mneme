@@ -10,9 +10,10 @@ elseif(MNEME_ENABLE_CUDA)
   list(APPEND RecordLibSRC MnemeRecordPreloadCUDA.cpp)
   set(MnemeDispatchTracerSRC ${MnemeCoreSrcDir}/MnemeDispatchTracerCUDA.cpp)
 endif()
-list(APPEND RecordLibSRC ${MnemeDispatchTracerSRC})
 
 # Vendor profiler used to time kernels, by recording and by replay profiling.
+# Recording loads it through the dispatch tracer library only when kernel
+# timing is requested.
 if (MNEME_ENABLE_HIP)
   find_package(rocprofiler-sdk QUIET CONFIG)
   if(rocprofiler-sdk_FOUND AND TARGET rocprofiler-sdk::rocprofiler-sdk)
@@ -33,6 +34,20 @@ elseif(MNEME_ENABLE_CUDA)
   set(MNEME_PROFILER_LIBS CUDA::cupti)
 endif()
 
+# Recording loads this only when kernel timing is requested, so that librecord
+# does not depend on the vendor profiler.
+add_library(mneme_dispatch_tracer SHARED ${MnemeDispatchTracerSRC})
+target_include_directories(mneme_dispatch_tracer PRIVATE ${CMAKE_SOURCE_DIR}/include ${MNEME_PROFILER_INCLUDE_DIRS})
+target_link_libraries(mneme_dispatch_tracer PRIVATE ${MNEME_PROFILER_LIBS})
+if (MNEME_ENABLE_CUDA)
+  target_link_libraries(mneme_dispatch_tracer PRIVATE CUDA::cuda_driver)
+endif()
+if (MNEME_ENABLE_LOGGER)
+  target_link_libraries(mneme_dispatch_tracer PRIVATE spdlog::spdlog_header_only)
+  target_compile_definitions(mneme_dispatch_tracer PRIVATE MNEME_ENABLE_LOGGER)
+endif()
+set_target_properties(mneme_dispatch_tracer PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
+
 add_library(mnemert SHARED ${AnnotationRuntimeSRC})
 target_include_directories(
  mnemert
@@ -41,6 +56,7 @@ target_include_directories(
     $<INSTALL_INTERFACE:${_mneme_incdir}>)
 
 add_library(record SHARED ${RecordLibSRC})
+add_dependencies(record mneme_dispatch_tracer)
 
 if(MNEME_LINK_SHARED_LLVM AND LLVM_LINK_LLVM_DYLIB)
   llvm_config(record USE_SHARED)
@@ -54,9 +70,7 @@ endif()
 
 
 target_include_directories(record SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(record PRIVATE ${MNEME_PROFILER_INCLUDE_DIRS})
-target_link_libraries(record PRIVATE ${MNEME_PROFILER_LIBS})
-target_link_libraries(record PRIVATE mnemert)
+target_link_libraries(record PRIVATE mnemert ${CMAKE_DL_LIBS})
 # Link record against proteus to avoid LLVM static initialization issues.
 # HIP: proteus is shared (version-script hides LLVM symbols).
 # CUDA: proteus is static but propagates --exclude-libs for the same effect.

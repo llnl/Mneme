@@ -9,6 +9,7 @@
 #include <rocprofiler-sdk/callback_tracing.h>
 #include <rocprofiler-sdk/context.h>
 #include <rocprofiler-sdk/external_correlation.h>
+#include <rocprofiler-sdk/registration.h>
 #include <rocprofiler-sdk/rocprofiler.h>
 
 namespace mneme {
@@ -29,9 +30,7 @@ void check(rocprofiler_status_t Status, const char *Call) {
     std::abort();
 }
 
-} // namespace
-
-struct DispatchTracer::Impl {
+class HIPDispatchTracer final : public DispatchTracer {
   rocprofiler_context_id_t Context{};
   rocprofiler_buffer_id_t Buffer{};
   DispatchSink Sink = nullptr;
@@ -51,7 +50,7 @@ struct DispatchTracer::Impl {
             *>(Record.payload);
     if (!Symbol->kernel_name)
       return;
-    auto *Self = static_cast<Impl *>(Data);
+    auto *Self = static_cast<HIPDispatchTracer *>(Data);
     std::lock_guard<std::mutex> Lock(Self->NamesMutex);
     Self->KernelNames[Symbol->kernel_id] = Symbol->kernel_name;
   }
@@ -59,7 +58,7 @@ struct DispatchTracer::Impl {
   static void deliver(rocprofiler_context_id_t, rocprofiler_buffer_id_t,
                       rocprofiler_record_header_t **Headers, size_t NumHeaders,
                       void *Data, uint64_t) {
-    auto *Self = static_cast<Impl *>(Data);
+    auto *Self = static_cast<HIPDispatchTracer *>(Data);
     for (size_t I = 0; I < NumHeaders; ++I) {
       if (Headers[I]->category != ROCPROFILER_BUFFER_CATEGORY_TRACING ||
           Headers[I]->kind != ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH)
@@ -73,71 +72,101 @@ struct DispatchTracer::Impl {
                   Record->end_timestamp});
     }
   }
+
+public:
+  bool start(DispatchSink OnDispatch, void *Data) override {
+    Sink = OnDispatch;
+    SinkData = Data;
+    rocprofiler_tracing_operation_t SymbolRegister =
+        ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER;
+    return succeeded(rocprofiler_create_context(&Context),
+                     "rocprofiler_create_context") &&
+           succeeded(rocprofiler_create_buffer(
+                         Context, 256 * 1024, 0,
+                         ROCPROFILER_BUFFER_POLICY_LOSSLESS,
+                         &HIPDispatchTracer::deliver, this, &Buffer),
+                     "rocprofiler_create_buffer") &&
+           succeeded(rocprofiler_configure_buffer_tracing_service(
+                         Context, ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH,
+                         nullptr, 0, Buffer),
+                     "rocprofiler_configure_buffer_tracing_service") &&
+           succeeded(rocprofiler_configure_callback_tracing_service(
+                         Context, ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT,
+                         &SymbolRegister, 1, &HIPDispatchTracer::registerKernel,
+                         this),
+                     "rocprofiler_configure_callback_tracing_service") &&
+           succeeded(rocprofiler_start_context(Context),
+                     "rocprofiler_start_context");
+  }
+
+  void stop() override {
+    (void)rocprofiler_stop_context(Context);
+    (void)rocprofiler_flush_buffer(Buffer);
+    (void)rocprofiler_destroy_buffer(Buffer);
+  }
+
+  void push(uint64_t Token) override {
+    rocprofiler_thread_id_t Tid{};
+    check(rocprofiler_get_thread_id(&Tid), "rocprofiler_get_thread_id");
+    rocprofiler_user_data_t Data{};
+    Data.value = Token;
+    check(rocprofiler_push_external_correlation_id(Context, Tid, Data),
+          "rocprofiler_push_external_correlation_id");
+  }
+
+  uint64_t pop() override {
+    rocprofiler_thread_id_t Tid{};
+    check(rocprofiler_get_thread_id(&Tid), "rocprofiler_get_thread_id");
+    rocprofiler_user_data_t Popped{};
+    check(rocprofiler_pop_external_correlation_id(Context, Tid, &Popped),
+          "rocprofiler_pop_external_correlation_id");
+    return Popped.value;
+  }
+
+  bool flush() override {
+    return succeeded(rocprofiler_flush_buffer(Buffer),
+                     "rocprofiler_flush_buffer");
+  }
+
+  std::optional<std::string> kernelName(uint64_t KernelId) override {
+    std::lock_guard<std::mutex> Lock(NamesMutex);
+    auto It = KernelNames.find(KernelId);
+    if (It == KernelNames.end())
+      return std::nullopt;
+    return It->second;
+  }
 };
 
-DispatchTracer::DispatchTracer() : State(std::make_unique<Impl>()) {}
+ToolCallback ToolInitialize = nullptr;
+ToolCallback ToolFinalize = nullptr;
 
-DispatchTracer::~DispatchTracer() = default;
-
-bool DispatchTracer::start(DispatchSink Sink, void *Data) {
-  Impl &S = *State;
-  S.Sink = Sink;
-  S.SinkData = Data;
-  rocprofiler_tracing_operation_t SymbolRegister =
-      ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER;
-  return succeeded(rocprofiler_create_context(&S.Context),
-                   "rocprofiler_create_context") &&
-         succeeded(rocprofiler_create_buffer(S.Context, 256 * 1024, 0,
-                                             ROCPROFILER_BUFFER_POLICY_LOSSLESS,
-                                             &Impl::deliver, &S, &S.Buffer),
-                   "rocprofiler_create_buffer") &&
-         succeeded(rocprofiler_configure_buffer_tracing_service(
-                       S.Context, ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH,
-                       nullptr, 0, S.Buffer),
-                   "rocprofiler_configure_buffer_tracing_service") &&
-         succeeded(rocprofiler_configure_callback_tracing_service(
-                       S.Context, ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT,
-                       &SymbolRegister, 1, &Impl::registerKernel, &S),
-                   "rocprofiler_configure_callback_tracing_service") &&
-         succeeded(rocprofiler_start_context(S.Context),
-                   "rocprofiler_start_context");
+int initializeTool(rocprofiler_client_finalize_t, void *) {
+  ToolInitialize();
+  return 0;
 }
 
-void DispatchTracer::stop() {
-  (void)rocprofiler_stop_context(State->Context);
-  (void)rocprofiler_flush_buffer(State->Buffer);
-  (void)rocprofiler_destroy_buffer(State->Buffer);
+void finalizeTool(void *) { ToolFinalize(); }
+
+rocprofiler_tool_configure_result_t *
+configureTool(uint32_t, const char *, uint32_t,
+              rocprofiler_client_id_t *ClientId) {
+  ClientId->name = "mneme-record";
+  static rocprofiler_tool_configure_result_t Result{
+      sizeof(Result), &initializeTool, &finalizeTool, nullptr};
+  return &Result;
 }
 
-void DispatchTracer::push(uint64_t Token) {
-  rocprofiler_thread_id_t Tid{};
-  check(rocprofiler_get_thread_id(&Tid), "rocprofiler_get_thread_id");
-  rocprofiler_user_data_t Data{};
-  Data.value = Token;
-  check(rocprofiler_push_external_correlation_id(State->Context, Tid, Data),
-        "rocprofiler_push_external_correlation_id");
+} // namespace
+
+extern "C" DispatchTracer *mnemeCreateDispatchTracer() {
+  return new HIPDispatchTracer();
 }
 
-uint64_t DispatchTracer::pop() {
-  rocprofiler_thread_id_t Tid{};
-  check(rocprofiler_get_thread_id(&Tid), "rocprofiler_get_thread_id");
-  rocprofiler_user_data_t Popped{};
-  check(rocprofiler_pop_external_correlation_id(State->Context, Tid, &Popped),
-        "rocprofiler_pop_external_correlation_id");
-  return Popped.value;
-}
-
-bool DispatchTracer::flush() {
-  return succeeded(rocprofiler_flush_buffer(State->Buffer),
-                   "rocprofiler_flush_buffer");
-}
-
-std::optional<std::string> DispatchTracer::kernelName(uint64_t KernelId) {
-  std::lock_guard<std::mutex> Lock(State->NamesMutex);
-  auto It = State->KernelNames.find(KernelId);
-  if (It == State->KernelNames.end())
-    return std::nullopt;
-  return It->second;
+extern "C" void mnemeConfigureDispatchTool(ToolCallback Initialize,
+                                           ToolCallback Finalize) {
+  ToolInitialize = Initialize;
+  ToolFinalize = Finalize;
+  (void)rocprofiler_force_configure(&configureTool);
 }
 
 } // namespace mneme

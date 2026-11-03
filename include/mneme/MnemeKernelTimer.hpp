@@ -26,8 +26,8 @@ class KernelTimer {
 public:
   using AddFn = llvm::function_ref<void(const TimedLaunch &, uint64_t)>;
 
-  // HIP only: rocprofiler-sdk must be configured before the runtime
-  // initializes.
+  // Loads the vendor profiler and registers the timer with it. HIP must do
+  // this before the runtime initializes; get() does it otherwise.
   static void configure();
 
   // Returns nullptr when the profiler is unavailable.
@@ -52,6 +52,7 @@ private:
     uint64_t End;
   };
 
+  bool Configured = false;
   std::unique_ptr<DispatchTracer> Tracer;
   std::atomic<bool> Running{false};
   std::mutex Mutex;

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <hip/hip_runtime.h>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <condition_variable>
@@ -35,7 +36,7 @@ constexpr mneme::DeviceVendors Vendor = mneme::DeviceVendors::HIP;
 namespace mneme {
 class MnemeRocProfiler {
 private:
-  DispatchTracer Tracer;
+  std::unique_ptr<DispatchTracer> Tracer{mnemeCreateDispatchTracer()};
   std::mutex rocrMutex;
   std::atomic<int64_t> rocrNextToken{0};
   std::unordered_map<int64_t, std::string> rocrTargetByToken;
@@ -55,7 +56,7 @@ public:
   // Call back to pick duration of a kernel
   void logDuration(const DispatchRecord &Record) {
     std::string KName =
-        Tracer.kernelName(Record.KernelId).value_or("<unknown>");
+        Tracer->kernelName(Record.KernelId).value_or("<unknown>");
 
     int64_t token = Record.Token;
     if (Record.End < Record.Start)
@@ -83,7 +84,7 @@ public:
 
   int64_t start(const char *KernelName) {
     int64_t tok = rocrNextToken.fetch_add(1, std::memory_order_relaxed) + 1;
-    Tracer.push(tok);
+    Tracer->push(tok);
     {
       std::lock_guard<std::mutex> lk(rocrMutex);
       rocrTargetByToken[tok] =
@@ -109,7 +110,7 @@ public:
     waitForRecords(
         lk, recordsCv,
         [&] {
-          if (!Tracer.flush())
+          if (!Tracer->flush())
             std::abort();
         },
         [&] { return Have() >= Expected; }, RecordWaitTimeout);
@@ -117,7 +118,7 @@ public:
   }
 
   std::vector<int64_t> stop(int64_t Token) {
-    Tracer.pop();
+    Tracer->pop();
 
     auto EC = DeviceVendorTraits::DeviceErrorCheck(
         DeviceVendorTraits::DeviceSynchronize());
@@ -136,7 +137,7 @@ public:
     return out;
   }
 
-  DispatchTracer &getTracer() { return Tracer; }
+  DispatchTracer &getTracer() { return *Tracer; }
   MnemeRocProfiler(const MnemeRocProfiler &) = delete;
   MnemeRocProfiler &operator=(const MnemeRocProfiler &) = delete;
 };

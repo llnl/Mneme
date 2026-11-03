@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -48,7 +49,7 @@ namespace mneme {
 
 class MnemeCuptiProfiler {
 private:
-  DispatchTracer tracer_;
+  std::unique_ptr<DispatchTracer> tracer_{mnemeCreateDispatchTracer()};
   std::mutex mtx_;
   std::atomic<u64> nextToken_{0};
 
@@ -92,7 +93,7 @@ public:
     // Make sure CUDA is initialized
     CHECK_CUDA(cudaFree(nullptr));
 
-    if (!tracer_.start(&recordDuration, nullptr))
+    if (!tracer_->start(&recordDuration, nullptr))
       std::abort();
 
     initialized_ = true;
@@ -104,7 +105,7 @@ public:
     u64 tok = nextToken_.fetch_add(1, std::memory_order_relaxed) + 1;
 
     // Push thread-scoped external correlation id
-    tracer_.push(tok);
+    tracer_->push(tok);
 
     {
       std::lock_guard<std::mutex> lk(mtx_);
@@ -129,7 +130,7 @@ public:
     waitForRecords(
         lk, recordsCv_,
         [&] {
-          if (!tracer_.flush())
+          if (!tracer_->flush())
             std::abort();
         },
         [&] { return have() >= expected; }, RecordWaitTimeout);
@@ -140,13 +141,13 @@ public:
     initIfNeeded();
 
     // Pop the correlation id
-    uint64_t popped = tracer_.pop();
+    uint64_t popped = tracer_->pop();
     if (popped != token) {
       LOG_WARN("CUPTI popped token {} but expected {}", (u64)popped, token);
     }
 
     CHECK_CUDA(cudaDeviceSynchronize());
-    if (!tracer_.flush())
+    if (!tracer_->flush())
       std::abort();
 
     std::vector<int64_t> out;

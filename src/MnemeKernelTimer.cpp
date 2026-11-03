@@ -1,56 +1,75 @@
 #include "mneme/MnemeKernelTimer.hpp"
 #include "mneme/MnemeDispatchTracer.hpp"
 
-#include <chrono>
+#include <cstdlib>
+#include <dlfcn.h>
 #include <iostream>
-
-#if defined(MNEME_ENABLE_HIP)
-#include <rocprofiler-sdk/registration.h>
-#endif
+#include <string>
 
 namespace mneme {
 
-#if defined(MNEME_ENABLE_HIP)
 namespace {
 
+#if defined(MNEME_ENABLE_HIP)
 constexpr const char *UnavailableMessage =
     "[mneme] Kernel timing disabled: rocprofiler-sdk is unavailable, likely in "
     "use by another tool such as rocprofv3.\n";
+#else
+constexpr const char *UnavailableMessage =
+    "[mneme] Kernel timing disabled: CUPTI is unavailable, likely in use by "
+    "another tool such as Nsight Compute.\n";
+#endif
 
-int initializeTool(rocprofiler_client_finalize_t, void *) {
-  KernelTimer::instance().start();
-  return 0;
+// The tracer library is installed, and built, next to this one.
+std::string tracerLibraryPath() {
+  Dl_info Info;
+  if (!dladdr(reinterpret_cast<void *>(&tracerLibraryPath), &Info) ||
+      !Info.dli_fname)
+    return DispatchTracerLibrary;
+  std::string Path = Info.dli_fname;
+  return Path.substr(0, Path.rfind('/') + 1) + DispatchTracerLibrary;
 }
 
-void finalizeTool(void *) { KernelTimer::instance().stop(); }
-
-rocprofiler_tool_configure_result_t *
-configureTool(uint32_t, const char *, uint32_t,
-              rocprofiler_client_id_t *ClientId) {
-  ClientId->name = "mneme-record";
-  static rocprofiler_tool_configure_result_t Result{
-      sizeof(Result), &initializeTool, &finalizeTool, nullptr};
-  return &Result;
+[[noreturn]] void failToLoad(const std::string &Path) {
+  std::cerr << "[mneme] Kernel timing requires " << Path << ": " << dlerror()
+            << "\n";
+  std::abort();
 }
+
+template <typename Fn>
+Fn loadSymbol(void *Lib, const std::string &Path, const char *Name) {
+  auto *Symbol = reinterpret_cast<Fn>(dlsym(Lib, Name));
+  if (!Symbol)
+    failToLoad(Path);
+  return Symbol;
+}
+
+void initializeTool() { KernelTimer::instance().start(); }
+
+void finalizeTool() { KernelTimer::instance().stop(); }
 
 } // namespace
 
 void KernelTimer::configure() {
-  (void)rocprofiler_force_configure(&configureTool);
+  auto &Timer = instance();
+  if (Timer.Configured)
+    return;
+  Timer.Configured = true;
+
+  std::string Path = tracerLibraryPath();
+  void *Lib = dlopen(Path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (!Lib)
+    failToLoad(Path);
+  auto *Create = loadSymbol<decltype(&mnemeCreateDispatchTracer)>(
+      Lib, Path, "mnemeCreateDispatchTracer");
+  auto *Configure = loadSymbol<decltype(&mnemeConfigureDispatchTool)>(
+      Lib, Path, "mnemeConfigureDispatchTool");
+
+  Timer.Tracer.reset(Create());
+  Configure(&initializeTool, &finalizeTool);
 }
-#else
-namespace {
 
-constexpr const char *UnavailableMessage =
-    "[mneme] Kernel timing disabled: CUPTI is unavailable, likely in use by "
-    "another tool such as Nsight Compute.\n";
-
-} // namespace
-
-void KernelTimer::configure() {}
-#endif
-
-KernelTimer::KernelTimer() : Tracer(std::make_unique<DispatchTracer>()) {}
+KernelTimer::KernelTimer() = default;
 
 KernelTimer::~KernelTimer() = default;
 
@@ -62,16 +81,12 @@ KernelTimer &KernelTimer::instance() {
 }
 
 KernelTimer *KernelTimer::get() {
+  configure();
   auto &Timer = instance();
-#if defined(MNEME_ENABLE_CUDA)
-  if (!Timer.Running)
-    Timer.start();
-#endif
-  if (!Timer.Running) {
-    std::cerr << UnavailableMessage;
-    return nullptr;
-  }
-  return &Timer;
+  if (Timer.Running)
+    return &Timer;
+  std::cerr << UnavailableMessage;
+  return nullptr;
 }
 
 void KernelTimer::start() {

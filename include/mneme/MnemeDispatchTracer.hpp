@@ -7,7 +7,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -49,28 +48,36 @@ bool waitForRecords(std::unique_lock<std::mutex> &Lock,
 // other profiler error aborts.
 class DispatchTracer {
 public:
-  DispatchTracer();
-  ~DispatchTracer();
-  DispatchTracer(const DispatchTracer &) = delete;
-  DispatchTracer &operator=(const DispatchTracer &) = delete;
+  virtual ~DispatchTracer() = default;
 
   // Returns false when the profiler is unavailable, e.g. because another tool
   // uses it. On HIP this must run in a rocprofiler tool's initialize callback;
   // on CUDA only one tracer per process may start.
-  bool start(DispatchSink Sink, void *Data);
+  virtual bool start(DispatchSink Sink, void *Data) = 0;
   // Runs in the HIP tool's finalize callback, so errors are ignored.
-  void stop();
+  virtual void stop() = 0;
 
-  void push(uint64_t Token);
-  uint64_t pop();
-  bool flush();
+  virtual void push(uint64_t Token) = 0;
+  virtual uint64_t pop() = 0;
+  virtual bool flush() = 0;
 
   // CUDA dispatch records carry no kernel id, so there it returns nullopt.
-  std::optional<std::string> kernelName(uint64_t KernelId);
-
-private:
-  struct Impl;
-  std::unique_ptr<Impl> State;
+  virtual std::optional<std::string> kernelName(uint64_t KernelId) = 0;
 };
+
+using ToolCallback = void (*)();
+
+// Defined by the vendor tracer source, which links the vendor profiler.
+// Recording loads them from the dispatch tracer library only when kernel
+// timing is requested, so that it does not otherwise depend on the profiler.
+extern "C" {
+DispatchTracer *mnemeCreateDispatchTracer();
+// Registers a profiler tool whose Initialize starts a tracer. HIP requires
+// this before the runtime initializes; CUDA calls Initialize immediately.
+void mnemeConfigureDispatchTool(ToolCallback Initialize, ToolCallback Finalize);
+}
+
+inline constexpr const char *DispatchTracerLibrary =
+    "libmneme_dispatch_tracer.so";
 
 } // namespace mneme
