@@ -147,6 +147,11 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return hipMemcpy(Dest, Src, SizeBytes, Kind);
   }
 
+  static hipError_t DeviceCopyAsync(void *Dest, void *Src, size_t SizeBytes,
+                                    hipMemcpyKind Kind, hipStream_t Stream) {
+    return hipMemcpyAsync(Dest, Src, SizeBytes, Kind, Stream);
+  }
+
   static hipError_t DeviceSynchronize() { return hipDeviceSynchronize(); }
 
   static std::string GetDeviceArch() {
@@ -555,6 +560,12 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   static DeviceError_t DeviceCopy(void *Dest, void *Src, size_t SizeBytes,
                                   cudaMemcpyKind Kind) {
     return cudaMemcpy(Dest, Src, SizeBytes, Kind);
+  }
+
+  static DeviceError_t DeviceCopyAsync(void *Dest, void *Src, size_t SizeBytes,
+                                       cudaMemcpyKind Kind,
+                                       DeviceStream_t Stream) {
+    return cudaMemcpyAsync(Dest, Src, SizeBytes, Kind, Stream);
   }
 
   static DeviceError_t DeviceSynchronize() { return cudaDeviceSynchronize(); }

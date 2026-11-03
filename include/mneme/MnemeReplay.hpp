@@ -98,7 +98,9 @@ public:
 
   virtual void load() = 0;
 
-  virtual void reset() {
+  // Restores the recorded state; work queued on Stream must finish before the
+  // state is valid.
+  virtual void reset(DeviceStream_t /*Stream*/) {
     copyToDevice();
     copyGlobals();
   }
@@ -250,12 +252,12 @@ public:
     keepRecordedCopies();
   }
 
-  // Restores blobs from device-side copies.
-  void reset() override {
+  // Restores blobs from device-side copies, queued on Stream.
+  void reset(typename MnemeDeviceRT::DeviceStream_t Stream) override {
     for (const auto &C : RecordedCopies) {
-      auto EC = MnemeDeviceRT::DeviceErrorCheck(
-          MnemeDeviceRT::DeviceCopy(C.BlobAddr, C.CopyAddr, C.Size,
-                                    MnemeDeviceRT::MemcpyDeviceToDeviceKind()));
+      auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopyAsync(
+          C.BlobAddr, C.CopyAddr, C.Size,
+          MnemeDeviceRT::MemcpyDeviceToDeviceKind(), Stream));
       if (EC)
         LOG_FATAL("Could not restore memory blob at {}: {}", C.BlobAddr,
                   EC.value());
