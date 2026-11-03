@@ -83,7 +83,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   }
 
   auto addToDatabase() {
-    return [this](const LaunchTimingInfo &Launch, uint64_t Ns) {
+    return [this](const LaunchHandle &Launch, uint64_t Ns) {
       DB.addLaunchTime(Launch, Ns);
     };
   }
@@ -98,7 +98,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     });
   }
 
-  std::optional<StartedTiming> beginTimedLaunch(const LaunchTimingInfo &Launch,
+  std::optional<StartedTiming> beginTimedLaunch(const LaunchHandle &Launch,
                                                 DeviceStream_t Stream) {
     registerExitDrain();
     Timer->collect(addToDatabase());
@@ -124,7 +124,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   DeviceError_t timeLaunchKernel(const void *func, dim3 &GridDim,
                                  dim3 &BlockDim, void **Args, size_t SharedMem,
                                  DeviceStream_t Stream,
-                                 const LaunchTimingInfo &Launch) {
+                                 const LaunchHandle &Launch) {
     auto Started = beginTimedLaunch(Launch, Stream);
     auto ret = launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     if (Started)
@@ -301,55 +301,41 @@ public:
                                DeviceStream_t Stream) override {
     getOrCreatePageManager();
 
-    if (Config::get().RecordingFilterMode == FilterMode::Scoped &&
-        !detail::scopeAllowsRecording(func)) {
-      std::optional<LaunchTimingInfo> Launch;
-      DB.countLaunch(func, GridDim, BlockDim, SharedMem, Launch);
-      if (Timer && Launch)
-        return timeLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
-                                Stream, *Launch);
+    auto Launch = DB.registerLaunch(func, GridDim, BlockDim, SharedMem);
+    if (!Launch) {
+      LOG_DEBUG("Kernel {} has no record", func);
       return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     }
+    llvm::StringRef KernelName = DB.kernelName(Launch->StaticHash);
 
-    // NOTE: Here we do something conceptually different. We no longer go
-    // through proteus. We call immediately the vendor launcher. Thus we avoid
-    // overheads from caching etc.
-    LOG_DEBUG("Received OptionalKernel Info {}",
-              (void *)Runtime.origLaunchKernel);
-    auto OptionalKernelInfo = proteus::runtime::captureKernelMetadata(func);
-    if (!OptionalKernelInfo) {
-      LOG_DEBUG("Information for kernel  {} is not included", func);
-      return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
-    }
-    auto &KInfo = OptionalKernelInfo.value();
-    LOG_DEBUG("Continue with {}", KInfo.getName());
-    LOG_INFO("Hash value is {}", KInfo.getStaticHash());
-
-    std::optional<LaunchTimingInfo> Launch;
-    auto RecordAction =
-        DB.takeSnapshot<VendorTypes>(KInfo, AllocatedBlobs, GridDim, BlockDim,
-                                     Args, SharedMem, Stream, Launch);
+    bool InRecordingScope =
+        Config::get().RecordingFilterMode != FilterMode::Scoped ||
+        detail::scopeAllowsRecording(func);
+    auto RecordAction = InRecordingScope
+                            ? DB.takeSnapshot<VendorTypes>(
+                                  func, *Launch, AllocatedBlobs, Args, Stream)
+                            : std::nullopt;
     if (RecordAction)
       LOG_INFO("Successfully Recorded Prologue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
                "BLOCK:({}, {}, "
                "{}) SHM_SIZE:{}",
-               func, KInfo.getName(), GridDim.x, GridDim.y, GridDim.z,
-               BlockDim.x, BlockDim.y, BlockDim.z, SharedMem);
-    auto ret = Timer && Launch ? timeLaunchKernel(func, GridDim, BlockDim, Args,
-                                                  SharedMem, Stream, *Launch)
-                               : launchKernel(func, GridDim, BlockDim, Args,
-                                              SharedMem, Stream);
+               func, KernelName, GridDim.x, GridDim.y, GridDim.z, BlockDim.x,
+               BlockDim.y, BlockDim.z, SharedMem);
+    auto ret =
+        Timer ? timeLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
+                                 Stream, *Launch)
+              : launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     if (RecordAction) {
       (*RecordAction)(AllocatedBlobs, Args, Stream);
       LOG_INFO("Successfully Recorded Epilogue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
                "BLOCK:({}, {}, "
                "{}) SHM_SIZE:{}",
-               func, KInfo.getName(), GridDim.x, GridDim.y, GridDim.z,
-               BlockDim.x, BlockDim.y, BlockDim.z, SharedMem);
+               func, KernelName, GridDim.x, GridDim.y, GridDim.z, BlockDim.x,
+               BlockDim.y, BlockDim.z, SharedMem);
       // write kernel record incrementally after epilogue is recorded
-      DB.writeKernelJSON(KInfo.getStaticHash());
+      DB.writeKernelJSON(Launch->StaticHash);
     }
     return ret;
   }

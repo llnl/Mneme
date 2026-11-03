@@ -109,7 +109,7 @@ void KernelTimer::onDispatch(void *Data, const DispatchRecord &Record) {
   Timer->Arrived.notify_all();
 }
 
-bool KernelTimer::begin(const LaunchTimingInfo &Launch,
+bool KernelTimer::begin(const LaunchHandle &Launch,
                         llvm::StringRef KernelName) {
   if (!Running)
     return false;
@@ -137,7 +137,7 @@ void KernelTimer::abandon() {
 // initialization, carry the launch's token, so the token alone does not
 // identify the launched kernel's record.
 bool KernelTimer::dispatchedLaunchedKernel(const Measurement &M,
-                                           const LaunchTimingInfo &Launch) {
+                                           const LaunchHandle &Launch) {
 #if defined(MNEME_ENABLE_HIP)
   auto Name = Tracer->kernelName(M.KernelId);
   return Name && *Name == KernelNames.find(Launch.StaticHash)->second;
