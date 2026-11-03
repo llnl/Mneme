@@ -197,21 +197,7 @@ inline const char *cuptiResultString(CUptiResult r) {
   } while (0)
 
 class DispatchTracer {
-#if defined(CUpti_ActivityKernel9)
   using KernelRec = CUpti_ActivityKernel9;
-#elif defined(CUpti_ActivityKernel8)
-  using KernelRec = CUpti_ActivityKernel8;
-#elif defined(CUpti_ActivityKernel7)
-  using KernelRec = CUpti_ActivityKernel7;
-#elif defined(CUpti_ActivityKernel6)
-  using KernelRec = CUpti_ActivityKernel6;
-#elif defined(CUpti_ActivityKernel5)
-  using KernelRec = CUpti_ActivityKernel5;
-#elif defined(CUpti_ActivityKernel4)
-  using KernelRec = CUpti_ActivityKernel4;
-#else
-  using KernelRec = CUpti_ActivityKernel9;
-#endif
 
   static constexpr size_t BufferSize = 1 << 20;
   static constexpr CUpti_ExternalCorrelationKind ExternalKind =
