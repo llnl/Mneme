@@ -37,11 +37,6 @@ public:
   // Waits for the durations of all launches, which must have completed.
   void drain(RecordDatabase &DB);
 
-  // Used by the profiler's tool callbacks.
-  static KernelTimer &instance();
-  void start();
-  void stop();
-
 private:
   bool Configured = false;
   std::unique_ptr<DispatchTracer> Tracer;
@@ -54,6 +49,10 @@ private:
 
   KernelTimer();
   ~KernelTimer();
+  static KernelTimer &instance();
+  // The profiler tool's initialize and finalize callbacks.
+  static void initialize();
+  static void deinitialize();
   static void onDispatch(void *Data, const DispatchRecord &Record);
   // The caller must hold Mutex.
   void addMeasured(RecordDatabase &DB);

@@ -90,13 +90,6 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     });
   }
 
-  std::optional<StartedTiming> beginTimedLaunch(const LaunchHandle &Launch,
-                                                DeviceStream_t Stream) {
-    registerExitDrain();
-    Timer->collect(DB);
-    return Timer->begin(Launch, Stream);
-  }
-
   // Launches after the drain are still counted but no longer timed.
   void drainTimer() {
     if (!Timer)
@@ -117,7 +110,9 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                                  dim3 &BlockDim, void **Args, size_t SharedMem,
                                  DeviceStream_t Stream,
                                  const LaunchHandle &Launch) {
-    auto Started = beginTimedLaunch(Launch, Stream);
+    registerExitDrain();
+    Timer->collect(DB);
+    std::optional<StartedTiming> Started = Timer->begin(Launch, Stream);
     auto ret = launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     if (Started)
       Timer->end(*Started, ret);
@@ -295,16 +290,16 @@ public:
       LOG_DEBUG("Kernel {} has no record", func);
       return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     }
-    llvm::StringRef KernelName = DB.kernelName(Launch->StaticHash);
+    const std::string &KernelName = DB.kernelName(Launch->StaticHash);
 
     bool InRecordingScope =
         Config::get().RecordingFilterMode != FilterMode::Scoped ||
         detail::scopeAllowsRecording(func);
-    auto RecordAction = InRecordingScope
-                            ? DB.takeSnapshot<VendorTypes>(
-                                  func, *Launch, AllocatedBlobs, Args, Stream)
-                            : std::nullopt;
-    if (RecordAction)
+    auto CaptureEpilogue =
+        InRecordingScope ? DB.takeSnapshot<VendorTypes>(
+                               func, *Launch, AllocatedBlobs, Args, Stream)
+                         : std::nullopt;
+    if (CaptureEpilogue)
       LOG_INFO("Successfully Recorded Prologue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
                "BLOCK:({}, {}, "
@@ -315,8 +310,8 @@ public:
         Timer ? timeLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
                                  Stream, *Launch)
               : launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
-    if (RecordAction) {
-      (*RecordAction)(AllocatedBlobs, Args, Stream);
+    if (CaptureEpilogue) {
+      (*CaptureEpilogue)();
       LOG_INFO("Successfully Recorded Epilogue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
                "BLOCK:({}, {}, "

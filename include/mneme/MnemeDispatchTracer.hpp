@@ -10,20 +10,29 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string_view>
 
 namespace mneme {
 
-// Timestamps are in nanoseconds. Token is 0 for dispatches launched without a
-// pushed token, and KernelId is only known on HIP.
+// Timestamps are in nanoseconds, and KernelId is only known on HIP.
 struct DispatchRecord {
   uint64_t Token;
   uint64_t KernelId;
   uint64_t Start;
   uint64_t End;
+
+  // Returns nothing when the profiler reported the dispatch ending before it
+  // started.
+  std::optional<uint64_t> duration() const {
+    if (End < Start)
+      return std::nullopt;
+    return End - Start;
+  }
 };
 
-// Called on a profiler thread, or on the thread that flushes the profiler.
+// Called on a profiler thread, or on the thread that flushes the profiler,
+// only for dispatches launched while a token was pushed.
 using DispatchSink = void (*)(void *Data, const DispatchRecord &Record);
 
 inline constexpr auto RecordWaitTimeout = std::chrono::seconds(10);

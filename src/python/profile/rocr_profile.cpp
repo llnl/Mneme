@@ -7,6 +7,7 @@
 #include <hip/hip_runtime.h>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -55,11 +56,15 @@ public:
   // Call back to pick duration of a kernel
   void logDuration(const DispatchRecord &Record) {
     int64_t token = Record.Token;
-    if (Record.End < Record.Start)
+    std::optional<uint64_t> Duration = Record.duration();
+    if (!Duration) {
+      LOG_WARN("Dropping dispatch of token {} that ends before it starts",
+               token);
       return;
+    }
     LOG_DEBUG("Received Log of kernel_id={} associated with token {}",
               Record.KernelId, token);
-    int64_t dur = Record.End - Record.Start;
+    int64_t dur = *Duration;
 
     std::lock_guard<std::mutex> lk(rocrMutex);
 

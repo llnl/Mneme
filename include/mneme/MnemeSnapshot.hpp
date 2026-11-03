@@ -53,6 +53,22 @@ struct LaunchHandle {
   uint64_t LaunchIndex;
 };
 
+// Durations of an instance's timed launches, written as its TimeNs.
+struct LaunchTimes {
+  uint64_t Sum;
+  uint64_t Min;
+  uint64_t Max;
+
+  void add(uint64_t Ns) {
+    Sum += Ns;
+    Min = std::min(Min, Ns);
+    Max = std::max(Max, Ns);
+  }
+  llvm::json::Object toJSON() const {
+    return llvm::json::Object{{"Sum", Sum}, {"Min", Min}, {"Max", Max}};
+  }
+};
+
 struct KernelInstance {
   std::string PrologueFn;
   std::string EpilogueFn;
@@ -62,9 +78,7 @@ struct KernelInstance {
   uint64_t NumOccurrences = 0;
   uint64_t SharedMem;
   uint64_t TimedLaunches = 0;
-  uint64_t TimeSumNs = 0;
-  uint64_t TimeMinNs = 0;
-  uint64_t TimeMaxNs = 0;
+  std::optional<LaunchTimes> TimeNs;
   std::optional<uint64_t> RecordedLaunchIndex;
   std::optional<uint64_t> RecordedLaunchTimeNs;
   static llvm::json::Object toJSON(const dim3 &Dim) {
@@ -76,9 +90,10 @@ struct KernelInstance {
   }
   bool isRecorded() const { return RecordedLaunchIndex.has_value(); }
   void addLaunchTime(uint64_t Ns, uint64_t LaunchIndex) {
-    TimeMinNs = TimedLaunches ? std::min(TimeMinNs, Ns) : Ns;
-    TimeMaxNs = std::max(TimeMaxNs, Ns);
-    TimeSumNs += Ns;
+    if (TimeNs)
+      TimeNs->add(Ns);
+    else
+      TimeNs = LaunchTimes{Ns, Ns, Ns};
     TimedLaunches++;
     if (RecordedLaunchIndex == LaunchIndex)
       RecordedLaunchTimeNs = Ns;
@@ -94,9 +109,8 @@ struct KernelInstance {
     instance["Occurrences"] = NumOccurrences;
     if (KernelTiming) {
       instance["TimedLaunches"] = TimedLaunches;
-      if (TimedLaunches)
-        instance["TimeNs"] = llvm::json::Object{
-            {"Sum", TimeSumNs}, {"Min", TimeMinNs}, {"Max", TimeMaxNs}};
+      if (TimeNs)
+        instance["TimeNs"] = TimeNs->toJSON();
       if (RecordedLaunchTimeNs)
         instance["RecordedLaunchTimeNs"] = *RecordedLaunchTimeNs;
     }
@@ -238,10 +252,10 @@ class KernelInstancesCollection {
   llvm::SmallVector<bool> KernelSpecializations;
   llvm::SmallVector<std::function<double(void *)>> ConvertArgToDouble;
   llvm::SmallVector<std::string> ModuleFiles;
+  const uint64_t StaticHash;
   const std::string KName;
   SourceFileInfo Source;
   bool CopySource;
-  KernelTimingType Timing;
 
 private:
   // Parse Proteus's serialized bitcode in a Mneme-owned LLVMContext and
@@ -269,8 +283,7 @@ private:
   }
 
   std::string StoreModuleBytes(llvm::StringRef Bytes,
-                               const std::string &RecordReplayDir,
-                               uint64_t StaticHash) {
+                               const std::string &RecordReplayDir) {
     std::string Filename(
         std::filesystem::path(llvm::Twine(RecordReplayDir + "/RecordedIR_" +
                                           std::to_string(StaticHash) + ".bc")
@@ -290,7 +303,7 @@ private:
   }
 
 public:
-  llvm::json::Object toJSON(uint64_t StaticHash) const {
+  llvm::json::Object toJSON(KernelTimingType Timing) const {
     llvm::json::Object Collection;
     Collection["StaticHash"] = StaticHash;
     Collection["KernelName"] = KName;
@@ -316,9 +329,9 @@ public:
 
   KernelInstancesCollection(const proteus::runtime::KernelMetadata &KInfo,
                             const KernelRecordingPolicy &Policy,
-                            bool CopySource, KernelTimingType Timing)
-      : NumRecords(0), Policy(Policy), KName(KInfo.getName()),
-        CopySource(CopySource), Timing(Timing) {}
+                            bool CopySource)
+      : NumRecords(0), Policy(Policy), StaticHash(KInfo.getStaticHash()),
+        KName(KInfo.getName()), CopySource(CopySource) {}
 
   bool hasRecords() const { return NumRecords > 0; }
   const std::string &getName() const { return KName; }
@@ -356,12 +369,11 @@ public:
         });
       }
     }
-    ModuleFiles.emplace_back(
-        StoreModuleBytes(Bitcode, MnemeDirectory, KInfo.getStaticHash()));
+    ModuleFiles.emplace_back(StoreModuleBytes(Bitcode, MnemeDirectory));
   }
 
-  LaunchHandle countLaunch(uint64_t StaticHash, dim3 &GridDim, dim3 &BlockDim,
-                           uint64_t SharedMem) {
+  LaunchHandle registerLaunch(const dim3 &GridDim, const dim3 &BlockDim,
+                              uint64_t SharedMem) {
     TotalLaunches++;
     LaunchHandle Launch{StaticHash, std::nullopt, TotalLaunches};
 
@@ -392,11 +404,9 @@ public:
     return DHash;
   }
 
+  // Returns the epilogue capture to run after the launch completes.
   template <DeviceVendors VendorTypes>
-  std::optional<std::function<
-      void(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &, void **,
-           typename DeviceTraits<VendorTypes>::DeviceStream_t)>>
-  takeSnapshot(
+  std::optional<std::function<void()>> takeSnapshot(
       std::filesystem::path &MnemeDir, const void *Kernel,
       const LaunchHandle &Launch,
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
@@ -404,7 +414,6 @@ public:
       EpilogueSnapshotType EpilogueType) {
     if (!Launch.DynamicHash)
       return std::nullopt;
-    uint64_t StaticHash = Launch.StaticHash;
     uint64_t DynamicHash = *Launch.DynamicHash;
 
     if (!Policy.selects(Launch.LaunchIndex)) {
@@ -453,26 +462,17 @@ public:
     std::shared_ptr<SnapshotWriter<VendorTypes>> Writer =
         makeEpilogueWriter<VendorTypes>(EpilogueType, PrologueGlobals);
 
-    std::function<void(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &,
-                       void **,
-                       typename DeviceTraits<VendorTypes>::DeviceStream_t)>
-        CaptureEpilogue =
-            [this, DynamicHash, StaticHash, MnemeDir, GlobalVars, Writer](
-                llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>>
-                    &DeviceMemory,
-                void **Args,
-                typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
-              std::filesystem::path Filename(
-                  MnemeDir / (std::string("DeviceState.epilogue.") +
-                              std::to_string(StaticHash) + "." +
-                              std::to_string(DynamicHash) + ".mneme"));
+    return [this, DynamicHash, MnemeDir, GlobalVars, Writer, &DeviceMemory,
+            Args, Stream] {
+      std::filesystem::path Filename(MnemeDir /
+                                     (std::string("DeviceState.epilogue.") +
+                                      std::to_string(StaticHash) + "." +
+                                      std::to_string(DynamicHash) + ".mneme"));
 
-              SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory,
-                                            KernelArgSizes, Args, Stream};
-              Instances[DynamicHash].EpilogueFn =
-                  Writer->write(Filename, In).string();
-            };
-    return CaptureEpilogue;
+      SnapshotInput<VendorTypes> In{GlobalVars, DeviceMemory, KernelArgSizes,
+                                    Args, Stream};
+      Instances[DynamicHash].EpilogueFn = Writer->write(Filename, In).string();
+    };
   }
 };
 
@@ -507,7 +507,7 @@ public:
     auto *RecordPtr = &It->second;
 
     auto JsonFilename = MnemeDirectory / (std::to_string(StaticHash) + ".json");
-    auto JSONRecord = RecordPtr->toJSON(StaticHash);
+    auto JSONRecord = RecordPtr->toJSON(Timing);
 
     std::error_code EC;
     llvm::raw_fd_ostream JsonOS(JsonFilename.string(), EC);
@@ -558,8 +558,7 @@ public:
       auto Policy = filterLaunch(StaticHash, KInfo.getName());
       if (!Policy)
         return nullptr;
-      It = KernelRecords
-               .try_emplace(StaticHash, KInfo, *Policy, CopySource, Timing)
+      It = KernelRecords.try_emplace(StaticHash, KInfo, *Policy, CopySource)
                .first;
       LOG_INFO("Created instance");
     }
@@ -568,8 +567,10 @@ public:
 
   // Returns nothing when Kernel has no record, because the recording filter
   // rejects it or Proteus has no metadata for it.
-  std::optional<LaunchHandle> registerLaunch(const void *Kernel, dim3 &GridDim,
-                                             dim3 &BlockDim, size_t SharedMem) {
+  std::optional<LaunchHandle> registerLaunch(const void *Kernel,
+                                             const dim3 &GridDim,
+                                             const dim3 &BlockDim,
+                                             size_t SharedMem) {
     auto [It, Inserted] = CountedKernels.try_emplace(Kernel);
     if (Inserted) {
       auto KInfo = proteus::runtime::captureKernelMetadata(Kernel);
@@ -579,14 +580,11 @@ public:
     if (!It->second)
       return std::nullopt;
     return KernelRecords.find(*It->second)
-        ->second.countLaunch(*It->second, GridDim, BlockDim, SharedMem);
+        ->second.registerLaunch(GridDim, BlockDim, SharedMem);
   }
 
   template <DeviceVendors VendorTypes>
-  std::optional<std::function<
-      void(llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &, void **,
-           typename DeviceTraits<VendorTypes>::DeviceStream_t)>>
-  takeSnapshot(
+  std::optional<std::function<void()>> takeSnapshot(
       const void *Kernel, const LaunchHandle &Launch,
       llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
       void **Args, typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
@@ -596,7 +594,7 @@ public:
                                            EpilogueType);
   }
 
-  llvm::StringRef kernelName(uint64_t StaticHash) const {
+  const std::string &kernelName(uint64_t StaticHash) const {
     return KernelRecords.find(StaticHash)->second.getName();
   }
 

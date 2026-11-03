@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -63,9 +64,13 @@ private:
 
   static void recordDuration(void *, const DispatchRecord &Record) {
     auto& inst = instance();
-    if (Record.End <= Record.Start)
+    std::optional<uint64_t> Duration = Record.duration();
+    if (!Duration) {
+      LOG_WARN("Dropping dispatch of token {} that ends before it starts",
+               Record.Token);
       return;
-    u64 dur = Record.End - Record.Start;
+    }
+    u64 dur = *Duration;
 
     std::lock_guard<std::mutex> lk(inst.mtx_);
     if (inst.targetByToken_.find(Record.Token) == inst.targetByToken_.end())

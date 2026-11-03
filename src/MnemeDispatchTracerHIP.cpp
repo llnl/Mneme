@@ -67,6 +67,10 @@ class HIPDispatchTracer final : public DispatchTracer {
       auto *Record = static_cast<
           const rocprofiler_buffer_tracing_kernel_dispatch_record_t *>(
           Headers[I]->payload);
+      // Dispatches launched without a pushed token, such as those of other
+      // threads, have no external correlation id.
+      if (Record->correlation_id.external.value == 0)
+        continue;
       Self->Sink(Self->SinkData,
                  {Record->correlation_id.external.value,
                   Record->dispatch_info.kernel_id, Record->start_timestamp,

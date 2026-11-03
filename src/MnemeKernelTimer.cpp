@@ -33,10 +33,6 @@ Fn loadSymbol(void *Lib, const std::string &Path, const char *Name) {
   return Symbol;
 }
 
-void initializeTool() { KernelTimer::instance().start(); }
-
-void finalizeTool() { KernelTimer::instance().stop(); }
-
 } // namespace
 
 void KernelTimer::configure() {
@@ -55,7 +51,7 @@ void KernelTimer::configure() {
       Lib, Path, "mnemeConfigureDispatchTool");
 
   Timer.Tracer.reset(Create());
-  Configure(&initializeTool, &finalizeTool);
+  Configure(&KernelTimer::initialize, &KernelTimer::deinitialize);
 }
 
 KernelTimer::KernelTimer() = default;
@@ -80,19 +76,18 @@ KernelTimer &KernelTimer::get() {
   return Timer;
 }
 
-void KernelTimer::start() {
-  Running = Tracer->start(&KernelTimer::onDispatch, this);
+void KernelTimer::initialize() {
+  auto &Timer = instance();
+  Timer.Running = Timer.Tracer->start(&KernelTimer::onDispatch, &Timer);
 }
 
-void KernelTimer::stop() {
-  Running = false;
-  Tracer->stop();
+void KernelTimer::deinitialize() {
+  auto &Timer = instance();
+  Timer.Running = false;
+  Timer.Tracer->stop();
 }
 
 void KernelTimer::onDispatch(void *Data, const DispatchRecord &Record) {
-  // Token 0 marks dispatches that are not timed, such as runtime copies.
-  if (Record.Token == 0)
-    return;
   auto *Timer = static_cast<KernelTimer *>(Data);
   std::lock_guard<std::mutex> Lock(Timer->Mutex);
   Timer->Measured.push_back(Record);
@@ -130,8 +125,13 @@ void KernelTimer::addMeasured(RecordDatabase &DB) {
     if (It == Pending.end() ||
         !Tracer->isDispatchOf(Record, DB.kernelName(It->second.StaticHash)))
       continue;
-    if (Record.End >= Record.Start)
-      DB.addLaunchTime(It->second, Record.End - Record.Start);
+    const LaunchHandle &Launch = It->second;
+    if (std::optional<uint64_t> Ns = Record.duration())
+      DB.addLaunchTime(Launch, *Ns);
+    else
+      std::cerr << "[mneme] The profiler reported launch " << Launch.LaunchIndex
+                << " of kernel " << DB.kernelName(Launch.StaticHash)
+                << " ending before it started; it is left untimed\n";
     Pending.erase(It);
   }
   Measured.clear();
