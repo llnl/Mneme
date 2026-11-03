@@ -215,7 +215,6 @@ class DispatchTracer {
 
   static constexpr size_t BufferSize = 1 << 20;
   static constexpr size_t BufferAlign = 8;
-  static constexpr size_t BufferPoolCount = 8;
   static constexpr CUpti_ExternalCorrelationKind ExternalKind =
       CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0;
 
@@ -226,29 +225,15 @@ class DispatchTracer {
   std::mutex Mutex;
   DispatchSink Sink = nullptr;
   void *SinkData = nullptr;
-  // Reused so that the callbacks do not allocate.
-  std::vector<uint8_t *> BufferPool;
-  size_t PoolIndex = 0;
   // Filled from EXTERNAL_CORRELATION records, which precede the kernel's.
   std::unordered_map<uint32_t, uint64_t> TokenByCorrelation;
 
   static void CUPTIAPI requestBuffer(uint8_t **Buffer, size_t *Size,
                                      size_t *MaxNumRecords) {
-    auto &Tracer = *Active;
-    std::lock_guard<std::mutex> Lock(Tracer.Mutex);
-
-    if (Tracer.BufferPool.empty()) {
-      Tracer.BufferPool.reserve(BufferPoolCount);
-      for (size_t I = 0; I < BufferPoolCount; ++I) {
-        void *P = nullptr;
-        if (posix_memalign(&P, BufferAlign, BufferSize) != 0)
-          std::abort();
-        Tracer.BufferPool.push_back(reinterpret_cast<uint8_t *>(P));
-      }
-      Tracer.PoolIndex = 0;
-    }
-
-    *Buffer = Tracer.BufferPool[Tracer.PoolIndex++ % Tracer.BufferPool.size()];
+    void *P = nullptr;
+    if (posix_memalign(&P, BufferAlign, BufferSize) != 0)
+      std::abort();
+    *Buffer = reinterpret_cast<uint8_t *>(P);
     *Size = BufferSize;
     *MaxNumRecords = 0;
   }
@@ -285,6 +270,7 @@ class DispatchTracer {
     }
     if (St != CUPTI_SUCCESS && St != CUPTI_ERROR_MAX_LIMIT_REACHED)
       LOG_WARN("cuptiActivityGetNextRecord returned {}", (int)St);
+    std::free(Buffer);
 
     {
       std::lock_guard<std::mutex> Lock(Tracer.Mutex);
