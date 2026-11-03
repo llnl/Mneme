@@ -491,12 +491,11 @@ class RecordDatabase {
   KernelTimingType Timing;
 
 public:
-  explicit RecordDatabase(KernelTimingType Timing) : Timing(Timing) {
-    const auto &Conf = Config::get();
-
-    MnemeDirectory = Conf.getDataDirectory();
-    EpilogueType = Conf.EpilogueType;
-    CopySource = Conf.CopySource;
+  RecordDatabase(std::filesystem::path MnemeDirectory,
+                 EpilogueSnapshotType EpilogueType, bool CopySource,
+                 KernelTimingType Timing)
+      : MnemeDirectory(std::move(MnemeDirectory)), EpilogueType(EpilogueType),
+        CopySource(CopySource), Timing(Timing) {
     // Logging here constructs the logger first so it outlives flush() at exit.
     LOG_DEBUG("Recording into {}", MnemeDirectory.string());
   }

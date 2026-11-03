@@ -30,9 +30,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   using DeviceStream_t = typename Base::DeviceStream_t;
 
   RecorderRuntimeFunctions<VendorTypes> Runtime;
-  std::unique_ptr<LaunchTimer<VendorTypes>> Timer =
-      createLaunchTimer<VendorTypes>(Config::get().KernelTiming);
-  RecordDatabase DB{Timer ? Config::get().KernelTiming : KernelTimingType::Off};
+  std::unique_ptr<LaunchTimer<VendorTypes>> Timer;
+  RecordDatabase DB;
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
   // Allocations served by the vendor runtime (managed, pinned, pitched,
   // stream-ordered, ...). They are not captured, but the application may
@@ -81,16 +80,25 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return ret;
   }
 
+  auto addToDatabase() {
+    return [this](const TimedLaunch &Launch, uint64_t Ns) {
+      DB.addLaunchTime(Launch, Ns);
+    };
+  }
+
+  void registerExitDrain() {
+    if (TimedBackend)
+      return;
+    TimedBackend = this;
+    std::atexit([] {
+      if (TimedBackend)
+        TimedBackend->drainTimer();
+    });
+  }
+
   void beginTimedLaunch(const TimedLaunch &Launch) {
-    if (!TimedBackend) {
-      TimedBackend = this;
-      std::atexit([] {
-        if (TimedBackend)
-          TimedBackend->drainTimer();
-      });
-    }
-    Timer->collect(
-        [this](const TimedLaunch &L, uint64_t Ns) { DB.addLaunchTime(L, Ns); });
+    registerExitDrain();
+    Timer->collect(addToDatabase());
     Timer->begin(Launch, DB.kernelName(Launch.StaticHash));
   }
 
@@ -98,12 +106,37 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   void drainTimer() {
     if (!Timer)
       return;
-    Timer->drain(
-        [this](const TimedLaunch &L, uint64_t Ns) { DB.addLaunchTime(L, Ns); });
+    Timer->drain(addToDatabase());
     Timer.reset();
   }
 
+  // Times the launch when Launch names the record its duration is added to.
+  DeviceError_t launchKernel(const void *func, dim3 &GridDim, dim3 &BlockDim,
+                             void **Args, size_t SharedMem,
+                             DeviceStream_t Stream,
+                             const std::optional<TimedLaunch> &Launch) {
+    // A captured launch dispatches nothing now, and its graph's later
+    // dispatches carry no token, so it would never get a duration.
+    bool Timed =
+        Timer && Launch && !MnemeDeviceRT::deviceStreamIsCapturing(Stream);
+    if (Timed)
+      beginTimedLaunch(*Launch);
+    auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
+                                        SharedMem, Stream);
+    if (Timed)
+      Timer->end(ret == MnemeDeviceRT::DeviceSuccess);
+    return ret;
+  }
+
 public:
+  // Timer is created before DB, because DB records timing only when the
+  // profiler started.
+  RecordingBackend()
+      : Timer(createLaunchTimer<VendorTypes>(Config::get().KernelTiming)),
+        DB(Config::get().getDataDirectory(), Config::get().EpilogueType,
+           Config::get().CopySource,
+           Timer ? Config::get().KernelTiming : KernelTimingType::Off) {}
+
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
     if (!ptr)
       return false;
@@ -256,24 +289,6 @@ public:
     PassthroughAllocs.erase(ptr);
     auto ret = Runtime.origFreeHost(ptr);
     LOG_DEBUG("Free pinned address:{}", ptr);
-    return ret;
-  }
-
-  // Times the launch when Launch names the record its duration is added to.
-  DeviceError_t launchKernel(const void *func, dim3 &GridDim, dim3 &BlockDim,
-                             void **Args, size_t SharedMem,
-                             DeviceStream_t Stream,
-                             const std::optional<TimedLaunch> &Launch) {
-    // A captured launch dispatches nothing now, and its graph's later
-    // dispatches carry no token, so it would never get a duration.
-    bool Timed =
-        Timer && Launch && !MnemeDeviceRT::deviceStreamIsCapturing(Stream);
-    if (Timed)
-      beginTimedLaunch(*Launch);
-    auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
-                                        SharedMem, Stream);
-    if (Timed)
-      Timer->end(ret == MnemeDeviceRT::DeviceSuccess);
     return ret;
   }
 
