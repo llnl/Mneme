@@ -144,8 +144,14 @@ public:
     return succeeded(cuptiActivityFlushAll(0), "cuptiActivityFlushAll");
   }
 
-  std::optional<std::string> kernelName(uint64_t) override {
-    return std::nullopt;
+  // CUPTI's dispatch records carry no kernel id to check.
+  bool isDispatchOf(const DispatchRecord &, std::string_view) override {
+    return true;
+  }
+
+  const char *unavailableReason() const override {
+    return "CUPTI is unavailable, likely in use by another tool such as "
+           "Nsight Compute";
   }
 };
 

@@ -116,7 +116,7 @@ A duration spans the dispatch from its start to its end timestamp, the same numb
 The database names the timer that measured its durations in `TimingSource`.
 
 Mneme cannot use the vendor profiler when another tool such as `rocprofv3` or Nsight Compute already does.
-It then prints that kernel timing is disabled, and the run is recorded without timing.
+Recording then stops with an error that gives the reason, rather than continuing without timing.
 
 Launches on a stream that is being captured into a graph are counted but not timed, and launches of the graph are neither counted nor timed.
 Durations are collected asynchronously, so the databases written after each recorded launch can lack the most recent ones.

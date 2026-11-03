@@ -1,14 +1,15 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <hip/hip_runtime.h>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
-#include <condition_variable>
 #include <utility>
 #include <vector>
 
@@ -55,28 +56,24 @@ public:
 
   // Call back to pick duration of a kernel
   void logDuration(const DispatchRecord &Record) {
-    std::string KName =
-        Tracer->kernelName(Record.KernelId).value_or("<unknown>");
-
     int64_t token = Record.Token;
     if (Record.End < Record.Start)
       return;
-    LOG_DEBUG("Received Log of {} associated with token {}", KName, token);
+    LOG_DEBUG("Received Log of kernel_id={} associated with token {}",
+              Record.KernelId, token);
     int64_t dur = Record.End - Record.Start;
 
     std::lock_guard<std::mutex> lk(rocrMutex);
-    LOG_DEBUG("dispatch: kernel_id={} name={} ext_token={}", Record.KernelId,
-              KName, token);
 
     auto tgt = rocrTargetByToken.find(token);
     if (tgt == rocrTargetByToken.end())
       return;
 
     const std::string &want = tgt->second;
-    if (!want.empty() && KName != want)
+    if (!want.empty() && !Tracer->isDispatchOf(Record, want))
       return;
 
-    LOG_DEBUG("Associating {} with token id {} and duration {}", KName, token,
+    LOG_DEBUG("Associating {} with token id {} and duration {}", want, token,
               dur);
     profilesByToken[token].push_back(dur);
     recordsCv.notify_all();

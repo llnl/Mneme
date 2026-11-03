@@ -11,8 +11,6 @@
 #include <memory>
 #include <optional>
 
-#include <llvm/ADT/StringRef.h>
-
 namespace mneme {
 
 // Measures the GPU durations of kernel launches. Durations may arrive after
@@ -24,6 +22,7 @@ public:
 
   // What end() needs to know about how begin() started timing the launch.
   struct StartedTiming {
+    uint64_t Token;
     DeviceError_t CaptureQueryResult;
   };
 
@@ -33,7 +32,6 @@ public:
   virtual void collect(RecordDatabase &DB) = 0;
   // Returns nothing when the launch on Stream is not timed.
   virtual std::optional<StartedTiming> begin(const LaunchHandle &Launch,
-                                             llvm::StringRef KernelName,
                                              DeviceStream_t Stream) = 0;
   virtual void end(const StartedTiming &Started,
                    DeviceError_t LaunchResult) = 0;
@@ -58,15 +56,17 @@ public:
   void collect(RecordDatabase &DB) override { Profiler.collect(DB); }
 
   std::optional<StartedTiming> begin(const LaunchHandle &Launch,
-                                     llvm::StringRef KernelName,
                                      DeviceStream_t Stream) override {
     auto [CaptureQueryResult, Capturing] =
         DevTraits::deviceStreamIsCapturing(Stream);
     // A captured launch dispatches nothing now, and its graph's later
     // dispatches carry no token, so it would never get a duration.
-    if (Capturing || !Profiler.begin(Launch, KernelName))
+    if (Capturing)
       return std::nullopt;
-    return StartedTiming{CaptureQueryResult};
+    std::optional<uint64_t> Token = Profiler.begin(Launch);
+    if (!Token)
+      return std::nullopt;
+    return StartedTiming{*Token, CaptureQueryResult};
   }
 
   // The capture query fails only where the launch should fail the same way,
@@ -74,7 +74,7 @@ public:
   // that succeeds anyway may have been captured instead of dispatched.
   void end(const StartedTiming &Started, DeviceError_t LaunchResult) override {
     if (LaunchResult != DevTraits::DeviceSuccess) {
-      Profiler.abandon();
+      Profiler.abandon(Started.Token);
       return;
     }
     if (Started.CaptureQueryResult != DevTraits::DeviceSuccess) {
@@ -84,7 +84,7 @@ public:
                 << "\n";
       std::abort();
     }
-    Profiler.end();
+    Profiler.end(Started.Token);
   }
 
   // The profiler reports a dispatch only after it completes.
@@ -94,7 +94,7 @@ public:
   }
 };
 
-// Returns nullptr when timing is off or the selected timer is unavailable.
+// Returns nullptr when timing is off.
 template <DeviceVendors VendorTypes>
 std::unique_ptr<LaunchTimer<VendorTypes>>
 createLaunchTimer(KernelTimingType Type) {
@@ -102,9 +102,8 @@ createLaunchTimer(KernelTimingType Type) {
   case KernelTimingType::Off:
     return nullptr;
   case KernelTimingType::Profiler:
-    if (KernelTimer *Profiler = KernelTimer::get())
-      return std::make_unique<ProfilerLaunchTimer<VendorTypes>>(*Profiler);
-    return nullptr;
+    return std::make_unique<ProfilerLaunchTimer<VendorTypes>>(
+        KernelTimer::get());
   }
   return nullptr;
 }

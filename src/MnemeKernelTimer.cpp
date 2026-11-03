@@ -1,5 +1,4 @@
 #include "mneme/MnemeKernelTimer.hpp"
-#include "mneme/MnemeDispatchTracer.hpp"
 
 #include <cstdlib>
 #include <dlfcn.h>
@@ -9,16 +8,6 @@
 namespace mneme {
 
 namespace {
-
-#if defined(MNEME_ENABLE_HIP)
-constexpr const char *UnavailableMessage =
-    "[mneme] Kernel timing disabled: rocprofiler-sdk is unavailable, likely in "
-    "use by another tool such as rocprofv3.\n";
-#else
-constexpr const char *UnavailableMessage =
-    "[mneme] Kernel timing disabled: CUPTI is unavailable, likely in use by "
-    "another tool such as Nsight Compute.\n";
-#endif
 
 // The tracer library is installed, and built, next to this one.
 std::string tracerLibraryPath() {
@@ -80,13 +69,15 @@ KernelTimer &KernelTimer::instance() {
   return *Timer;
 }
 
-KernelTimer *KernelTimer::get() {
+KernelTimer &KernelTimer::get() {
   configure();
   auto &Timer = instance();
-  if (Timer.Running)
-    return &Timer;
-  std::cerr << UnavailableMessage;
-  return nullptr;
+  if (!Timer.Running) {
+    std::cerr << "[mneme] Kernel timing cannot start: "
+              << Timer.Tracer->unavailableReason() << "\n";
+    std::abort();
+  }
+  return Timer;
 }
 
 void KernelTimer::start() {
@@ -104,56 +95,43 @@ void KernelTimer::onDispatch(void *Data, const DispatchRecord &Record) {
     return;
   auto *Timer = static_cast<KernelTimer *>(Data);
   std::lock_guard<std::mutex> Lock(Timer->Mutex);
-  Timer->Measured.push_back(
-      {Record.Token, Record.KernelId, Record.Start, Record.End});
+  Timer->Measured.push_back(Record);
   Timer->Arrived.notify_all();
 }
 
-bool KernelTimer::begin(const LaunchHandle &Launch,
-                        llvm::StringRef KernelName) {
+std::optional<uint64_t> KernelTimer::begin(const LaunchHandle &Launch) {
   if (!Running)
-    return false;
-  // rocprofiler names a kernel by its descriptor symbol, which ends in ".kd".
-  KernelNames.try_emplace(Launch.StaticHash, (KernelName + ".kd").str());
-  Pending.try_emplace(++LastToken, Launch);
-  Tracer->push(LastToken);
-  return true;
+    return std::nullopt;
+  uint64_t Token = ++LastToken;
+  Pending.try_emplace(Token, Launch);
+  Tracer->push(Token);
+  return Token;
 }
 
-void KernelTimer::end() {
+void KernelTimer::end(uint64_t Token) {
   if (!Running)
     return;
-  Tracer->pop();
+  uint64_t Popped = Tracer->pop();
+  if (Popped != Token) {
+    std::cerr << "[mneme] Kernel timing popped token " << Popped
+              << " but the launch pushed " << Token << "\n";
+    std::abort();
+  }
 }
 
-void KernelTimer::abandon() {
-  if (!Running)
-    return;
-  Tracer->pop();
-  Pending.erase(LastToken);
-}
-
-// Setup kernels the runtime dispatches during a launch, such as heap
-// initialization, carry the launch's token, so the token alone does not
-// identify the launched kernel's record.
-bool KernelTimer::dispatchedLaunchedKernel(const Measurement &M,
-                                           const LaunchHandle &Launch) {
-#if defined(MNEME_ENABLE_HIP)
-  auto Name = Tracer->kernelName(M.KernelId);
-  return Name && *Name == KernelNames.find(Launch.StaticHash)->second;
-#else
-  // CUPTI's dispatch records carry no kernel id to check.
-  return true;
-#endif
+void KernelTimer::abandon(uint64_t Token) {
+  end(Token);
+  Pending.erase(Token);
 }
 
 void KernelTimer::addMeasured(RecordDatabase &DB) {
-  for (const Measurement &M : Measured) {
-    auto It = Pending.find(M.Token);
-    if (It == Pending.end() || !dispatchedLaunchedKernel(M, It->second))
+  for (const DispatchRecord &Record : Measured) {
+    auto It = Pending.find(Record.Token);
+    if (It == Pending.end() ||
+        !Tracer->isDispatchOf(Record, DB.kernelName(It->second.StaticHash)))
       continue;
-    if (M.End >= M.Start)
-      DB.addLaunchTime(It->second, M.End - M.Start);
+    if (Record.End >= Record.Start)
+      DB.addLaunchTime(It->second, Record.End - Record.Start);
     Pending.erase(It);
   }
   Measured.clear();

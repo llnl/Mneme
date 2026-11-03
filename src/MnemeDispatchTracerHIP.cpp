@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <unordered_map>
 
 #include <rocprofiler-sdk/buffer.h>
@@ -128,12 +129,23 @@ public:
                      "rocprofiler_flush_buffer");
   }
 
-  std::optional<std::string> kernelName(uint64_t KernelId) override {
+  bool isDispatchOf(const DispatchRecord &Record,
+                    std::string_view KernelName) override {
+    // rocprofiler names a kernel by its descriptor symbol, which ends in ".kd".
+    constexpr std::string_view DescriptorSuffix = ".kd";
     std::lock_guard<std::mutex> Lock(NamesMutex);
-    auto It = KernelNames.find(KernelId);
+    auto It = KernelNames.find(Record.KernelId);
     if (It == KernelNames.end())
-      return std::nullopt;
-    return It->second;
+      return false;
+    std::string_view Symbol = It->second;
+    return Symbol.size() == KernelName.size() + DescriptorSuffix.size() &&
+           Symbol.substr(0, KernelName.size()) == KernelName &&
+           Symbol.substr(KernelName.size()) == DescriptorSuffix;
+  }
+
+  const char *unavailableReason() const override {
+    return "rocprofiler-sdk is unavailable, likely in use by another tool "
+           "such as rocprofv3";
   }
 };
 

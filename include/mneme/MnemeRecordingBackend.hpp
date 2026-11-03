@@ -96,7 +96,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                                                 DeviceStream_t Stream) {
     registerExitDrain();
     Timer->collect(DB);
-    return Timer->begin(Launch, DB.kernelName(Launch.StaticHash), Stream);
+    return Timer->begin(Launch, Stream);
   }
 
   // Launches after the drain are still counted but no longer timed.
@@ -127,13 +127,10 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   }
 
 public:
-  // Timer is created before DB, because DB records timing only when the
-  // profiler started.
   RecordingBackend()
       : Timer(createLaunchTimer<VendorTypes>(Config::get().KernelTiming)),
         DB(Config::get().getDataDirectory(), Config::get().EpilogueType,
-           Config::get().CopySource,
-           Timer ? Config::get().KernelTiming : KernelTimingType::Off) {}
+           Config::get().CopySource, Config::get().KernelTiming) {}
 
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
     if (!ptr)

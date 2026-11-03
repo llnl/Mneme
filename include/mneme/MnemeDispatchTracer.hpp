@@ -1,15 +1,16 @@
 #pragma once
 
 // Kernel dispatch tracing with the vendor profiler, shared by recording and
-// replay so that both measure kernel durations the same way. Each dispatch is
-// tagged with the external correlation token pushed on the launching thread.
+// replay so that both measure kernel durations the same way. A launch is one
+// kernel launch call on the host; a dispatch is one kernel the GPU runs. Each
+// dispatch is tagged with the external correlation token pushed on the
+// launching thread.
 
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
-#include <optional>
-#include <string>
+#include <string_view>
 
 namespace mneme {
 
@@ -61,8 +62,15 @@ public:
   virtual uint64_t pop() = 0;
   virtual bool flush() = 0;
 
-  // CUDA dispatch records carry no kernel id, so there it returns nullopt.
-  virtual std::optional<std::string> kernelName(uint64_t KernelId) = 0;
+  // Returns whether Record is a dispatch of the kernel whose source symbol is
+  // KernelName. A launch can produce more than one dispatch with its token,
+  // because the runtime may first dispatch its own kernels, such as heap
+  // initialization.
+  virtual bool isDispatchOf(const DispatchRecord &Record,
+                            std::string_view KernelName) = 0;
+
+  // Why start() can fail or never run, for the error that stops recording.
+  virtual const char *unavailableReason() const = 0;
 };
 
 using ToolCallback = void (*)();
