@@ -214,7 +214,6 @@ class DispatchTracer {
 #endif
 
   static constexpr size_t BufferSize = 1 << 20;
-  static constexpr size_t BufferAlign = 8;
   static constexpr CUpti_ExternalCorrelationKind ExternalKind =
       CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0;
 
@@ -230,10 +229,7 @@ class DispatchTracer {
 
   static void CUPTIAPI requestBuffer(uint8_t **Buffer, size_t *Size,
                                      size_t *MaxNumRecords) {
-    void *P = nullptr;
-    if (posix_memalign(&P, BufferAlign, BufferSize) != 0)
-      std::abort();
-    *Buffer = reinterpret_cast<uint8_t *>(P);
+    *Buffer = static_cast<uint8_t *>(std::malloc(BufferSize));
     *Size = BufferSize;
     *MaxNumRecords = 0;
   }
