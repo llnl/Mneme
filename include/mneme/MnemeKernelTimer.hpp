@@ -7,10 +7,12 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/STLFunctionalExtras.h>
+#include <llvm/ADT/StringRef.h>
 
 namespace mneme {
 
@@ -31,7 +33,7 @@ public:
   // Returns nullptr when the profiler is unavailable.
   static KernelTimer *get();
 
-  void begin(const TimedLaunch &Launch);
+  void begin(const TimedLaunch &Launch, llvm::StringRef KernelName);
   void end(bool Launched);
   void collect(AddFn Add);
   // Waits for the durations of all launches, which must have completed.
@@ -45,6 +47,7 @@ public:
 private:
   struct Measurement {
     uint64_t Token;
+    uint64_t KernelId;
     uint64_t Start;
     uint64_t End;
   };
@@ -57,11 +60,14 @@ private:
   // Only touched by the recording thread.
   std::vector<Measurement> Ready;
   llvm::DenseMap<uint64_t, TimedLaunch> Pending;
+  llvm::DenseMap<uint64_t, std::string> KernelNames;
   uint64_t LastToken = 0;
 
   KernelTimer();
   ~KernelTimer();
   static void onDispatch(void *Data, const DispatchRecord &Record);
+  bool dispatchedLaunchedKernel(const Measurement &M,
+                                const TimedLaunch &Launch);
 };
 
 } // namespace mneme

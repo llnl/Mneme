@@ -12,8 +12,13 @@
 #include <mutex>
 
 #if defined(MNEME_ENABLE_HIP)
+#include <optional>
+#include <string>
+#include <unordered_map>
+
 #include <rocprofiler-sdk/buffer.h>
 #include <rocprofiler-sdk/buffer_tracing.h>
+#include <rocprofiler-sdk/callback_tracing.h>
 #include <rocprofiler-sdk/context.h>
 #include <rocprofiler-sdk/external_correlation.h>
 #include <rocprofiler-sdk/rocprofiler.h>
@@ -80,6 +85,25 @@ class DispatchTracer {
   rocprofiler_buffer_id_t Buffer{};
   DispatchSink Sink = nullptr;
   void *SinkData = nullptr;
+  std::mutex NamesMutex;
+  std::unordered_map<uint64_t, std::string> KernelNames;
+
+  static void registerKernel(rocprofiler_callback_tracing_record_t Record,
+                             rocprofiler_user_data_t *, void *Data) {
+    if (Record.kind != ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT ||
+        Record.operation !=
+            ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER ||
+        Record.phase != ROCPROFILER_CALLBACK_PHASE_LOAD)
+      return;
+    auto *Symbol = static_cast<
+        const rocprofiler_callback_tracing_code_object_kernel_symbol_register_data_t
+            *>(Record.payload);
+    if (!Symbol->kernel_name)
+      return;
+    auto *Tracer = static_cast<DispatchTracer *>(Data);
+    std::lock_guard<std::mutex> Lock(Tracer->NamesMutex);
+    Tracer->KernelNames[Symbol->kernel_id] = Symbol->kernel_name;
+  }
 
   static void deliver(rocprofiler_context_id_t, rocprofiler_buffer_id_t,
                       rocprofiler_record_header_t **Headers, size_t NumHeaders,
@@ -112,6 +136,11 @@ public:
     CHECK_ROCP(rocprofiler_configure_buffer_tracing_service(
         Context, ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH, nullptr, 0,
         Buffer));
+    rocprofiler_tracing_operation_t SymbolRegister =
+        ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER;
+    CHECK_ROCP(rocprofiler_configure_callback_tracing_service(
+        Context, ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT, &SymbolRegister, 1,
+        &registerKernel, this));
   }
 
   void start() { CHECK_ROCP(rocprofiler_start_context(Context)); }
@@ -140,7 +169,13 @@ public:
 
   rocprofiler_status_t flush() { return rocprofiler_flush_buffer(Buffer); }
 
-  rocprofiler_context_id_t context() const { return Context; }
+  std::optional<std::string> kernelName(uint64_t KernelId) {
+    std::lock_guard<std::mutex> Lock(NamesMutex);
+    auto It = KernelNames.find(KernelId);
+    if (It == KernelNames.end())
+      return std::nullopt;
+    return It->second;
+  }
 };
 
 #elif defined(MNEME_ENABLE_CUDA)

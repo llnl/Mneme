@@ -9,6 +9,7 @@
 #include <memory>
 
 #include <llvm/ADT/STLFunctionalExtras.h>
+#include <llvm/ADT/StringRef.h>
 
 namespace mneme {
 
@@ -22,7 +23,7 @@ public:
 
   // Adds the durations that have arrived.
   virtual void collect(AddFn Add) = 0;
-  virtual void begin(const TimedLaunch &Launch) = 0;
+  virtual void begin(const TimedLaunch &Launch, llvm::StringRef KernelName) = 0;
   virtual void end(bool Launched) = 0;
   // Waits for the durations of all launches and adds them.
   virtual void drain(AddFn Add) = 0;
@@ -41,7 +42,9 @@ public:
 
   void collect(AddFn Add) override { Profiler.collect(Add); }
 
-  void begin(const TimedLaunch &Launch) override { Profiler.begin(Launch); }
+  void begin(const TimedLaunch &Launch, llvm::StringRef KernelName) override {
+    Profiler.begin(Launch, KernelName);
+  }
 
   void end(bool Launched) override { Profiler.end(Launched); }
 

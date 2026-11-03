@@ -10,7 +10,6 @@
 #include <utility>
 #include <vector>
 
-#include <rocprofiler-sdk/callback_tracing.h>
 #include <rocprofiler-sdk/registration.h>
 
 #include "mneme/MnemeDispatchTracer.hpp"
@@ -40,7 +39,6 @@ private:
   std::atomic<int64_t> rocrNextToken{0};
   std::unordered_map<int64_t, std::string> rocrTargetByToken;
   std::unordered_map<int64_t, std::vector<int64_t>> profilesByToken;
-  std::unordered_map<rocprofiler_kernel_id_t, std::string> rocrKernelNames;
 
   // Signaled when a target kernel's duration arrives.
   std::condition_variable recordsCv;
@@ -53,38 +51,10 @@ public:
     return Profiler;
   }
 
-  // Callback to get the kernel-id->Name mapping
-  void registerCodeObj(rocprofiler_callback_tracing_record_t Record) {
-    if (Record.kind != ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT)
-      return;
-
-    if (Record.operation ==
-        ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER) {
-      auto *PayloadData = static_cast<
-          const rocprofiler_callback_tracing_code_object_kernel_symbol_register_data_t
-              *>(Record.payload);
-
-      std::lock_guard<std::mutex> lk(rocrMutex);
-      if (Record.phase == ROCPROFILER_CALLBACK_PHASE_LOAD) {
-        rocrKernelNames[PayloadData->kernel_id] =
-            PayloadData->kernel_name ? PayloadData->kernel_name : "<unknown>";
-      }
-    } else if (Record.operation == ROCPROFILER_CODE_OBJECT_LOAD &&
-               Record.phase == ROCPROFILER_CALLBACK_PHASE_UNLOAD) {
-      // ensure any deferred name lookups have been delivered
-      (void)Tracer.flush();
-    }
-  }
-
   // Call back to pick duration of a kernel
   void logDuration(const DispatchRecord &Record) {
-    std::string KName{"<unknown>"};
-    {
-      std::lock_guard<std::mutex> lk(rocrMutex);
-      if (auto it = rocrKernelNames.find(Record.KernelId);
-          it != rocrKernelNames.end())
-        KName = it->second;
-    }
+    std::string KName =
+        Tracer.kernelName(Record.KernelId).value_or("<unknown>");
 
     int64_t token = Record.Token;
     if (Record.End < Record.Start)
@@ -173,12 +143,6 @@ static void dispatch_cb(void *, const mneme::DispatchRecord &Record) {
   instance.logDuration(Record);
 }
 
-static void codeobj_cb(rocprofiler_callback_tracing_record_t rec,
-                       rocprofiler_user_data_t *data, void * /*data*/) {
-  auto &instance = mneme::MnemeRocProfiler::instance();
-  instance.registerCodeObj(rec);
-}
-
 namespace {
 struct ToolData {};
 
@@ -188,15 +152,6 @@ int tool_init(rocprofiler_client_finalize_t /*fini*/, void *data_v) {
   auto &Tracer = mneme::MnemeRocProfiler::instance().getTracer();
   // Service to pick duration of kernel
   Tracer.create(dispatch_cb, nullptr);
-
-  // Service to pick up kernel name -> kernel id and use it when profiling
-  const rocprofiler_tracing_operation_t ops[] = {
-      ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER,
-      ROCPROFILER_CODE_OBJECT_LOAD};
-  CHECK_ROCP(rocprofiler_configure_callback_tracing_service(
-      Tracer.context(), ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT, ops, 2,
-      codeobj_cb, nullptr));
-
   Tracer.start();
   return 0;
 }

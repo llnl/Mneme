@@ -91,7 +91,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     }
     Timer->collect(
         [this](const TimedLaunch &L, uint64_t Ns) { DB.addLaunchTime(L, Ns); });
-    Timer->begin(Launch);
+    Timer->begin(Launch, DB.kernelName(Launch.StaticHash));
   }
 
   // Launches after the drain are still counted but no longer timed.

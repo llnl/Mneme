@@ -58,7 +58,9 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-SKIP: SharedMem:{{.*}} Occurrences:[[OCC2:[0-9]+]]
 // CHECK-SKIP-NEXT: Timing: TimedLaunches:[[OCC2]] SumNs:{{[1-9][0-9]*}}
 
-// Each launch spins for 1 ms, so anything below 0.5 ms is implausible.
+// Each launch spins for 1 ms, so anything below 0.5 ms is implausible. The
+// first launch in the process also dispatches the runtime's setup kernels,
+// which must not be timed in its place.
 // CHECK-SPIN: DemangledName: spin_kernel(unsigned long)
 // CHECK-SPIN: TotalLaunches: 2
 // CHECK-SPIN: UnrecordedTimeNs: {{0$}}
@@ -173,6 +175,14 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  uint64_t Ticks = ticksPerMillisecond();
+  if (!Ticks)
+    return -1;
+  for (int I = 0; I < 2; I++)
+    spin_kernel<<<1, 1>>>(Ticks);
+  if (!sync())
+    return -1;
+
   dim3 SmallGrid(1, 1, 1), SmallBlock(32, 1, 1);
   dim3 LargeGrid(2, 1, 1), LargeBlock(64, 1, 1);
   for (int I = 0; I < 2; I++) {
@@ -180,14 +190,6 @@ int main(int argc, char **argv) {
     count_kernel<<<LargeGrid, LargeBlock>>>();
   }
   count_kernel<<<SmallGrid, SmallBlock>>>();
-  if (!sync())
-    return -1;
-
-  uint64_t Ticks = ticksPerMillisecond();
-  if (!Ticks)
-    return -1;
-  for (int I = 0; I < 2; I++)
-    spin_kernel<<<1, 1>>>(Ticks);
   if (!sync())
     return -1;
 

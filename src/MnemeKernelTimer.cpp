@@ -101,13 +101,16 @@ void KernelTimer::onDispatch(void *Data, const DispatchRecord &Record) {
     return;
   auto *Timer = static_cast<KernelTimer *>(Data);
   std::lock_guard<std::mutex> Lock(Timer->Mutex);
-  Timer->Measured.push_back({Record.Token, Record.Start, Record.End});
+  Timer->Measured.push_back(
+      {Record.Token, Record.KernelId, Record.Start, Record.End});
   Timer->Arrived.notify_all();
 }
 
-void KernelTimer::begin(const TimedLaunch &Launch) {
+void KernelTimer::begin(const TimedLaunch &Launch, llvm::StringRef KernelName) {
   if (!Running)
     return;
+  // rocprofiler names a kernel by its descriptor symbol, which ends in ".kd".
+  KernelNames.try_emplace(Launch.StaticHash, (KernelName + ".kd").str());
   Pending.try_emplace(++LastToken, Launch);
   Tracer->push(LastToken);
 }
@@ -121,6 +124,20 @@ void KernelTimer::end(bool Launched) {
     Pending.erase(LastToken);
 }
 
+// Setup kernels the runtime dispatches during a launch, such as heap
+// initialization, carry the launch's token, so the token alone does not
+// identify the launched kernel's record.
+bool KernelTimer::dispatchedLaunchedKernel(const Measurement &M,
+                                           const TimedLaunch &Launch) {
+#if defined(MNEME_ENABLE_HIP)
+  auto Name = Tracer->kernelName(M.KernelId);
+  return Name && *Name == KernelNames.find(Launch.StaticHash)->second;
+#else
+  // CUPTI's dispatch records carry no kernel id to check.
+  return true;
+#endif
+}
+
 void KernelTimer::collect(AddFn Add) {
   {
     std::lock_guard<std::mutex> Lock(Mutex);
@@ -128,7 +145,7 @@ void KernelTimer::collect(AddFn Add) {
   }
   for (const Measurement &M : Ready) {
     auto It = Pending.find(M.Token);
-    if (It == Pending.end())
+    if (It == Pending.end() || !dispatchedLaunchedKernel(M, It->second))
       continue;
     if (M.End >= M.Start)
       Add(It->second, M.End - M.Start);

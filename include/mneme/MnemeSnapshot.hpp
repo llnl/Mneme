@@ -320,6 +320,7 @@ public:
         CopySource(CopySource), Timing(Timing) {}
 
   bool hasRecords() const { return NumRecords > 0; }
+  const std::string &getName() const { return KName; }
 
   void addLaunchTime(const TimedLaunch &Launch, uint64_t Ns) {
     TotalTimeNs += Ns;
@@ -600,6 +601,10 @@ public:
     Launch = TimedLaunch{*It->second};
     KernelRecords.find(*It->second)
         ->second.countLaunch(GridDim, BlockDim, SharedMem, *Launch);
+  }
+
+  llvm::StringRef kernelName(uint64_t StaticHash) const {
+    return KernelRecords.find(StaticHash)->second.getName();
   }
 
   void addLaunchTime(const TimedLaunch &Launch, uint64_t Ns) {
