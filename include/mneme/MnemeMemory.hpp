@@ -28,17 +28,55 @@ template <DeviceVendors VendorTypes> class MnemeBuffer {
   uint64_t Size = 0;
   MemoryLocation Location = MemoryLocation::Host;
 
-  void free() {
-    if (!Ptr)
+  static void *allocate(uint64_t Size, MemoryLocation Where) {
+    if (Where == MemoryLocation::Host)
+      return new uint8_t[Size];
+    void *DevPtr = nullptr;
+    if (!Size)
+      return DevPtr;
+    auto EC = MnemeDeviceRT::DeviceErrorCheck(
+        MnemeDeviceRT::DeviceMalloc(&DevPtr, Size));
+    if (EC)
+      LOG_FATAL("Could not allocate {} bytes of device memory: {}", Size,
+                EC.value());
+    return DevPtr;
+  }
+
+  static void release(void *P, MemoryLocation Where) {
+    if (!P)
       return;
-    if (Location == MemoryLocation::Host) {
-      delete[] static_cast<uint8_t *>(Ptr);
-    } else {
-      auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceFree(Ptr));
-      if (EC)
-        LOG_WARN("Could not free the device buffer at {}: {}", Ptr, EC.value());
+    if (Where == MemoryLocation::Host) {
+      delete[] static_cast<uint8_t *>(P);
+      return;
     }
-    Ptr = nullptr;
+    auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceFree(P));
+    if (EC)
+      LOG_WARN("Could not free the device buffer at {}: {}", P, EC.value());
+  }
+
+  void free() { release(std::exchange(Ptr, nullptr), Location); }
+
+  // Copies the bytes into new memory at Dest and frees the old memory.
+  void moveTo(MemoryLocation Dest) {
+    if (Location == Dest)
+      return;
+    void *NewPtr = allocate(Size, Dest);
+    if (Size) {
+      auto Kind = Dest == MemoryLocation::Device
+                      ? MnemeDeviceRT::MemcpyHostToDeviceKind()
+                      : MnemeDeviceRT::MemcpyDeviceToHostKind();
+      auto EC = MnemeDeviceRT::DeviceErrorCheck(
+          MnemeDeviceRT::DeviceCopy(NewPtr, Ptr, Size, Kind));
+      if (EC) {
+        release(NewPtr, Dest);
+        LOG_FATAL("Could not copy {} bytes to the {}: {}", Size,
+                  Dest == MemoryLocation::Device ? "device" : "host",
+                  EC.value());
+      }
+    }
+    free();
+    Ptr = NewPtr;
+    Location = Dest;
   }
 
 public:
@@ -78,45 +116,8 @@ public:
     return Ptr;
   }
 
-  // Copies the bytes into new device memory and frees the host memory.
-  void moveToDevice() {
-    if (Location == MemoryLocation::Device)
-      return;
-    void *DevPtr = nullptr;
-    if (Size) {
-      auto EC = MnemeDeviceRT::DeviceErrorCheck(
-          MnemeDeviceRT::DeviceMalloc(&DevPtr, Size));
-      if (EC)
-        LOG_FATAL("Could not allocate {} bytes of device memory: {}", Size,
-                  EC.value());
-      EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
-          DevPtr, Ptr, Size, MnemeDeviceRT::MemcpyHostToDeviceKind()));
-      if (EC)
-        LOG_FATAL("Could not copy {} bytes to the device: {}", Size,
-                  EC.value());
-    }
-    free();
-    Ptr = DevPtr;
-    Location = MemoryLocation::Device;
-  }
-
-  // Copies the bytes into new host memory and frees the device memory.
-  void moveToHost() {
-    if (Location == MemoryLocation::Host)
-      return;
-    auto *HostPtr = new uint8_t[Size];
-    if (Size) {
-      auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
-          HostPtr, Ptr, Size, MnemeDeviceRT::MemcpyDeviceToHostKind()));
-      if (EC) {
-        delete[] HostPtr;
-        LOG_FATAL("Could not copy {} bytes to the host: {}", Size, EC.value());
-      }
-    }
-    free();
-    Ptr = HostPtr;
-    Location = MemoryLocation::Host;
-  }
+  void moveToDevice() { moveTo(MemoryLocation::Device); }
+  void moveToHost() { moveTo(MemoryLocation::Host); }
 };
 
 template <DeviceVendors VendorTypes> class MnemeMemoryBlob {
