@@ -172,8 +172,8 @@ public:
             BaseSnapshotSource<VendorTypes>(SnapshotFile).load(KernelName)) {}
 
   // Maps every blob at its recorded address. Blobs closer than a large page
-  // share one mapping, owned by the lowest blob and rounded to whole driver VA
-  // blocks, or to pages if the blocks do not fit.
+  // share one mapping, owned by the lowest blob and rounded to whole large
+  // pages and driver VA blocks, or to pages if those do not fit.
   void load() override {
     std::vector<std::pair<uintptr_t, Blob *>> Blobs;
     for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
@@ -183,7 +183,8 @@ public:
     int DeviceID = 0;
     MnemeDeviceRT::getDevice(DeviceID);
     uint64_t PageSize = MnemeDeviceRT::getMinPageSize(DeviceID);
-    uint64_t BlockSize = std::max(PageSize, MnemeDeviceRT::VABlockSize);
+    uint64_t BlockSize =
+        std::max({PageSize, MnemeDeviceRT::VABlockSize, util::LargePageSize});
     auto StartOf = [&](size_t I, uint64_t Unit) {
       return Blobs[I].first & ~(Unit - 1);
     };
