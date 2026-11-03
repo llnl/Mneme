@@ -138,12 +138,8 @@ bool KernelTimer::dispatchedLaunchedKernel(const Measurement &M,
 #endif
 }
 
-void KernelTimer::collect(AddFn Add) {
-  {
-    std::lock_guard<std::mutex> Lock(Mutex);
-    Ready.swap(Measured);
-  }
-  for (const Measurement &M : Ready) {
+void KernelTimer::addMeasured(AddFn Add) {
+  for (const Measurement &M : Measured) {
     auto It = Pending.find(M.Token);
     if (It == Pending.end() || !dispatchedLaunchedKernel(M, It->second))
       continue;
@@ -151,24 +147,23 @@ void KernelTimer::collect(AddFn Add) {
       Add(It->second, M.End - M.Start);
     Pending.erase(It);
   }
-  Ready.clear();
+  Measured.clear();
+}
+
+void KernelTimer::collect(AddFn Add) {
+  std::lock_guard<std::mutex> Lock(Mutex);
+  addMeasured(Add);
 }
 
 void KernelTimer::drain(AddFn Add) {
-  collect(Add);
-  auto Deadline = std::chrono::steady_clock::now() + RecordWaitTimeout;
-  while (!Pending.empty() && Running) {
-    auto Now = std::chrono::steady_clock::now();
-    if (Now >= Deadline)
-      break;
-    {
-      std::unique_lock<std::mutex> Lock(Mutex);
-      waitForRecords(
-          Lock, Arrived, [&] { (void)Tracer->flush(); },
-          [&] { return Measured.size() >= Pending.size(); }, Deadline - Now);
-    }
-    collect(Add);
-  }
+  std::unique_lock<std::mutex> Lock(Mutex);
+  waitForRecords(
+      Lock, Arrived, [&] { (void)Tracer->flush(); },
+      [&] {
+        addMeasured(Add);
+        return Pending.empty() || !Running;
+      },
+      RecordWaitTimeout);
 
   if (!Pending.empty()) {
     std::cerr << "[mneme] No duration arrived for " << Pending.size()

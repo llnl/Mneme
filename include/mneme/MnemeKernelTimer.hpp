@@ -57,8 +57,6 @@ private:
   std::mutex Mutex;
   std::condition_variable Arrived;
   std::vector<Measurement> Measured;
-  // Only touched by the recording thread.
-  std::vector<Measurement> Ready;
   llvm::DenseMap<uint64_t, TimedLaunch> Pending;
   llvm::DenseMap<uint64_t, std::string> KernelNames;
   uint64_t LastToken = 0;
@@ -68,6 +66,8 @@ private:
   static void onDispatch(void *Data, const DispatchRecord &Record);
   bool dispatchedLaunchedKernel(const Measurement &M,
                                 const TimedLaunch &Launch);
+  // The caller must hold Mutex.
+  void addMeasured(AddFn Add);
 };
 
 } // namespace mneme
