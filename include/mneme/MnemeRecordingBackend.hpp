@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include <llvm/ADT/DenseMap.h>
@@ -28,6 +29,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   using MnemeDeviceRT = typename Base::MnemeDeviceRT;
   using DeviceError_t = typename Base::DeviceError_t;
   using DeviceStream_t = typename Base::DeviceStream_t;
+  using StartedTiming = typename LaunchTimer<VendorTypes>::StartedTiming;
 
   RecorderRuntimeFunctions<VendorTypes> Runtime;
   std::unique_ptr<LaunchTimer<VendorTypes>> Timer;
@@ -96,7 +98,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     });
   }
 
-  bool beginTimedLaunch(const TimedLaunch &Launch, DeviceStream_t Stream) {
+  std::optional<StartedTiming> beginTimedLaunch(const TimedLaunch &Launch,
+                                                DeviceStream_t Stream) {
     registerExitDrain();
     Timer->collect(addToDatabase());
     return Timer->begin(Launch, DB.kernelName(Launch.StaticHash), Stream);
@@ -115,11 +118,13 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                              void **Args, size_t SharedMem,
                              DeviceStream_t Stream,
                              const std::optional<TimedLaunch> &Launch) {
-    bool Timed = Timer && Launch && beginTimedLaunch(*Launch, Stream);
+    std::optional<StartedTiming> Started;
+    if (Timer && Launch)
+      Started = beginTimedLaunch(*Launch, Stream);
     auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
                                         SharedMem, Stream);
-    if (Timed)
-      Timer->end(ret);
+    if (Started)
+      Timer->end(*Started, ret);
     return ret;
   }
 

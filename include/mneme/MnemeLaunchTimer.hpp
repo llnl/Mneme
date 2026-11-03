@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <optional>
 
 #include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/StringRef.h>
@@ -23,15 +24,21 @@ public:
   using DeviceError_t = typename DeviceTraits<VendorTypes>::DeviceError_t;
   using DeviceStream_t = typename DeviceTraits<VendorTypes>::DeviceStream_t;
 
+  // What end() needs to know about how begin() started timing the launch.
+  struct StartedTiming {
+    DeviceError_t CaptureQueryResult;
+  };
+
   virtual ~LaunchTimer() = default;
 
   // Adds the durations that have arrived.
   virtual void collect(AddFn Add) = 0;
-  // Returns whether the launch on Stream is timed, in which case end() must
-  // follow it with the launch's result.
-  virtual bool begin(const TimedLaunch &Launch, llvm::StringRef KernelName,
-                     DeviceStream_t Stream) = 0;
-  virtual void end(DeviceError_t LaunchResult) = 0;
+  // Returns nothing when the launch on Stream is not timed.
+  virtual std::optional<StartedTiming> begin(const TimedLaunch &Launch,
+                                             llvm::StringRef KernelName,
+                                             DeviceStream_t Stream) = 0;
+  virtual void end(const StartedTiming &Started,
+                   DeviceError_t LaunchResult) = 0;
   // Waits for the durations of all launches and adds them.
   virtual void drain(AddFn Add) = 0;
 };
@@ -44,38 +51,43 @@ class ProfilerLaunchTimer final : public LaunchTimer<VendorTypes> {
   using typename LaunchTimer<VendorTypes>::AddFn;
   using typename LaunchTimer<VendorTypes>::DeviceError_t;
   using typename LaunchTimer<VendorTypes>::DeviceStream_t;
+  using typename LaunchTimer<VendorTypes>::StartedTiming;
 
   KernelTimer &Profiler;
-  DeviceError_t CaptureQueryResult = DevTraits::DeviceSuccess;
 
 public:
   explicit ProfilerLaunchTimer(KernelTimer &Profiler) : Profiler(Profiler) {}
 
   void collect(AddFn Add) override { Profiler.collect(Add); }
 
-  bool begin(const TimedLaunch &Launch, llvm::StringRef KernelName,
-             DeviceStream_t Stream) override {
-    bool Capturing;
-    CaptureQueryResult = DevTraits::deviceStreamIsCapturing(Stream, Capturing);
+  std::optional<StartedTiming> begin(const TimedLaunch &Launch,
+                                     llvm::StringRef KernelName,
+                                     DeviceStream_t Stream) override {
+    auto [CaptureQueryResult, Capturing] =
+        DevTraits::deviceStreamIsCapturing(Stream);
     // A captured launch dispatches nothing now, and its graph's later
     // dispatches carry no token, so it would never get a duration.
-    if (Capturing)
-      return false;
-    return Profiler.begin(Launch, KernelName);
+    if (Capturing || !Profiler.begin(Launch, KernelName))
+      return std::nullopt;
+    return StartedTiming{CaptureQueryResult};
   }
 
   // The capture query fails only where the launch should fail the same way,
   // such as on the legacy stream while another stream captures, so a launch
   // that succeeds anyway may have been captured instead of dispatched.
-  void end(DeviceError_t LaunchResult) override {
-    bool Launched = LaunchResult == DevTraits::DeviceSuccess;
-    if (Launched && CaptureQueryResult != DevTraits::DeviceSuccess) {
+  void end(const StartedTiming &Started, DeviceError_t LaunchResult) override {
+    if (LaunchResult != DevTraits::DeviceSuccess) {
+      Profiler.abandon();
+      return;
+    }
+    if (Started.CaptureQueryResult != DevTraits::DeviceSuccess) {
       std::cerr << "[mneme] Kernel timing cannot tell whether a launch was "
                    "captured into a graph: "
-                << *DevTraits::DeviceErrorCheck(CaptureQueryResult) << "\n";
+                << *DevTraits::DeviceErrorCheck(Started.CaptureQueryResult)
+                << "\n";
       std::abort();
     }
-    Profiler.end(Launched);
+    Profiler.end();
   }
 
   // The profiler reports a dispatch only after it completes.

@@ -119,13 +119,17 @@ bool KernelTimer::begin(const TimedLaunch &Launch, llvm::StringRef KernelName) {
   return true;
 }
 
-void KernelTimer::end(bool Launched) {
+void KernelTimer::end() {
   if (!Running)
     return;
   Tracer->pop();
-  // A launch that failed never produces a dispatch record.
-  if (!Launched)
-    Pending.erase(LastToken);
+}
+
+void KernelTimer::abandon() {
+  if (!Running)
+    return;
+  Tracer->pop();
+  Pending.erase(LastToken);
 }
 
 // Setup kernels the runtime dispatches during a launch, such as heap
