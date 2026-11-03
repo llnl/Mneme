@@ -83,7 +83,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   }
 
   auto addToDatabase() {
-    return [this](const TimedLaunch &Launch, uint64_t Ns) {
+    return [this](const LaunchTimingInfo &Launch, uint64_t Ns) {
       DB.addLaunchTime(Launch, Ns);
     };
   }
@@ -98,7 +98,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     });
   }
 
-  std::optional<StartedTiming> beginTimedLaunch(const TimedLaunch &Launch,
+  std::optional<StartedTiming> beginTimedLaunch(const LaunchTimingInfo &Launch,
                                                 DeviceStream_t Stream) {
     registerExitDrain();
     Timer->collect(addToDatabase());
@@ -113,16 +113,20 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     Timer.reset();
   }
 
-  // Times the launch when Launch names the record its duration is added to.
   DeviceError_t launchKernel(const void *func, dim3 &GridDim, dim3 &BlockDim,
                              void **Args, size_t SharedMem,
-                             DeviceStream_t Stream,
-                             const std::optional<TimedLaunch> &Launch) {
-    std::optional<StartedTiming> Started;
-    if (Timer && Launch)
-      Started = beginTimedLaunch(*Launch, Stream);
-    auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
-                                        SharedMem, Stream);
+                             DeviceStream_t Stream) {
+    return Runtime.origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
+                                    Stream);
+  }
+
+  // Requires Timer; Launch names the record the duration is added to.
+  DeviceError_t timeLaunchKernel(const void *func, dim3 &GridDim,
+                                 dim3 &BlockDim, void **Args, size_t SharedMem,
+                                 DeviceStream_t Stream,
+                                 const LaunchTimingInfo &Launch) {
+    auto Started = beginTimedLaunch(Launch, Stream);
+    auto ret = launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     if (Started)
       Timer->end(*Started, ret);
     return ret;
@@ -299,10 +303,12 @@ public:
 
     if (Config::get().RecordingFilterMode == FilterMode::Scoped &&
         !detail::scopeAllowsRecording(func)) {
-      std::optional<TimedLaunch> Launch;
+      std::optional<LaunchTimingInfo> Launch;
       DB.countLaunch(func, GridDim, BlockDim, SharedMem, Launch);
-      return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream,
-                          Launch);
+      if (Timer && Launch)
+        return timeLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
+                                Stream, *Launch);
+      return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     }
 
     // NOTE: Here we do something conceptually different. We no longer go
@@ -313,14 +319,13 @@ public:
     auto OptionalKernelInfo = proteus::runtime::captureKernelMetadata(func);
     if (!OptionalKernelInfo) {
       LOG_DEBUG("Information for kernel  {} is not included", func);
-      return Runtime.origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
-                                      Stream);
+      return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     }
     auto &KInfo = OptionalKernelInfo.value();
     LOG_DEBUG("Continue with {}", KInfo.getName());
     LOG_INFO("Hash value is {}", KInfo.getStaticHash());
 
-    std::optional<TimedLaunch> Launch;
+    std::optional<LaunchTimingInfo> Launch;
     auto RecordAction =
         DB.takeSnapshot<VendorTypes>(KInfo, AllocatedBlobs, GridDim, BlockDim,
                                      Args, SharedMem, Stream, Launch);
@@ -331,8 +336,10 @@ public:
                "{}) SHM_SIZE:{}",
                func, KInfo.getName(), GridDim.x, GridDim.y, GridDim.z,
                BlockDim.x, BlockDim.y, BlockDim.z, SharedMem);
-    auto ret =
-        launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream, Launch);
+    auto ret = Timer && Launch ? timeLaunchKernel(func, GridDim, BlockDim, Args,
+                                                  SharedMem, Stream, *Launch)
+                               : launchKernel(func, GridDim, BlockDim, Args,
+                                              SharedMem, Stream);
     if (RecordAction) {
       (*RecordAction)(AllocatedBlobs, Args, Stream);
       LOG_INFO("Successfully Recorded Epilogue of Kernel {} NAME:{} GRID:({}, "

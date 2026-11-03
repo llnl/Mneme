@@ -109,7 +109,8 @@ void KernelTimer::onDispatch(void *Data, const DispatchRecord &Record) {
   Timer->Arrived.notify_all();
 }
 
-bool KernelTimer::begin(const TimedLaunch &Launch, llvm::StringRef KernelName) {
+bool KernelTimer::begin(const LaunchTimingInfo &Launch,
+                        llvm::StringRef KernelName) {
   if (!Running)
     return false;
   // rocprofiler names a kernel by its descriptor symbol, which ends in ".kd".
@@ -136,7 +137,7 @@ void KernelTimer::abandon() {
 // initialization, carry the launch's token, so the token alone does not
 // identify the launched kernel's record.
 bool KernelTimer::dispatchedLaunchedKernel(const Measurement &M,
-                                           const TimedLaunch &Launch) {
+                                           const LaunchTimingInfo &Launch) {
 #if defined(MNEME_ENABLE_HIP)
   auto Name = Tracer->kernelName(M.KernelId);
   return Name && *Name == KernelNames.find(Launch.StaticHash)->second;

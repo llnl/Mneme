@@ -20,7 +20,7 @@ namespace mneme {
 // later launches, so they are handed out by collect() and drain().
 template <DeviceVendors VendorTypes> class LaunchTimer {
 public:
-  using AddFn = llvm::function_ref<void(const TimedLaunch &, uint64_t Ns)>;
+  using AddFn = llvm::function_ref<void(const LaunchTimingInfo &, uint64_t Ns)>;
   using DeviceError_t = typename DeviceTraits<VendorTypes>::DeviceError_t;
   using DeviceStream_t = typename DeviceTraits<VendorTypes>::DeviceStream_t;
 
@@ -34,7 +34,7 @@ public:
   // Adds the durations that have arrived.
   virtual void collect(AddFn Add) = 0;
   // Returns nothing when the launch on Stream is not timed.
-  virtual std::optional<StartedTiming> begin(const TimedLaunch &Launch,
+  virtual std::optional<StartedTiming> begin(const LaunchTimingInfo &Launch,
                                              llvm::StringRef KernelName,
                                              DeviceStream_t Stream) = 0;
   virtual void end(const StartedTiming &Started,
@@ -60,7 +60,7 @@ public:
 
   void collect(AddFn Add) override { Profiler.collect(Add); }
 
-  std::optional<StartedTiming> begin(const TimedLaunch &Launch,
+  std::optional<StartedTiming> begin(const LaunchTimingInfo &Launch,
                                      llvm::StringRef KernelName,
                                      DeviceStream_t Stream) override {
     auto [CaptureQueryResult, Capturing] =

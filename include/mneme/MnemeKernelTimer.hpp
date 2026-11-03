@@ -24,7 +24,7 @@ struct DispatchRecord;
 // them into the record database on later launches and in drain().
 class KernelTimer {
 public:
-  using AddFn = llvm::function_ref<void(const TimedLaunch &, uint64_t)>;
+  using AddFn = llvm::function_ref<void(const LaunchTimingInfo &, uint64_t)>;
 
   // Loads the vendor profiler and registers the timer with it. HIP must do
   // this before the runtime initializes; get() does it otherwise.
@@ -35,7 +35,7 @@ public:
 
   // Returns whether the launch is timed, in which case end() or abandon() must
   // follow it.
-  bool begin(const TimedLaunch &Launch, llvm::StringRef KernelName);
+  bool begin(const LaunchTimingInfo &Launch, llvm::StringRef KernelName);
   void end();
   // Ends a launch that failed, so it never produces a dispatch record.
   void abandon();
@@ -62,7 +62,7 @@ private:
   std::mutex Mutex;
   std::condition_variable Arrived;
   std::vector<Measurement> Measured;
-  llvm::DenseMap<uint64_t, TimedLaunch> Pending;
+  llvm::DenseMap<uint64_t, LaunchTimingInfo> Pending;
   llvm::DenseMap<uint64_t, std::string> KernelNames;
   uint64_t LastToken = 0;
 
@@ -70,7 +70,7 @@ private:
   ~KernelTimer();
   static void onDispatch(void *Data, const DispatchRecord &Record);
   bool dispatchedLaunchedKernel(const Measurement &M,
-                                const TimedLaunch &Launch);
+                                const LaunchTimingInfo &Launch);
   // The caller must hold Mutex.
   void addMeasured(AddFn Add);
 };
