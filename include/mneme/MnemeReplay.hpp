@@ -50,19 +50,25 @@ protected:
     Args = copyOutArgs();
   }
 
+  void copyToDevice(MnemeMemoryBlob<VendorTypes> &MemBlob) {
+    if (!MemBlob.getHostData())
+      LOG_FATAL("The {} blob at {} was freed from host memory after loading",
+                isPrologue() ? "prologue" : "epilogue", MemBlob.getBlobAddr());
+    LOG_DEBUG("Copying {} from Address {} to device address {} {}",
+              isPrologue() ? "Prologue" : "Epilogue",
+              (void *)MemBlob.getHostData().get(), MemBlob.getBlobAddr(),
+              MemBlob.getSize());
+    auto CEC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
+        MemBlob.getBlobAddr(), MemBlob.getHostData().get(), MemBlob.getSize(),
+        MnemeDeviceRT::MemcpyHostToDeviceKind()));
+    if (CEC)
+      LOG_FATAL("Could not copy Memory Blob to device EC: " + CEC.value() +
+                "\n");
+  }
+
   void copyToDevice() {
-    for (auto &[DevAddr, MemBlob] : DeviceMemoryState) {
-      LOG_DEBUG("Copying {} from Address {} to device address {} {}",
-                isPrologue() ? "Prologue" : "Epilogue",
-                (void *)MemBlob.getHostData().get(), MemBlob.getBlobAddr(),
-                MemBlob.getSize());
-      auto CEC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
-          MemBlob.getBlobAddr(), MemBlob.getHostData().get(), MemBlob.getSize(),
-          MnemeDeviceRT::MemcpyHostToDeviceKind()));
-      if (CEC)
-        LOG_FATAL("Could not copy Memory Blob to device EC: " + CEC.value() +
-                  "\n");
-    }
+    for (auto &[DevAddr, MemBlob] : DeviceMemoryState)
+      copyToDevice(MemBlob);
   }
 
   void copyGlobals() {
@@ -248,8 +254,13 @@ public:
       I = J;
     }
 
-    this->copyToDevice();
-    keepRecordedCopies();
+    // Nothing reads a blob's host copy once it and its restore copy are on the
+    // device, so free it right away to hold at most one blob three times.
+    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState) {
+      this->copyToDevice(MemBlob);
+      keepRecordedCopy(MemBlob);
+      MemBlob.dropHostData();
+    }
   }
 
   // Restores blobs from device-side copies, queued on Stream.
@@ -288,26 +299,24 @@ private:
   };
   std::vector<RecordedCopy> RecordedCopies;
 
-  void keepRecordedCopies() {
-    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState) {
-      if (MemBlob.getSize() == 0)
-        continue;
-      void *CopyAddr = nullptr;
-      auto EC = MnemeDeviceRT::DeviceErrorCheck(
-          MnemeDeviceRT::DeviceMalloc(&CopyAddr, MemBlob.getSize()));
-      if (EC)
-        LOG_FATAL("Could not allocate a {}-byte device copy of the blob at {} "
-                  "for restores: {}",
-                  MemBlob.getSize(), MemBlob.getBlobAddr(), EC.value());
-      RecordedCopies.push_back(
-          {MemBlob.getBlobAddr(), CopyAddr, MemBlob.getSize()});
-      EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
-          CopyAddr, MemBlob.getBlobAddr(), MemBlob.getSize(),
-          MnemeDeviceRT::MemcpyDeviceToDeviceKind()));
-      if (EC)
-        LOG_FATAL("Could not copy the blob at {} for restores: {}",
-                  MemBlob.getBlobAddr(), EC.value());
-    }
+  void keepRecordedCopy(const Blob &MemBlob) {
+    if (MemBlob.getSize() == 0)
+      return;
+    void *CopyAddr = nullptr;
+    auto EC = MnemeDeviceRT::DeviceErrorCheck(
+        MnemeDeviceRT::DeviceMalloc(&CopyAddr, MemBlob.getSize()));
+    if (EC)
+      LOG_FATAL("Could not allocate a {}-byte device copy of the blob at {} "
+                "for restores: {}",
+                MemBlob.getSize(), MemBlob.getBlobAddr(), EC.value());
+    RecordedCopies.push_back(
+        {MemBlob.getBlobAddr(), CopyAddr, MemBlob.getSize()});
+    EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
+        CopyAddr, MemBlob.getBlobAddr(), MemBlob.getSize(),
+        MnemeDeviceRT::MemcpyDeviceToDeviceKind()));
+    if (EC)
+      LOG_FATAL("Could not copy the blob at {} for restores: {}",
+                MemBlob.getBlobAddr(), EC.value());
   }
 };
 
@@ -325,8 +334,10 @@ public:
           MemBlob.allocate(MemBlob.getSize()));
       if (EC)
         LOG_FATAL("Error raised during mapping prologue memeory:" + EC.value());
+      // Comparisons read the device copy, so the host copy is not needed.
+      this->copyToDevice(MemBlob);
+      MemBlob.dropHostData();
     }
-    this->copyToDevice();
   }
 
   EpilogueState<VendorTypes> *asEpilogue() override { return this; }

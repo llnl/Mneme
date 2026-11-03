@@ -100,6 +100,9 @@ public:
     this->HostData = std::move(HostData);
   }
 
+  // Frees the host copy of the blob's data.
+  void dropHostData() { HostData.reset(); }
+
   ~MnemeMemoryBlob() {
     if (BlobAddr != 0 && IsMapped) {
       LOG_FATAL("Destroying memory descriptor without releasing device memory at addr={}, size={}",
