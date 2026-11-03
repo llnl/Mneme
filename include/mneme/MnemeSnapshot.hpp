@@ -379,13 +379,13 @@ public:
 
   void countLaunch(dim3 &GridDim, dim3 &BlockDim, uint64_t SharedMem,
                    TimedLaunch &Launch) {
-    auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem, nullptr);
+    auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem);
     if (countInstance(DynamicHash, GridDim, BlockDim, SharedMem))
       Launch.DynamicHash = DynamicHash;
   }
 
-  llvm::stable_hash computeHash(dim3 &GridDim, dim3 &BlockDim,
-                                uint64_t SharedMem, void **Args) {
+  static llvm::stable_hash
+  computeHash(const dim3 &GridDim, const dim3 &BlockDim, uint64_t SharedMem) {
     auto BlockHash = llvm::stable_hash_combine((llvm::stable_hash)BlockDim.x,
                                                (llvm::stable_hash)BlockDim.y,
                                                (llvm::stable_hash)BlockDim.z);
@@ -410,7 +410,7 @@ public:
     const auto &GlobalVars = KInfo.getGlobals();
     uint64_t StaticHash = KInfo.getStaticHash();
 
-    auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem, Args);
+    auto DynamicHash = computeHash(GridDim, BlockDim, SharedMem);
     KernelInstance *Instance =
         countInstance(DynamicHash, GridDim, BlockDim, SharedMem);
     if (!Instance)
