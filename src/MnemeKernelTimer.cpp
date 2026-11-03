@@ -147,29 +147,29 @@ bool KernelTimer::dispatchedLaunchedKernel(const Measurement &M,
 #endif
 }
 
-void KernelTimer::addMeasured(AddFn Add) {
+void KernelTimer::addMeasured(RecordDatabase &DB) {
   for (const Measurement &M : Measured) {
     auto It = Pending.find(M.Token);
     if (It == Pending.end() || !dispatchedLaunchedKernel(M, It->second))
       continue;
     if (M.End >= M.Start)
-      Add(It->second, M.End - M.Start);
+      DB.addLaunchTime(It->second, M.End - M.Start);
     Pending.erase(It);
   }
   Measured.clear();
 }
 
-void KernelTimer::collect(AddFn Add) {
+void KernelTimer::collect(RecordDatabase &DB) {
   std::lock_guard<std::mutex> Lock(Mutex);
-  addMeasured(Add);
+  addMeasured(DB);
 }
 
-void KernelTimer::drain(AddFn Add) {
+void KernelTimer::drain(RecordDatabase &DB) {
   std::unique_lock<std::mutex> Lock(Mutex);
   waitForRecords(
       Lock, Arrived, [&] { (void)Tracer->flush(); },
       [&] {
-        addMeasured(Add);
+        addMeasured(DB);
         return Pending.empty() || !Running;
       },
       RecordWaitTimeout);

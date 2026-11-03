@@ -82,12 +82,6 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return ret;
   }
 
-  auto addToDatabase() {
-    return [this](const LaunchHandle &Launch, uint64_t Ns) {
-      DB.addLaunchTime(Launch, Ns);
-    };
-  }
-
   void registerExitDrain() {
     if (TimedBackend)
       return;
@@ -101,7 +95,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   std::optional<StartedTiming> beginTimedLaunch(const LaunchHandle &Launch,
                                                 DeviceStream_t Stream) {
     registerExitDrain();
-    Timer->collect(addToDatabase());
+    Timer->collect(DB);
     return Timer->begin(Launch, DB.kernelName(Launch.StaticHash), Stream);
   }
 
@@ -109,7 +103,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   void drainTimer() {
     if (!Timer)
       return;
-    Timer->drain(addToDatabase());
+    Timer->drain(DB);
     Timer.reset();
   }
 

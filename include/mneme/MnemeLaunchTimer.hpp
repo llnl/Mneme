@@ -11,16 +11,14 @@
 #include <memory>
 #include <optional>
 
-#include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/StringRef.h>
 
 namespace mneme {
 
 // Measures the GPU durations of kernel launches. Durations may arrive after
-// later launches, so they are handed out by collect() and drain().
+// later launches, so collect() and drain() add them to the record database.
 template <DeviceVendors VendorTypes> class LaunchTimer {
 public:
-  using AddFn = llvm::function_ref<void(const LaunchHandle &, uint64_t Ns)>;
   using DeviceError_t = typename DeviceTraits<VendorTypes>::DeviceError_t;
   using DeviceStream_t = typename DeviceTraits<VendorTypes>::DeviceStream_t;
 
@@ -32,7 +30,7 @@ public:
   virtual ~LaunchTimer() = default;
 
   // Adds the durations that have arrived.
-  virtual void collect(AddFn Add) = 0;
+  virtual void collect(RecordDatabase &DB) = 0;
   // Returns nothing when the launch on Stream is not timed.
   virtual std::optional<StartedTiming> begin(const LaunchHandle &Launch,
                                              llvm::StringRef KernelName,
@@ -40,7 +38,7 @@ public:
   virtual void end(const StartedTiming &Started,
                    DeviceError_t LaunchResult) = 0;
   // Waits for the durations of all launches and adds them.
-  virtual void drain(AddFn Add) = 0;
+  virtual void drain(RecordDatabase &DB) = 0;
 };
 
 // The vendor profiler's callbacks reach the process-wide KernelTimer, so this
@@ -48,7 +46,6 @@ public:
 template <DeviceVendors VendorTypes>
 class ProfilerLaunchTimer final : public LaunchTimer<VendorTypes> {
   using DevTraits = DeviceTraits<VendorTypes>;
-  using typename LaunchTimer<VendorTypes>::AddFn;
   using typename LaunchTimer<VendorTypes>::DeviceError_t;
   using typename LaunchTimer<VendorTypes>::DeviceStream_t;
   using typename LaunchTimer<VendorTypes>::StartedTiming;
@@ -58,7 +55,7 @@ class ProfilerLaunchTimer final : public LaunchTimer<VendorTypes> {
 public:
   explicit ProfilerLaunchTimer(KernelTimer &Profiler) : Profiler(Profiler) {}
 
-  void collect(AddFn Add) override { Profiler.collect(Add); }
+  void collect(RecordDatabase &DB) override { Profiler.collect(DB); }
 
   std::optional<StartedTiming> begin(const LaunchHandle &Launch,
                                      llvm::StringRef KernelName,
@@ -91,9 +88,9 @@ public:
   }
 
   // The profiler reports a dispatch only after it completes.
-  void drain(AddFn Add) override {
+  void drain(RecordDatabase &DB) override {
     (void)DeviceTraits<VendorTypes>::DeviceSynchronize();
-    Profiler.drain(Add);
+    Profiler.drain(DB);
   }
 };
 

@@ -11,7 +11,6 @@
 #include <vector>
 
 #include <llvm/ADT/DenseMap.h>
-#include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/StringRef.h>
 
 namespace mneme {
@@ -24,8 +23,6 @@ struct DispatchRecord;
 // them into the record database on later launches and in drain().
 class KernelTimer {
 public:
-  using AddFn = llvm::function_ref<void(const LaunchHandle &, uint64_t)>;
-
   // Loads the vendor profiler and registers the timer with it. HIP must do
   // this before the runtime initializes; get() does it otherwise.
   static void configure();
@@ -39,9 +36,9 @@ public:
   void end();
   // Ends a launch that failed, so it never produces a dispatch record.
   void abandon();
-  void collect(AddFn Add);
+  void collect(RecordDatabase &DB);
   // Waits for the durations of all launches, which must have completed.
-  void drain(AddFn Add);
+  void drain(RecordDatabase &DB);
 
   // Used by the profiler's tool callbacks.
   static KernelTimer &instance();
@@ -72,7 +69,7 @@ private:
   bool dispatchedLaunchedKernel(const Measurement &M,
                                 const LaunchHandle &Launch);
   // The caller must hold Mutex.
-  void addMeasured(AddFn Add);
+  void addMeasured(RecordDatabase &DB);
 };
 
 } // namespace mneme
