@@ -8,6 +8,7 @@
 #include "mneme/MnemePageManager.hpp"
 #include "mneme/MnemeRecordScope.hpp"
 #include "mneme/MnemeRecorderBackend.hpp"
+#include "mneme/MnemeRuntimeAllocPlacement.hpp"
 #include "mneme/MnemeSnapshot.hpp"
 
 #include <cstddef>
@@ -37,6 +38,10 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   // stream-ordered, ...). They are not captured, but the application may
   // release them with the device free, which must then be forwarded.
   llvm::DenseSet<void *> PassthroughAllocs;
+  // Managed and pinned allocations that the vendor runtime made at an address
+  // Mneme chose. They are captured like Mneme's own blobs, but the runtime
+  // keeps owning and releasing their memory.
+  llvm::DenseSet<void *> RuntimeBlobs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
   std::unique_ptr<ChunkAllocator<VendorTypes>> Packer;
   bool WarnedUnpacked = false;
@@ -116,6 +121,53 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     auto ret = launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     if (Started)
       Timer->end(*Started, ret);
+    return ret;
+  }
+
+  // Runs Alloc, which makes a vendor runtime allocation of size bytes at *ptr,
+  // with its mapping placed where replay can map it again, and captures it.
+  template <typename AllocFn>
+  DeviceError_t captureRuntimeAlloc(void **ptr, size_t size, const char *api,
+                                    AllocFn Alloc) {
+    auto &Pages = getOrCreatePageManager();
+    RuntimeMmapPlacement Placement{Pages.anchor(size),
+                                   PageManager<VendorTypes>::MaxAddr, size};
+    DeviceError_t ret;
+    {
+      PlaceRuntimeMmap Scope(Placement);
+      ret = Alloc();
+    }
+    if (ret != MnemeDeviceRT::DeviceSuccess)
+      return ret;
+    if (!Placement.contains(*ptr, size))
+      LOG_FATAL("{} returned PTR:{} SIZE:{} outside the mapping Mneme placed "
+                "at {} SIZE:{}; this runtime does not map the allocation with "
+                "its own anonymous mmap, so Mneme cannot record it",
+                api, *ptr, size, reinterpret_cast<void *>(Placement.Start),
+                Placement.Size);
+
+    MnemeMemoryBlob<VendorTypes> MemBlob(
+        ChunkAllocator<VendorTypes>::actualSize(size), nullptr, size);
+    MemBlob.mapInto(*ptr);
+    LOG_DEBUG("Intercepted {} PTR:{} SIZE:{} MAPPING:{} MAPPINGSIZE:{}", api,
+              *ptr, size, reinterpret_cast<void *>(Placement.Start),
+              Placement.Size);
+    AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
+    RuntimeBlobs.insert(*ptr);
+    return ret;
+  }
+
+  // Frees a captured runtime allocation with Free, the runtime's own free.
+  template <typename FreeFn>
+  DeviceError_t releaseRuntimeBlob(void *ptr, FreeFn Free) {
+    auto ret = Free();
+    if (ret != MnemeDeviceRT::DeviceSuccess)
+      return ret;
+    LOG_DEBUG("Forwarded free of captured runtime allocation PTR:{}", ptr);
+    auto It = AllocatedBlobs.find(ptr);
+    It->second.release();
+    AllocatedBlobs.erase(It);
+    RuntimeBlobs.erase(ptr);
     return ret;
   }
 
@@ -204,18 +256,27 @@ public:
 
   DeviceError_t rtManagedMalloc(void **ptr, size_t size,
                                 unsigned int flags) override {
-    auto ret = Runtime.origMallocManaged(ptr, size, flags);
+    const char *Api = MnemeDeviceRT::getManagedMallocFnName();
+    auto Alloc = [&] { return Runtime.origMallocManaged(ptr, size, flags); };
+    if (MnemeDeviceRT::PlacesRuntimeAllocs && size != 0)
+      return captureRuntimeAlloc(ptr, size, Api, Alloc);
+
+    auto ret = Alloc();
     if (ret == MnemeDeviceRT::DeviceSuccess)
-      trackPassthroughAlloc(*ptr, size,
-                            MnemeDeviceRT::getManagedMallocFnName());
+      trackPassthroughAlloc(*ptr, size, Api);
     return ret;
   }
 
   DeviceError_t rtHostMalloc(void **ptr, size_t size,
                              unsigned int flags) override {
-    auto ret = Runtime.origMallocPinned(ptr, size, flags);
+    const char *Api = MnemeDeviceRT::getPinnedMallocFnName();
+    auto Alloc = [&] { return Runtime.origMallocPinned(ptr, size, flags); };
+    if (MnemeDeviceRT::PlacesRuntimeAllocs && size != 0)
+      return captureRuntimeAlloc(ptr, size, Api, Alloc);
+
+    auto ret = Alloc();
     if (ret == MnemeDeviceRT::DeviceSuccess)
-      trackPassthroughAlloc(*ptr, size, MnemeDeviceRT::getPinnedMallocFnName());
+      trackPassthroughAlloc(*ptr, size, Api);
     return ret;
   }
 
@@ -233,6 +294,9 @@ public:
       LOG_WARN("Mneme was instructed to de-allocate nullptr..., skipping");
       return MnemeDeviceRT::DeviceSuccess;
     }
+    if (RuntimeBlobs.contains(ptr))
+      return releaseRuntimeBlob(ptr,
+                                [&] { return Runtime.origFreeDevice(ptr); });
     if (!AllocatedBlobs.contains(ptr)) {
       if (PassthroughAllocs.erase(ptr)) {
         LOG_DEBUG("Forwarding free of vendor runtime allocation PTR:{}", ptr);
@@ -253,6 +317,9 @@ public:
   }
 
   DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
+    if (RuntimeBlobs.contains(ptr))
+      return releaseRuntimeBlob(
+          ptr, [&] { return Runtime.origFreeAsync(ptr, stream); });
     if (AllocatedBlobs.contains(ptr)) {
       // Mneme releases its memory right away, so first wait for the work
       // queued on the stream that may still use it. The sync fails during
@@ -274,6 +341,8 @@ public:
   }
 
   DeviceError_t rtHostFree(void *ptr) override {
+    if (RuntimeBlobs.contains(ptr))
+      return releaseRuntimeBlob(ptr, [&] { return Runtime.origFreeHost(ptr); });
     PassthroughAllocs.erase(ptr);
     auto ret = Runtime.origFreeHost(ptr);
     LOG_DEBUG("Free pinned address:{}", ptr);

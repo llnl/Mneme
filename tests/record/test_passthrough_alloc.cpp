@@ -8,7 +8,9 @@
 // Mneme serves only hipMalloc/cudaMalloc. Memory from the other allocation
 // functions comes from the vendor runtime, and applications may release it
 // with the device free (or the async/host free). Recording must forward those
-// frees instead of aborting on an address it did not allocate.
+// frees instead of aborting on an address it did not allocate. On HIP, Mneme
+// picks the address of managed and pinned memory and records it, so their
+// frees must also stop the recording from capturing them.
 
 #include <cstdio>
 
