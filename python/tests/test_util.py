@@ -103,6 +103,6 @@ def test_cond_gpu_time_profile_records_gpu_measurements():
         out = fn(DummySelf(), res, config, "mykernel", None, 3, profile=True)
 
     assert out == "DONE"
-    start.assert_called_once_with("mykernel.kd")
+    start.assert_called_once_with("mykernel")
     stop.assert_called_once_with("CID", 3)
     assert res.gpu_time == {"cycles": 123}

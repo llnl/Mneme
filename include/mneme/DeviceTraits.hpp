@@ -154,6 +154,14 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
 
   static hipError_t DeviceSynchronize() { return hipDeviceSynchronize(); }
 
+  // Whether Stream is capturing is meaningful only when the error is success.
+  static std::pair<hipError_t, bool>
+  deviceStreamIsCapturing(hipStream_t Stream) {
+    hipStreamCaptureStatus Status;
+    hipError_t Err = hipStreamIsCapturing(Stream, &Status);
+    return {Err, Err == hipSuccess && Status == hipStreamCaptureStatusActive};
+  }
+
   static std::string GetDeviceArch() {
     DeviceHandle_t Dev;
     DeviceContext_t Ctx;
@@ -569,6 +577,14 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   }
 
   static DeviceError_t DeviceSynchronize() { return cudaDeviceSynchronize(); }
+
+  // Whether Stream is capturing is meaningful only when the error is success.
+  static std::pair<DeviceError_t, bool>
+  deviceStreamIsCapturing(DeviceStream_t Stream) {
+    cudaStreamCaptureStatus Status;
+    DeviceError_t Err = cudaStreamIsCapturing(Stream, &Status);
+    return {Err, Err == cudaSuccess && Status == cudaStreamCaptureStatusActive};
+  }
 
   static std::string GetDeviceArch() {
     DeviceHandle_t Dev;

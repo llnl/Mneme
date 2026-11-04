@@ -1,13 +1,52 @@
 
 set(MnemeCoreSrcDir ${CMAKE_CURRENT_SOURCE_DIR})
 set(AnnotationRuntimeSRC MnemeAnnotation.cpp MnemeRecordScope.cpp)
-set(RecordLibSRC MnemeAnnotationInternal.cpp MnemeCrashHandler.cpp MnemeRecordingPolicy.cpp)
+set(RecordLibSRC MnemeAnnotationInternal.cpp MnemeCrashHandler.cpp MnemeRecordingPolicy.cpp MnemeKernelTimer.cpp)
 
 if (MNEME_ENABLE_HIP)
   list(APPEND RecordLibSRC MnemeRecordPreloadHIP.cpp)
+  set(MnemeDispatchTracerSRC ${MnemeCoreSrcDir}/MnemeDispatchTracerHIP.cpp)
 elseif(MNEME_ENABLE_CUDA)
   list(APPEND RecordLibSRC MnemeRecordPreloadCUDA.cpp)
+  set(MnemeDispatchTracerSRC ${MnemeCoreSrcDir}/MnemeDispatchTracerCUDA.cpp)
 endif()
+
+# Vendor profiler used to time kernels, by recording and by replay profiling.
+# Recording loads it through the dispatch tracer library only when kernel
+# timing is requested.
+if (MNEME_ENABLE_HIP)
+  find_package(rocprofiler-sdk QUIET CONFIG)
+  if(rocprofiler-sdk_FOUND AND TARGET rocprofiler-sdk::rocprofiler-sdk)
+    set(MNEME_PROFILER_LIBS rocprofiler-sdk::rocprofiler-sdk)
+  else()
+    message(WARNING "CMake package for rocprofiler-sdk not found; falling back to manual include/lib lookup")
+    find_path(ROCPROFILER_SDK_INCLUDE_DIR rocprofiler-sdk/rocprofiler.h
+            HINTS "${ROCM_PATH}/include")
+    find_library(ROCPROFILER_SDK_LIBRARY NAMES rocprofiler-sdk
+               HINTS "${ROCM_PATH}/lib" "${ROCM_PATH}/lib64")
+    if(NOT ROCPROFILER_SDK_INCLUDE_DIR OR NOT ROCPROFILER_SDK_LIBRARY)
+      message(FATAL_ERROR "Could not find rocprofiler-sdk headers or library")
+    endif()
+    set(MNEME_PROFILER_INCLUDE_DIRS "${ROCPROFILER_SDK_INCLUDE_DIR}")
+    set(MNEME_PROFILER_LIBS "${ROCPROFILER_SDK_LIBRARY}")
+  endif()
+elseif(MNEME_ENABLE_CUDA)
+  set(MNEME_PROFILER_LIBS CUDA::cupti)
+endif()
+
+# Recording loads this only when kernel timing is requested, so that librecord
+# does not depend on the vendor profiler.
+add_library(mneme_dispatch_tracer SHARED ${MnemeDispatchTracerSRC})
+target_include_directories(mneme_dispatch_tracer PRIVATE ${CMAKE_SOURCE_DIR}/include ${MNEME_PROFILER_INCLUDE_DIRS})
+target_link_libraries(mneme_dispatch_tracer PRIVATE ${MNEME_PROFILER_LIBS})
+if (MNEME_ENABLE_CUDA)
+  target_link_libraries(mneme_dispatch_tracer PRIVATE CUDA::cuda_driver)
+endif()
+if (MNEME_ENABLE_LOGGER)
+  target_link_libraries(mneme_dispatch_tracer PRIVATE spdlog::spdlog_header_only)
+  target_compile_definitions(mneme_dispatch_tracer PRIVATE MNEME_ENABLE_LOGGER)
+endif()
+set_target_properties(mneme_dispatch_tracer PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 add_library(mnemert SHARED ${AnnotationRuntimeSRC})
 target_include_directories(
@@ -17,6 +56,7 @@ target_include_directories(
     $<INSTALL_INTERFACE:${_mneme_incdir}>)
 
 add_library(record SHARED ${RecordLibSRC})
+add_dependencies(record mneme_dispatch_tracer)
 
 if(MNEME_LINK_SHARED_LLVM AND LLVM_LINK_LLVM_DYLIB)
   llvm_config(record USE_SHARED)
@@ -30,7 +70,7 @@ endif()
 
 
 target_include_directories(record SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(record PRIVATE mnemert)
+target_link_libraries(record PRIVATE mnemert ${CMAKE_DL_LIBS})
 # Link record against proteus to avoid LLVM static initialization issues.
 # HIP: proteus is shared (version-script hides LLVM symbols).
 # CUDA: proteus is static but propagates --exclude-libs for the same effect.

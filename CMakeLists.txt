@@ -172,7 +172,7 @@ write_basic_package_version_file(
   VERSION ${PROJECT_VERSION}
   COMPATIBILITY AnyNewerVersion)
 
-set(_mneme_targets mnemert record)
+set(_mneme_targets mnemert record mneme_dispatch_tracer)
 if(MNEME_ENABLE_PYTHON)
   list(APPEND _mneme_targets mneme_profile mneme MnemePassPlugin)
 endif()

@@ -33,7 +33,7 @@ def cond_gpu_time(attr_name):
             args = (self, result, config, kernel_name, device_func, iterations)
             if not profile:
                 return func(*args)
-            correlation_id = gpu_profile_start(kernel_name + ".kd")
+            correlation_id = gpu_profile_start(kernel_name)
             fresult = func(*args)
             measurements = gpu_profile_stop(correlation_id, iterations)
             setattr(result, attr_name, measurements)

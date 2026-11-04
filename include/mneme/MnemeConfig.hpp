@@ -23,6 +23,27 @@ namespace mneme {
 enum class LogLevel { Trace, Debug, Info, Warn, Error, Critical, Off };
 enum class EpilogueSnapshotType { Bytes, Diff, Best };
 enum class FilterMode { Default, Scoped, Config };
+enum class KernelTimingType { Off, Profiler };
+
+// Parses a MNEME_KERNEL_TIMING value; returns nullopt for an invalid one.
+inline std::optional<KernelTimingType>
+parseKernelTiming(std::string_view Value) {
+  if (Value == "profiler" || Value == "1")
+    return KernelTimingType::Profiler;
+  if (Value == "off" || Value == "0")
+    return KernelTimingType::Off;
+  return std::nullopt;
+}
+
+inline const char *getKernelTimingName(KernelTimingType Type) {
+  switch (Type) {
+  case KernelTimingType::Off:
+    return "off";
+  case KernelTimingType::Profiler:
+    return "profiler";
+  }
+  return "off";
+}
 
 namespace config_detail {
 
@@ -187,6 +208,19 @@ inline FilterMode getFilterMode() {
                            "'. Expected 'default', 'scoped', or 'config'.");
 }
 
+inline KernelTimingType
+getEnvOrDefaultKernelTimingType(const char *VarName, KernelTimingType Default) {
+  auto EnvValue = getEnvOrDefaultString(VarName);
+  if (!EnvValue)
+    return Default;
+
+  if (auto Type = parseKernelTiming(*EnvValue))
+    return *Type;
+
+  throw std::runtime_error("Invalid " + std::string(VarName) + " value '" +
+                           *EnvValue + "'. Expected 'profiler' or 'off'.");
+}
+
 inline bool defaultRecordingPolicy(const std::optional<int> &DistributedRank) {
   if (!DistributedRank)
     return true;
@@ -266,6 +300,7 @@ public:
   const EpilogueSnapshotType EpilogueType;
   const bool CopySource;
   const uint64_t ChunkSize;
+  const KernelTimingType KernelTiming;
 
   bool isRecordingEnabledForCurrentRank() const {
     return RankPolicy.isEnabled();
@@ -307,6 +342,8 @@ private:
             config_detail::getEnvOrDefaultBool("MNEME_COPY_SOURCE", false)),
         ChunkSize(config_detail::getEnvOrDefaultChunkSize("MNEME_CHUNK_SIZE",
                                                           4ULL << 30)),
+        KernelTiming(config_detail::getEnvOrDefaultKernelTimingType(
+            "MNEME_KERNEL_TIMING", KernelTimingType::Off)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")) {
 

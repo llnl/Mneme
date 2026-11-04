@@ -2,6 +2,7 @@
 
 #include "mneme/MnemeConfig.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
+#include "mneme/MnemeLaunchTimer.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeMemory.hpp"
 #include "mneme/MnemePageManager.hpp"
@@ -10,13 +11,13 @@
 #include "mneme/MnemeSnapshot.hpp"
 
 #include <cstddef>
+#include <cstdlib>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DenseSet.h>
-
-#include <proteus/KernelMetadata.h>
 
 namespace mneme {
 
@@ -26,8 +27,10 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   using MnemeDeviceRT = typename Base::MnemeDeviceRT;
   using DeviceError_t = typename Base::DeviceError_t;
   using DeviceStream_t = typename Base::DeviceStream_t;
+  using StartedTiming = typename LaunchTimer<VendorTypes>::StartedTiming;
 
   RecorderRuntimeFunctions<VendorTypes> Runtime;
+  std::unique_ptr<LaunchTimer<VendorTypes>> Timer;
   RecordDatabase DB;
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
   // Allocations served by the vendor runtime (managed, pinned, pitched,
@@ -37,6 +40,11 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   std::unique_ptr<PageManager<VendorTypes>> PM;
   std::unique_ptr<ChunkAllocator<VendorTypes>> Packer;
   bool WarnedUnpacked = false;
+
+  // The exit handler that drains the timer is registered on the first timed
+  // launch, after the device runtime has initialized, so it runs before the
+  // runtime's own exit handlers tear it down.
+  inline static RecordingBackend *TimedBackend = nullptr;
 
   // NOTE: We only keep track of the first time we set the device id. Once we
   // create the allocator we assume that the allocations go to the same device.
@@ -72,7 +80,51 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return ret;
   }
 
+  void registerExitDrain() {
+    if (TimedBackend)
+      return;
+    TimedBackend = this;
+    std::atexit([] {
+      if (TimedBackend)
+        TimedBackend->drainTimer();
+    });
+  }
+
+  // Launches after the drain are still counted but no longer timed.
+  void drainTimer() {
+    if (!Timer)
+      return;
+    Timer->drain(DB);
+    Timer.reset();
+  }
+
+  DeviceError_t launchKernel(const void *func, dim3 &GridDim, dim3 &BlockDim,
+                             void **Args, size_t SharedMem,
+                             DeviceStream_t Stream) {
+    return Runtime.origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
+                                    Stream);
+  }
+
+  // Requires Timer; Launch names the record the duration is added to.
+  DeviceError_t timeLaunchKernel(const void *func, dim3 &GridDim,
+                                 dim3 &BlockDim, void **Args, size_t SharedMem,
+                                 DeviceStream_t Stream,
+                                 const LaunchHandle &Launch) {
+    registerExitDrain();
+    Timer->collect(DB);
+    std::optional<StartedTiming> Started = Timer->begin(Launch, Stream);
+    auto ret = launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
+    if (Started)
+      Timer->end(*Started, ret);
+    return ret;
+  }
+
 public:
+  RecordingBackend()
+      : Timer(createLaunchTimer<VendorTypes>(Config::get().KernelTiming)),
+        DB(Config::get().getDataDirectory(), Config::get().EpilogueType,
+           Config::get().CopySource, Config::get().KernelTiming) {}
+
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
     if (!ptr)
       return false;
@@ -233,49 +285,41 @@ public:
                                DeviceStream_t Stream) override {
     getOrCreatePageManager();
 
-    if (Config::get().RecordingFilterMode == FilterMode::Scoped &&
-        !detail::scopeAllowsRecording(func)) {
-      DB.countLaunch(func, GridDim, BlockDim, SharedMem);
-      return Runtime.origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
-                                      Stream);
+    auto Launch = DB.registerLaunch(func, GridDim, BlockDim, SharedMem);
+    if (!Launch) {
+      LOG_DEBUG("Kernel {} has no record", func);
+      return launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     }
+    const std::string &KernelName = DB.kernelName(Launch->StaticHash);
 
-    // NOTE: Here we do something conceptually different. We no longer go
-    // through proteus. We call immediately the vendor launcher. Thus we avoid
-    // overheads from caching etc.
-    LOG_DEBUG("Received OptionalKernel Info {}",
-              (void *)Runtime.origLaunchKernel);
-    auto OptionalKernelInfo = proteus::runtime::captureKernelMetadata(func);
-    if (!OptionalKernelInfo) {
-      LOG_DEBUG("Information for kernel  {} is not included", func);
-      return Runtime.origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
-                                      Stream);
-    }
-    auto &KInfo = OptionalKernelInfo.value();
-    LOG_DEBUG("Continue with {}", KInfo.getName());
-    LOG_INFO("Hash value is {}", KInfo.getStaticHash());
-
-    auto RecordAction = DB.takeSnapshot<VendorTypes>(
-        KInfo, AllocatedBlobs, GridDim, BlockDim, Args, SharedMem, Stream);
-    if (RecordAction)
+    bool InRecordingScope =
+        Config::get().RecordingFilterMode != FilterMode::Scoped ||
+        detail::scopeAllowsRecording(func);
+    auto CaptureEpilogue =
+        InRecordingScope ? DB.takeSnapshot<VendorTypes>(
+                               func, *Launch, AllocatedBlobs, Args, Stream)
+                         : std::nullopt;
+    if (CaptureEpilogue)
       LOG_INFO("Successfully Recorded Prologue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
                "BLOCK:({}, {}, "
                "{}) SHM_SIZE:{}",
-               func, KInfo.getName(), GridDim.x, GridDim.y, GridDim.z,
-               BlockDim.x, BlockDim.y, BlockDim.z, SharedMem);
-    auto ret = Runtime.origLaunchKernel(func, GridDim, BlockDim, Args,
-                                        SharedMem, Stream);
-    if (RecordAction) {
-      (*RecordAction)(AllocatedBlobs, Args, Stream);
+               func, KernelName, GridDim.x, GridDim.y, GridDim.z, BlockDim.x,
+               BlockDim.y, BlockDim.z, SharedMem);
+    auto ret =
+        Timer ? timeLaunchKernel(func, GridDim, BlockDim, Args, SharedMem,
+                                 Stream, *Launch)
+              : launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
+    if (CaptureEpilogue) {
+      (*CaptureEpilogue)();
       LOG_INFO("Successfully Recorded Epilogue of Kernel {} NAME:{} GRID:({}, "
                "{}, {}) "
                "BLOCK:({}, {}, "
                "{}) SHM_SIZE:{}",
-               func, KInfo.getName(), GridDim.x, GridDim.y, GridDim.z,
-               BlockDim.x, BlockDim.y, BlockDim.z, SharedMem);
+               func, KernelName, GridDim.x, GridDim.y, GridDim.z, BlockDim.x,
+               BlockDim.y, BlockDim.z, SharedMem);
       // write kernel record incrementally after epilogue is recorded
-      DB.writeKernelJSON(KInfo.getStaticHash());
+      DB.writeKernelJSON(Launch->StaticHash);
     }
     return ret;
   }
@@ -301,9 +345,12 @@ public:
   }
 
   ~RecordingBackend() {
+    if (TimedBackend == this)
+      TimedBackend = nullptr;
     DB.flush();
 
-    LOG_DEBUG("RecordingBackend destructor: releasing {} blobs", AllocatedBlobs.size());
+    LOG_DEBUG("RecordingBackend destructor: releasing {} blobs",
+              AllocatedBlobs.size());
 
     // Release all unreleased blobs before the DenseMap destructs
     for (auto &Entry : AllocatedBlobs) {
