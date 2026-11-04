@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -32,13 +33,44 @@ __global__ void gather(int **Table, const int *Lens, int NumBufs,
   }
 }
 
-static int *alloc(size_t Bytes) {
+enum class Memory { Device, Managed, Pinned };
+
+static int *alloc(size_t Bytes, Memory Kind = Memory::Device) {
   void *P = nullptr;
-  if (prefix(Malloc)(&P, Bytes) != prefix(Success)) {
+  prefix(Error_t) EC = prefix(Success);
+  switch (Kind) {
+  case Memory::Device:
+    EC = prefix(Malloc)(&P, Bytes);
+    break;
+#ifdef __ENABLE_HIP__
+  case Memory::Managed:
+    EC = hipMallocManaged(&P, Bytes, hipMemAttachGlobal);
+    break;
+  case Memory::Pinned:
+    EC = hipHostMalloc(&P, Bytes, hipHostMallocDefault);
+    break;
+#else
+  default:
+    printf("only HIP records managed and pinned memory\n");
+    exit(1);
+#endif
+  }
+  if (EC != prefix(Success)) {
     printf("malloc failed\n");
     exit(1);
   }
   return static_cast<int *>(P);
+}
+
+// Recording captures managed and pinned memory only on HIP.
+static Memory bufferMemory(int B) {
+#ifdef __ENABLE_HIP__
+  if (B % 3 == 1)
+    return Memory::Managed;
+  if (B % 3 == 2)
+    return Memory::Pinned;
+#endif
+  return Memory::Device;
 }
 
 int main() {
@@ -59,12 +91,18 @@ int main() {
   std::vector<int *> Dropped;
   for (int B = 0; B < NumBufs; ++B) {
     Lens[B] = 7 + B * 53;
-    Bufs[B] = alloc(Lens[B] * sizeof(int));
+    Memory Kind = bufferMemory(B);
+    Bufs[B] = alloc(Lens[B] * sizeof(int), Kind);
     std::vector<int> H(Lens[B]);
     for (int I = 0; I < Lens[B]; ++I)
       H[I] = B * 1000 + I;
-    prefix(Memcpy)(Bufs[B], H.data(), H.size() * sizeof(int),
-                   prefix(MemcpyHostToDevice));
+    // The host fills managed and pinned buffers itself, so only the launch
+    // snapshot sees their contents.
+    if (Kind == Memory::Device)
+      prefix(Memcpy)(Bufs[B], H.data(), H.size() * sizeof(int),
+                     prefix(MemcpyHostToDevice));
+    else
+      std::copy(H.begin(), H.end(), Bufs[B]);
     Dropped.push_back(alloc(100 + B * 11));
   }
   for (int B = 0; B < NumBufs; B += 3)
