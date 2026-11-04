@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
                 << SBlob.getActualSize() << "\n";
       return -1;
     }
-    uint8_t *data = SBlob.getHostData().get();
+    uint8_t *data = SBlob.getHostData();
     if (std::memcmp(reinterpret_cast<void *>(HData),
                     reinterpret_cast<void *>(data), 128) != 0) {
       std::cerr << "Memory differs between GV and GVR\n";

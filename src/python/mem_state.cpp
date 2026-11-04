@@ -65,6 +65,11 @@ MnemePy_MatchesUnlaunched(MnemeDeviceMemStateRef v1,
 API_EXPORT(void)
 MnemePy_ResetMemState(MnemeDeviceMemStateRef MemState) {
   auto state = unwrap(MemState);
-  state->reset();
+  DeviceVendorTraits::DeviceStream_t DefaultStream{};
+  state->reset(DefaultStream);
+  auto EC = DeviceVendorTraits::DeviceErrorCheck(
+      DeviceVendorTraits::DeviceStreamSynchronize(DefaultStream));
+  if (EC)
+    LOG_FATAL("Could not finish resetting memory state: {}", EC.value());
 }
 }

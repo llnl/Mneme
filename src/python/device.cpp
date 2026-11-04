@@ -140,7 +140,7 @@ MnemePy_profile(void *WrappedModule, void *Func, dim3 Grid, dim3 Block,
 
     {
       trace::Scope Trace("state.restore");
-      PrologueState->reset();
+      PrologueState->reset(ReplayStream);
     }
     auto Args = PrologueState->getArgs();
 

@@ -147,6 +147,11 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
     return hipMemcpy(Dest, Src, SizeBytes, Kind);
   }
 
+  static hipError_t DeviceCopyAsync(void *Dest, void *Src, size_t SizeBytes,
+                                    hipMemcpyKind Kind, hipStream_t Stream) {
+    return hipMemcpyAsync(Dest, Src, SizeBytes, Kind, Stream);
+  }
+
   static hipError_t DeviceSynchronize() { return hipDeviceSynchronize(); }
 
   static std::string GetDeviceArch() {
@@ -253,6 +258,10 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
 
   static constexpr hipMemcpyKind MemcpyDeviceToHostKind() {
     return hipMemcpyDeviceToHost;
+  }
+
+  static constexpr hipMemcpyKind MemcpyDeviceToDeviceKind() {
+    return hipMemcpyDeviceToDevice;
   }
 
   // On integrated GPUs, applications expect device memory to be
@@ -553,6 +562,12 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
     return cudaMemcpy(Dest, Src, SizeBytes, Kind);
   }
 
+  static DeviceError_t DeviceCopyAsync(void *Dest, void *Src, size_t SizeBytes,
+                                       cudaMemcpyKind Kind,
+                                       DeviceStream_t Stream) {
+    return cudaMemcpyAsync(Dest, Src, SizeBytes, Kind, Stream);
+  }
+
   static DeviceError_t DeviceSynchronize() { return cudaDeviceSynchronize(); }
 
   static std::string GetDeviceArch() {
@@ -673,6 +688,10 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
 
   static constexpr cudaMemcpyKind MemcpyDeviceToHostKind() {
     return cudaMemcpyDeviceToHost;
+  }
+
+  static constexpr cudaMemcpyKind MemcpyDeviceToDeviceKind() {
+    return cudaMemcpyDeviceToDevice;
   }
 
   static uint64_t getMinPageSize(int DeviceID) {
