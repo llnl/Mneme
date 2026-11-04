@@ -194,7 +194,7 @@ int main() {
   // MNEME_RECORD_RANKS: default policy, no rank env -> single-process records.
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Single-process run (no rank env) should record by default");
   }
 
@@ -202,7 +202,7 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Default policy should record on rank 0");
   }
 
@@ -210,7 +210,7 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(!Conf.isRecordingEnabledForCurrentRank(),
+    expect(!Conf.getRecordingRankPolicy().isEnabled(),
            "Default policy should exclude rank 1");
   }
 
@@ -219,7 +219,7 @@ int main() {
   setenv("MNEME_RECORD_RANKS", "all", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Explicit 'all' should record on every rank");
   }
 
@@ -228,14 +228,14 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Rank 1 should record when listed in MNEME_RECORD_RANKS=0,1,3");
   }
   setenv("OMPI_COMM_WORLD_RANK", "2", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(
-        !Conf.isRecordingEnabledForCurrentRank(),
+        !Conf.getRecordingRankPolicy().isEnabled(),
         "Rank 2 should not record when not listed in MNEME_RECORD_RANKS=0,1,3");
   }
 
@@ -244,7 +244,7 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Rank 0 should record when MNEME_RECORD_RANKS=0");
   }
 
@@ -253,7 +253,7 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(!Conf.isRecordingEnabledForCurrentRank(),
+    expect(!Conf.getRecordingRankPolicy().isEnabled(),
            "Empty MNEME_RECORD_RANKS should use default rank policy");
   }
 
@@ -263,7 +263,7 @@ int main() {
   setenv("SLURM_PROCID", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(!Conf.isRecordingEnabledForCurrentRank(),
+    expect(!Conf.getRecordingRankPolicy().isEnabled(),
            "OMPI_COMM_WORLD_RANK=2 should win over SLURM_PROCID=0 (rank 2 "
            "excluded)");
   }
@@ -292,14 +292,14 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Malformed MNEME_RECORD_RANKS should fall back to default policy "
            "(rank 0 records)");
   }
   setenv("OMPI_COMM_WORLD_RANK", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(!Conf.isRecordingEnabledForCurrentRank(),
+    expect(!Conf.getRecordingRankPolicy().isEnabled(),
            "Malformed MNEME_RECORD_RANKS should fall back to default policy "
            "(non-zero rank excluded)");
   }
