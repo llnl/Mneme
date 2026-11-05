@@ -51,6 +51,7 @@ from mneme.llvm.buffer import MemBufferRef
 from mneme.llvm.module import ModuleRef, parse_assembly, parse_bitcode
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
+from mneme.pass_plugins import PassPlugins, compose_pipeline
 from mneme.profile import init_profiler
 from mneme.proteus import jit
 from mneme.recorded_execution import RecordedExecution, MemStateRef
@@ -123,7 +124,8 @@ class BaseExecutor:
         iterations: int = 3,
         device_id: int = 0,
         warmup: int = 2,
-        short_circuit: bool = False
+        short_circuit: bool = False,
+        pass_plugins: PassPlugins = PassPlugins(),
     ):
         self.record_db = record_db
         self.device_id = device_id
@@ -158,6 +160,9 @@ class BaseExecutor:
             f"GPU Affinity of process was set to device:{self.device_id} out of {self.num_devices}"
         )
         jit.register_pass_plugin(MNEME_PASS_PLUGIN_LIB)
+        self.pass_plugins = pass_plugins
+        for library in pass_plugins.libraries:
+            jit.register_pass_plugin(library)
         with tracing.span(
             "metadata.record",
             lambda: {
@@ -652,6 +657,8 @@ class BaseExecutor:
            A clone of the input IR module is built and executed once without
            instrumentation. This ensures the recorded prologue and epilogue states
            match, allowing the system to validate kernel determinism and correctness.
+           Both builds run ``config.passes`` between the ``pass_plugins``
+           prepend and append fragments.
 
         2. **IR sanitization**
            The tracked build prepends the ``purge-autoinit`` pass to the optimization
@@ -695,12 +702,16 @@ class BaseExecutor:
         if self._prologue._state is None or self._epilogue._state is None:
             raise RuntimeError("States should never be none when executing a kernel")
 
+        passes = self.pass_plugins.wrap(config.passes)
+
         # NOTE: 1. First we need to verify.
         with tracing.span("execution.verification"):
             with tracing.span("ir.clone"):
                 ver_mod = ir_module.clone()
 
-            mem_buffer = self._build(result, config, ver_mod, False)
+            mem_buffer = self._build(
+                result, replace(config, passes=passes), ver_mod, False
+            )
             self._run(
                 result, config, mem_buffer, self.prologue, self.epilogue,
                 True, False, 1,
@@ -716,11 +727,14 @@ class BaseExecutor:
         # NOTE: 2-3. Build and run with tracking on. The tracked build prepends the
         # purge-autoinit pass (registered via Proteus' JIT pass plugin API) to strip
         # the Clang-inserted auto-init memsets; verification above ran without it.
+        # It runs before the user's passes so they see the purged kernel.
         with tracing.span("execution.tracked"):
             with tracing.span("ir.clone"):
                 ir_module = ir_module.clone()
 
-            tracked_config = replace(config, passes=f"purge-autoinit,{config.passes}")
+            tracked_config = replace(
+                config, passes=compose_pipeline("purge-autoinit", passes)
+            )
             mem_buffer = self._build(result, tracked_config, ir_module, True)
             self._run(
                 result, config, mem_buffer, self.prologue, self.epilogue,
@@ -835,6 +849,7 @@ class TuneWorker(BaseExecutor):
         state: Event,
         warmup: int = 2,
         short_circuit: bool = False,
+        pass_plugins: PassPlugins = PassPlugins(),
     ):
         """
         Worker process entry point: initialize resources and serve requests from a queue.
@@ -881,6 +896,8 @@ class TuneWorker(BaseExecutor):
             Number of warmup iterations to execute before measured iterations.
         short_circuit : bool
             Whether to skip timing runs when verification fails.
+        pass_plugins : PassPlugins
+            User pass plugins to load in the worker and run around every pipeline.
         results_db_dir : str
             Directory where per-worker logs and output artifacts are written.
         state : multiprocessing.Event
@@ -911,6 +928,7 @@ class TuneWorker(BaseExecutor):
             iterations=iterations,
             warmup=warmup,
             short_circuit=short_circuit,
+            pass_plugins=pass_plugins,
         )
         # Open GPU memory, setup prologue epilogue and create a single
         # LLVM IR file to start working on optimizations

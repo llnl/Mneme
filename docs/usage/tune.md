@@ -439,7 +439,9 @@ with `--space-preset`:
 Built-in launch controls include `--launch-dim`, `--launch-safety`, and
 `--adaptive-invalid-ban` / `--no-adaptive-invalid-ban`. Compiler controls include
 `--passes`, `--fixed-passes`, `--pipeline-file`, `--codegen-opt-range`, and
-`--fixed-codegen-opt`. Boolean configuration dimensions such as specialization
+`--fixed-codegen-opt`. `--pass-plugin`, `--prepend-passes` and `--append-passes`
+run passes from your own LLVM pass plugins around every candidate's pipeline;
+see [Pass plugins](../concepts/replay-configuration.md#pass-plugins). Boolean configuration dimensions such as specialization
 and launch bounds use `fixed`, `on`, `off`, or `on-off` modes.
 
 ### Sampling and evaluation

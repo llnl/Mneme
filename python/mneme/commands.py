@@ -33,6 +33,7 @@ import yaml
 from mneme.llvm import utils
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
+from mneme.pass_plugins import PassPlugins, add_pass_plugin_args
 from mneme.pipeline import PipelineManager
 from mneme.profile import init_profiler
 from mneme.recorded_execution import RecordedExecution
@@ -740,6 +741,8 @@ class Replay(BaseExecutor):
             default=False,
         )
 
+        add_pass_plugin_args(parser)
+
         parser.set_defaults(func=Replay.run)
 
     def __init__(self, *args, **kwargs):
@@ -764,6 +767,11 @@ class Replay(BaseExecutor):
         self.codegen_opt = kwargs.pop("codegen_opt", 3)
 
         self.output_ll = kwargs.pop("output_ll", None)
+        kwargs["pass_plugins"] = PassPlugins.from_options(
+            kwargs.pop("pass_plugins", None),
+            kwargs.pop("prepend_passes", None),
+            kwargs.pop("append_passes", None),
+        )
 
         super().__init__(*args, **kwargs)
         self.pass_manager = PipelineManager()

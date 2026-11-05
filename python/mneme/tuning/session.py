@@ -21,6 +21,7 @@ from mneme.async_executor import AsyncReplayExecutor
 from mneme.convert import export_proteus_tuned_kernel
 from mneme.futures import EvalFuture
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
+from mneme.pass_plugins import PassPlugins
 from mneme.recorded_execution import RecordedExecution
 from mneme.replay_executor import noop_verifies_warning
 from mneme.tuning.builtin_spaces import (
@@ -106,6 +107,9 @@ class TuneOptions:
     codegen_opt_range: Optional[str] = None
     fixed_codegen_opt: Optional[int] = None
     codegen_method: Optional[str] = None
+    pass_plugins: List[str] = field(default_factory=list)
+    prepend_passes: Optional[str] = None
+    append_passes: Optional[str] = None
 
     # Configuration-space controls.
     specialize_space: Optional[str] = None
@@ -142,6 +146,11 @@ class TuneOptions:
             data["proteus_output"] = str(Path(data["results_dir"]) / "proteus_tuned_kernels.json")
         return data
 
+    def pass_plugin_config(self) -> PassPlugins:
+        return PassPlugins.from_options(
+            self.pass_plugins, self.prepend_passes, self.append_passes
+        )
+
     def _validate(self) -> None:
         """ an early, quick check to validate some settings before any tuning is started """
 
@@ -173,6 +182,8 @@ class TuneOptions:
         
         if self.warmup < 0:
             raise ValueError("--warmup must be a non-negative integer")
+
+        self.pass_plugins = list(self.pass_plugin_config().libraries)
 
     def __post_init__(self):
         self._validate()
@@ -362,8 +373,8 @@ class TuningSession:
         """Use ``ir`` for this session, optionally on a caller-owned executor.
 
         A borrowed executor must target the same record, instance, worker count,
-        iterations, and warmup as ``options``. The caller remains responsible for
-        shutting it down.
+        iterations, warmup, and pass plugins as ``options``. The caller remains
+        responsible for shutting it down.
         """
         self.options = options
         self._borrowed_executor = executor
@@ -459,6 +470,9 @@ class TuningSession:
             "pipeline_file",
             "codegen_opt_range",
             "fixed_codegen_opt",
+            "pass_plugins",
+            "prepend_passes",
+            "append_passes",
             "specialize_space",
             "specialize_dims_space",
             "launch_bounds_space",
@@ -466,6 +480,7 @@ class TuningSession:
             "require_verified_baseline",
         ]
         existing.setdefault("launch_candidates", [])
+        existing.setdefault("pass_plugins", [])
         existing.setdefault("require_verified_baseline", True)
         mismatched = [
             key for key in immutable if existing.get(key) != resolved_config.get(key)
@@ -886,6 +901,11 @@ class TuningSession:
         self._print(f"  sampler:         {self.options.sampler}")
         self._print(f"  trials:          {self.options.trials}")
         self._print(f"  workers:         {self.options.workers}")
+        pass_plugins = self.options.pass_plugin_config()
+        if pass_plugins.libraries:
+            self._print(f"  pass plugins:    {', '.join(pass_plugins.libraries)}")
+        if pass_plugins.prepend or pass_plugins.append:
+            self._print(f"  pipeline:        {pass_plugins.wrap('<passes>')}")
 
         # A caller may reuse an executor across tuning sessions with different IR.
         owns_executor = self._borrowed_executor is None
@@ -899,6 +919,7 @@ class TuningSession:
                 num_workers=self.options.workers,
                 warmup=self.options.warmup,
                 short_circuit=self.options.short_circuit,
+                pass_plugins=self.options.pass_plugin_config(),
             )
         # the main tuning phase
         try:
@@ -1109,6 +1130,10 @@ class TuningSession:
             self._print("")
             self._print("Use with full application:")
             self._print(f"  export PROTEUS_TUNED_KERNELS={Path(self.options.proteus_output).resolve()}")
+            pass_plugins = self.options.pass_plugin_config()
+            if pass_plugins.prepend or pass_plugins.append:
+                self._print("  The exported pipeline excludes --prepend-passes and --append-passes;")
+                self._print("  register them with proteus::registerJITPassPlugin in the application.")
         
         return 0
 

@@ -14,6 +14,7 @@ from mneme.futures import EvalFuture
 from mneme.mneme_logging import logger
 from mneme.replay_executor import TuneWorker
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
+from mneme.pass_plugins import PassPlugins
 
 
 def pop(q, timeout):
@@ -94,6 +95,7 @@ class TuneWorkerHandle:
             Callable[["TuneWorkerHandle", str], None]
         ] = None,
         short_circuit: bool = False,
+        pass_plugins: PassPlugins = PassPlugins(),
     ):
         """
         Construct a worker handle and start the worker process + monitor thread.
@@ -122,6 +124,8 @@ class TuneWorkerHandle:
             handle stops respawning the worker.
         short_circuit : bool
             Whether to skip timing runs when verification fails.
+        pass_plugins : PassPlugins
+            User pass plugins the worker loads and runs around every pipeline.
 
         Notes
         -----
@@ -145,6 +149,7 @@ class TuneWorkerHandle:
         self.results_db_dir = results_db_dir
         self.warmup = warmup
         self.short_circuit = short_circuit
+        self.pass_plugins = pass_plugins
         self.max_startup_failures = max_startup_failures
         self._startup_failures = 0
         self._on_startup_failure_limit = on_startup_failure_limit
@@ -194,6 +199,7 @@ class TuneWorkerHandle:
                 self._state,
                 self.warmup,
                 self.short_circuit,
+                self.pass_plugins,
             ),
             daemon=False,
         )
@@ -413,6 +419,7 @@ class AsyncReplayExecutor:
         warmup: int = 2,
         max_startup_failures: int = 3,
         short_circuit: bool = False,
+        pass_plugins: PassPlugins = PassPlugins(),
     ):
         """
         Construct an asynchronous executor with a fixed-size worker pool.
@@ -436,6 +443,8 @@ class AsyncReplayExecutor:
             worker before that worker stops respawning.
         short_circuit : bool
             Whether to skip timing runs when verification fails.
+        pass_plugins : PassPlugins
+            User pass plugins every worker loads and runs around every pipeline.
         """
         self.global_q = ThreadQueue()
         self._futures: Dict[int, EvalFuture] = {}
@@ -466,6 +475,7 @@ class AsyncReplayExecutor:
                     max_startup_failures=max_startup_failures,
                     on_startup_failure_limit=self._handle_startup_failure_limit,
                     short_circuit=short_circuit,
+                    pass_plugins=pass_plugins,
                 )
             )
 

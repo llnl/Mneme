@@ -151,6 +151,59 @@ def test_tune_cli_wires_options(monkeypatch):
     assert captured["options"].proteus_enabled is False
 
 
+def test_tune_cli_gives_pass_plugins_to_the_executor(monkeypatch, tmp_path):
+    from mneme.pass_plugins import PassPlugins
+    from mneme.tuning import cli as tune_cli
+
+    monkeypatch.setattr(
+        tune_session.RecordedExecution,
+        "from_json",
+        staticmethod(lambda _: FakeRecorded()),
+    )
+    executor_kwargs = {}
+
+    def make_executor(**kwargs):
+        executor_kwargs.update(kwargs)
+        return FakeExecutor()
+
+    monkeypatch.setattr(tune_session, "AsyncReplayExecutor", make_executor)
+    library = tmp_path / "libMyPass.so"
+    library.touch()
+
+    parser = tune_cli.argparse.ArgumentParser(prog="mneme tune")
+    tune_cli.add_tune_args(parser)
+    args = parser.parse_args([
+        "-rdb", "db.json",
+        "-rid", "rid",
+        "--space-preset", "compiler",
+        "--sampler", "exhaustive",
+        "--passes", "default<O3>",
+        "--codegen-opt-range", "3:3",
+        "--results-dir", str(tmp_path / "results"),
+        "--no-proteus-output",
+        "--quiet",
+        "--pass-plugin", str(library),
+        "--prepend-passes", "my-pass",
+    ])
+
+    assert tune_cli.run_tune(args, None) == 0
+    assert executor_kwargs["pass_plugins"] == PassPlugins((str(library),), "my-pass")
+
+
+def test_tune_cli_rejects_missing_pass_plugin(tmp_path, capsys):
+    from mneme.tuning import cli as tune_cli
+
+    parser = tune_cli.argparse.ArgumentParser(prog="mneme tune")
+    tune_cli.add_tune_args(parser)
+    missing = tmp_path / "libMissing.so"
+    args = parser.parse_args(
+        ["-rdb", "db.json", "-rid", "rid", "--trials", "3", "--pass-plugin", str(missing)]
+    )
+
+    assert tune_cli.run_tune(args, None) == 3
+    assert f"Pass plugin library not found: {missing}" in capsys.readouterr().out
+
+
 def test_tune_config_round_trips_candidate_and_baseline_options(tmp_path):
     from mneme.tuning import cli as tune_cli
 

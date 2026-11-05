@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import pytest
 
+from mneme.pass_plugins import PassPlugins
+
 
 MODULE_PATH = "mneme.replay_executor"
 
@@ -763,6 +765,48 @@ def test_execute_orchestrates_verification_and_tracked_run(
     ex.close()
 
 
+@pytest.mark.parametrize("passes", ["default<O3>", "O3"])
+def test_execute_runs_pass_plugins_around_both_builds(monkeypatch, tmp_path, passes):
+    mod = _reload_with_identity_decorators(monkeypatch)
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
+    )
+    registered = []
+    monkeypatch.setattr(mod.jit, "register_pass_plugin", registered.append)
+    library = tmp_path / "libMyPass.so"
+    library.touch()
+
+    ex = mod.BaseExecutor(
+        record_db="x",
+        record_id="rid",
+        pass_plugins=PassPlugins((str(library),), "my-pass", "late-pass"),
+    )
+    ex.open()
+    build_passes = []
+    monkeypatch.setattr(
+        ex,
+        "_build",
+        lambda result, cfg, ir_mod, track: build_passes.append(cfg.passes)
+        or FakeMemBuffer(),
+    )
+
+    def fake_run(result, cfg, mem_buf, prologue, epilogue, verify, track, iters):
+        result.verified = True
+
+    monkeypatch.setattr(ex, "_run", fake_run)
+
+    config = mod.ExperimentConfiguration(passes=passes)
+    ex._execute(mod.ExperimentResult(), config, FakeModule("root"))
+
+    assert registered == [mod.MNEME_PASS_PLUGIN_LIB, str(library)]
+    assert build_passes == [
+        "my-pass,default<O3>,late-pass",
+        "purge-autoinit,my-pass,default<O3>,late-pass",
+    ]
+    assert config.passes == passes
+    ex.close()
+
+
 def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
     mod = _reload_with_identity_decorators(monkeypatch)
 
@@ -814,17 +858,25 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
     set_ir_calls = []
     process_ir_names = []
     worker_options = []
+    pass_plugins = PassPlugins(prepend="my-pass")
 
     class FakeWorker:
         def __init__(
-            self, record_db, record_id, device_id, iterations, warmup, short_circuit
+            self,
+            record_db,
+            record_id,
+            device_id,
+            iterations,
+            warmup,
+            short_circuit,
+            pass_plugins,
         ):
             self.record_db = record_db
             self.record_id = record_id
             self.device_id = device_id
             self.iterations = iterations
             self.warmup = warmup
-            worker_options.append(short_circuit)
+            worker_options.append((short_circuit, pass_plugins))
 
         def link_ir(self):
             return FakeModule("root_ir")
@@ -882,9 +934,10 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
         results_db_dir=str(tmp_path),
         state=state,
         short_circuit=short_circuit,
+        pass_plugins=pass_plugins,
     )
 
-    assert worker_options == [short_circuit]
+    assert worker_options == [(short_circuit, pass_plugins)]
     assert state.set_called == 1
     assert set_ir_calls == ["replacement asm"]
     assert process_ir_names == ["replacement_ir_clone"]
@@ -913,7 +966,14 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
 
     class FakeWorker:
         def __init__(
-            self, record_db, record_id, device_id, iterations, warmup, short_circuit
+            self,
+            record_db,
+            record_id,
+            device_id,
+            iterations,
+            warmup,
+            short_circuit,
+            pass_plugins,
         ):
             self.device_id = device_id
 

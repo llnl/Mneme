@@ -145,6 +145,38 @@ This is the primary “compiler pipeline” knob for replay and tuning. It
 controls the sequence of transformations applied to the recorded LLVM IR
 before code generation.
 
+### Pass plugins
+
+Replay can also run passes from your own LLVM pass plugins. These options
+belong to the replay session rather than to `ExperimentConfiguration`, so they
+stay fixed while tuning varies `passes`:
+
+- `--pass-plugin PATH` (repeatable) loads a plugin shared library, the same
+  kind `opt --load-pass-plugin` accepts, into the JIT so its passes can be
+  named in pipelines.
+- `--prepend-passes PIPELINE` runs before `passes`.
+- `--append-passes PIPELINE` runs after `passes`.
+
+Every build of the kernel, including the verification build, runs
+`<prepend>,<passes>,<append>`. The tracked build puts Mneme's own
+`purge-autoinit` pass in front of that.
+
+```bash
+mneme replay -rdb kernel.json \
+  --pass-plugin ./libMyPass.so --prepend-passes my-pass "default<O3>"
+
+mneme tune -rdb kernel.json -rid <id> --space-preset compiler --sampler random \
+  --trials 50 --pass-plugin ./libMyPass.so --prepend-passes my-pass
+```
+
+From Python, pass `PassPlugins(libraries=("./libMyPass.so",), prepend="my-pass")`
+from `mneme.pass_plugins` as `pass_plugins=` to `AsyncReplayExecutor` or a
+`BaseExecutor` subclass. Each tuning worker loads the plugins itself.
+
+`mneme tune` exports only the tuned `passes` to the Proteus JSON. To get the
+same code in the full application, register the plugin with Proteus there,
+e.g. `proteus::registerJITPassPlugin(path, "my-pass", JITPassPluginPosition::Prepend)`.
+
 ### Codegen optimization level
 
 - `codegen_opt: int`  
@@ -206,6 +238,9 @@ The `mneme replay` CLI flags correspond directly to configuration fields:
 - `passes` positional argument → `passes`
 - `--codegen-opt` → `codegen_opt`
 - `--codegen-method` → `codegen_method`
+
+`--pass-plugin`, `--prepend-passes` and `--append-passes` configure the
+executor rather than `ExperimentConfiguration`; see [Pass plugins](#pass-plugins).
 
 For CLI details, see **[Usage → CLI](../usage/cli.md)**.
 
