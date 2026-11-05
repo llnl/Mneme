@@ -10,10 +10,24 @@ def format_top(leaf, limit):
     return ",".join(f"{t['Value']}({t['Launches']})" for t in leaf["Top"][:limit])
 
 
+TUPLES = [
+    "ScalarTuples",
+    "ScalarBlockTuples",
+    "ScalarDimTuples",
+    "ArgScalarTuples",
+    "ArgScalarDimTuples",
+    "BlockTuples",
+    "GridTuples",
+    "DimTuples",
+]
+
+
 def format_tuples(name, tuples):
+    counts = ",".join(str(c) for c in tuples["LaunchCounts"])
     return (
         f"{name}: Distinct:{tuples['Distinct']} Saturated:{tuples['Saturated']} "
-        f"MostCommonLaunches:{tuples['MostCommonLaunches']}"
+        f"MostCommonLaunches:{tuples['MostCommonLaunches']} "
+        f"Changes:{tuples['Changes']} LaunchCounts:{counts}"
     )
 
 
@@ -30,13 +44,19 @@ def main():
     kernels = sorted(profile["Kernels"].values(), key=lambda k: k["DemangledName"])
     for kernel in kernels:
         print(f"Kernel: {kernel['DemangledName']} Launches: {kernel['Launches']}")
-        print("  " + format_tuples("ScalarTuples", kernel["ScalarTuples"]))
-        print("  " + format_tuples("ScalarBlockTuples", kernel["ScalarBlockTuples"]))
+        if "TimedLaunches" in kernel:
+            print(
+                f"  Timing: TimedLaunches:{kernel['TimedLaunches']} "
+                f"TotalTimeNs:{kernel['TotalTimeNs']}"
+            )
+        for name in TUPLES:
+            print("  " + format_tuples(name, kernel[name]))
         for leaf in kernel["Leaves"]:
             if args.no_pointers and leaf["Kind"] == "ptr":
                 continue
             print(
                 f"  Leaf:{leaf['Path']} Kind:{leaf['Kind']} Type:{leaf['Type']} "
+                f"WholeArg:{leaf['WholeArg']} "
                 f"Distinct:{leaf['Distinct']} Saturated:{leaf['Saturated']} "
                 f"Changes:{leaf['Changes']} Top:{format_top(leaf, args.top)}"
             )

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -45,6 +46,9 @@ struct ArgLeaf {
   ArgLeafKind Kind;
   std::string Path;
   std::string Type;
+  // The leaf is the whole argument rather than a member of an aggregate, such
+  // as a lambda capture.
+  bool IsWholeArg;
 };
 
 struct KernelArgLayout {
@@ -116,8 +120,9 @@ inline void flattenType(llvm::Type *T, unsigned ArgIdx, uint64_t Offset,
     Layout.Unsupported.push_back(Path + ": " + typeName(T));
     return;
   }
+  bool IsWholeArg = Path == Layout.ArgNames[ArgIdx];
   Layout.Leaves.push_back(ArgLeaf{ArgIdx, Offset, static_cast<unsigned>(Size),
-                                  *Kind, Path, typeName(T)});
+                                  *Kind, Path, typeName(T), IsWholeArg});
 }
 
 } // namespace arg_layout_detail
@@ -182,9 +187,15 @@ public:
 class TupleStats {
   std::unordered_map<uint64_t, uint64_t> Launches;
   uint64_t UntrackedLaunches = 0;
+  uint64_t Changes = 0;
+  std::optional<uint64_t> Previous;
 
 public:
   void observe(uint64_t Hash, size_t Cap) {
+    if (Previous && *Previous != Hash)
+      Changes++;
+    Previous = Hash;
+
     auto It = Launches.find(Hash);
     if (It != Launches.end())
       It->second++;
@@ -195,13 +206,18 @@ public:
   }
 
   llvm::json::Object toJSON(size_t Cap) const {
-    uint64_t MostLaunches = 0;
+    std::vector<uint64_t> Counts;
+    Counts.reserve(Launches.size());
     for (const auto &Entry : Launches)
-      MostLaunches = std::max(MostLaunches, Entry.second);
+      Counts.push_back(Entry.second);
+    std::sort(Counts.begin(), Counts.end(), std::greater<uint64_t>());
+    uint64_t MostLaunches = Counts.empty() ? 0 : Counts.front();
     return llvm::json::Object{{"Distinct", Launches.size()},
                               {"Saturated", Launches.size() >= Cap},
                               {"UntrackedLaunches", UntrackedLaunches},
-                              {"MostCommonLaunches", MostLaunches}};
+                              {"MostCommonLaunches", MostLaunches},
+                              {"Changes", Changes},
+                              {"LaunchCounts", llvm::json::Array(Counts)}};
   }
 };
 
@@ -210,8 +226,17 @@ class KernelArgProfile {
 
   KernelArgLayout Layout;
   std::vector<LeafValueStats> Stats;
+  // Each tuple is one candidate specialization key. Scalars covers every
+  // non-pointer leaf, including members of aggregates such as lambda
+  // captures, while ArgScalars covers only arguments that are scalars.
   TupleStats ScalarTuples;
   TupleStats ScalarBlockTuples;
+  TupleStats ScalarDimTuples;
+  TupleStats ArgScalarTuples;
+  TupleStats ArgScalarDimTuples;
+  TupleStats BlockTuples;
+  TupleStats GridTuples;
+  TupleStats DimTuples;
   size_t Cap;
   uint64_t Launches = 0;
 
@@ -272,19 +297,36 @@ public:
       : Layout(std::move(Layout)), Stats(this->Layout.Leaves.size()), Cap(Cap) {
   }
 
-  void observe(void **Args, const dim3 &BlockDim) {
+  void observe(void **Args, const dim3 &GridDim, const dim3 &BlockDim) {
     Launches++;
     llvm::SmallVector<uint64_t, 32> Scalars;
+    llvm::SmallVector<uint64_t, 32> ArgScalars;
     for (size_t I = 0; I < Layout.Leaves.size(); I++) {
       const ArgLeaf &Leaf = Layout.Leaves[I];
       uint64_t Bits = readLeaf(Args, Leaf);
       Stats[I].observe(Bits, Cap);
-      if (Leaf.Kind != ArgLeafKind::Pointer)
-        Scalars.push_back(Bits);
+      if (Leaf.Kind == ArgLeafKind::Pointer)
+        continue;
+      Scalars.push_back(Bits);
+      if (Leaf.IsWholeArg)
+        ArgScalars.push_back(Bits);
     }
+    const uint64_t Block[] = {BlockDim.x, BlockDim.y, BlockDim.z};
+    const uint64_t Dims[] = {BlockDim.x, BlockDim.y, BlockDim.z,
+                             GridDim.x,  GridDim.y,  GridDim.z};
+    BlockTuples.observe(hashWords(Block), Cap);
+    GridTuples.observe(hashWords(llvm::ArrayRef<uint64_t>(Dims).drop_front(3)),
+                       Cap);
+    DimTuples.observe(hashWords(Dims), Cap);
+
     ScalarTuples.observe(hashWords(Scalars), Cap);
-    Scalars.append({BlockDim.x, BlockDim.y, BlockDim.z});
+    ArgScalarTuples.observe(hashWords(ArgScalars), Cap);
+    Scalars.append(std::begin(Block), std::end(Block));
     ScalarBlockTuples.observe(hashWords(Scalars), Cap);
+    Scalars.append(std::begin(Dims) + 3, std::end(Dims));
+    ScalarDimTuples.observe(hashWords(Scalars), Cap);
+    ArgScalars.append(std::begin(Dims), std::end(Dims));
+    ArgScalarDimTuples.observe(hashWords(ArgScalars), Cap);
   }
 
   llvm::json::Object toJSON() const {
@@ -308,6 +350,7 @@ public:
                              {"Size", Leaf.Size},
                              {"Kind", getArgLeafKindName(Leaf.Kind)},
                              {"Type", Leaf.Type},
+                             {"WholeArg", Leaf.IsWholeArg},
                              {"Distinct", S.distinct()},
                              {"Saturated", S.distinct() >= Cap},
                              {"UntrackedLaunches", S.untrackedLaunches()},
@@ -322,7 +365,13 @@ public:
         {"Leaves", std::move(Leaves)},
         {"Unsupported", llvm::json::Array(Layout.Unsupported)},
         {"ScalarTuples", ScalarTuples.toJSON(Cap)},
-        {"ScalarBlockTuples", ScalarBlockTuples.toJSON(Cap)}};
+        {"ScalarBlockTuples", ScalarBlockTuples.toJSON(Cap)},
+        {"ScalarDimTuples", ScalarDimTuples.toJSON(Cap)},
+        {"ArgScalarTuples", ArgScalarTuples.toJSON(Cap)},
+        {"ArgScalarDimTuples", ArgScalarDimTuples.toJSON(Cap)},
+        {"BlockTuples", BlockTuples.toJSON(Cap)},
+        {"GridTuples", GridTuples.toJSON(Cap)},
+        {"DimTuples", DimTuples.toJSON(Cap)}};
   }
 };
 

@@ -248,6 +248,7 @@ class KernelInstancesCollection {
   uint64_t NumRecords;
   uint64_t TotalLaunches = 0;
   uint64_t TotalTimeNs = 0;
+  uint64_t TimedLaunches = 0;
   KernelRecordingPolicy Policy;
   llvm::SmallVector<size_t> KernelArgSizes;
   llvm::SmallVector<std::string> KernelArgNames;
@@ -356,22 +357,31 @@ public:
     ArgProfile.emplace(getKernelArgLayout(*Mod->getFunction(KName)), Cap);
   }
 
-  void profileArgs(void **Args, const dim3 &BlockDim) {
+  void profileArgs(void **Args, const dim3 &GridDim, const dim3 &BlockDim) {
     if (ArgProfile)
-      ArgProfile->observe(Args, BlockDim);
+      ArgProfile->observe(Args, GridDim, BlockDim);
   }
 
-  std::optional<llvm::json::Object> argProfileJSON() const {
+  // Kernels that record nothing write no kernel JSON, so the profile carries
+  // their timing.
+  std::optional<llvm::json::Object>
+  argProfileJSON(KernelTimingType Timing) const {
     if (!ArgProfile)
       return std::nullopt;
     auto JSON = ArgProfile->toJSON();
     JSON["KernelName"] = KName;
     JSON["DemangledName"] = util::demangleKernelName(KName);
+    if (Timing != KernelTimingType::Off) {
+      JSON["TimingSource"] = getKernelTimingName(Timing);
+      JSON["TimedLaunches"] = TimedLaunches;
+      JSON["TotalTimeNs"] = TotalTimeNs;
+    }
     return JSON;
   }
 
   void addLaunchTime(const LaunchHandle &Launch, uint64_t Ns) {
     TotalTimeNs += Ns;
+    TimedLaunches++;
     if (!Launch.DynamicHash)
       return;
     Instances.find(*Launch.DynamicHash)
@@ -526,7 +536,7 @@ class RecordDatabase {
   void writeArgProfileJSON() const {
     llvm::json::Object Kernels;
     for (const auto &Entry : KernelRecords)
-      if (auto JSON = Entry.second.argProfileJSON())
+      if (auto JSON = Entry.second.argProfileJSON(Timing))
         Kernels[std::to_string(Entry.first)] = std::move(*JSON);
     if (Kernels.empty())
       return;
@@ -648,7 +658,7 @@ public:
     if (!It->second)
       return std::nullopt;
     auto &Record = KernelRecords.find(*It->second)->second;
-    Record.profileArgs(Args, BlockDim);
+    Record.profileArgs(Args, GridDim, BlockDim);
     return Record.registerLaunch(GridDim, BlockDim, SharedMem);
   }
 
