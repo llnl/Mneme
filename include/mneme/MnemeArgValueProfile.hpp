@@ -174,14 +174,16 @@ inline bool collectPointerReads(const llvm::Value *Ptr, int64_t Offset,
   return true;
 }
 
-// Adds the bytes of a by-value argument that are read. Returns false when a
-// use may read the whole value.
+// Adds the bytes of a by-value argument that are read: the extracted members,
+// or the whole value for any other use. The reads are always known exactly.
 inline bool collectValueReads(const llvm::Argument &A,
                               const llvm::DataLayout &DL, ByteRanges &Reads) {
   for (const llvm::User *U : A.users()) {
     auto *EV = llvm::dyn_cast<llvm::ExtractValueInst>(U);
-    if (!EV)
-      return false;
+    if (!EV) {
+      Reads.emplace_back(0, DL.getTypeStoreSize(A.getType()));
+      continue;
+    }
     llvm::Type *T = A.getType();
     int64_t Offset = 0;
     for (unsigned Idx : EV->getIndices()) {
