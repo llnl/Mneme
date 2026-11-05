@@ -354,7 +354,9 @@ public:
     llvm::LLVMContext Ctx;
     auto Mod = parseKernelModule(
         llvm::StringRef(BitcodeBytes.data(), BitcodeBytes.size()), Ctx);
-    ArgProfile.emplace(getKernelArgLayout(*Mod->getFunction(KName)), Cap);
+    KernelArgLayout Layout = getKernelArgLayout(*Mod->getFunction(KName));
+    markUnreadLeaves(*Mod, KName, Layout);
+    ArgProfile.emplace(std::move(Layout), Cap);
   }
 
   void profileArgs(void **Args, const dim3 &GridDim, const dim3 &BlockDim) {
