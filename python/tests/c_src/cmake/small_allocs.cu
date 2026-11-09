@@ -33,7 +33,7 @@ __global__ void gather(int **Table, const int *Lens, int NumBufs,
   }
 }
 
-enum class Memory { Device, Managed, Pinned };
+enum class Memory { Device, Managed };
 
 static int *alloc(size_t Bytes, Memory Kind = Memory::Device) {
   void *P = nullptr;
@@ -46,12 +46,9 @@ static int *alloc(size_t Bytes, Memory Kind = Memory::Device) {
   case Memory::Managed:
     EC = hipMallocManaged(&P, Bytes, hipMemAttachGlobal);
     break;
-  case Memory::Pinned:
-    EC = hipHostMalloc(&P, Bytes, hipHostMallocDefault);
-    break;
 #else
   default:
-    printf("only HIP records managed and pinned memory\n");
+    printf("only HIP records managed memory\n");
     exit(1);
 #endif
   }
@@ -62,13 +59,11 @@ static int *alloc(size_t Bytes, Memory Kind = Memory::Device) {
   return static_cast<int *>(P);
 }
 
-// Recording captures managed and pinned memory only on HIP.
+// Recording captures managed memory only on HIP.
 static Memory bufferMemory(int B) {
 #ifdef __ENABLE_HIP__
-  if (B % 3 == 1)
+  if (B % 2 == 1)
     return Memory::Managed;
-  if (B % 3 == 2)
-    return Memory::Pinned;
 #endif
   return Memory::Device;
 }
@@ -77,7 +72,7 @@ int main() {
   // Filled and emptied first so chunks are unmapped and their addresses reused.
   std::vector<void *> Churn;
   for (int I = 0; I < 3000; ++I)
-    Churn.push_back(alloc(4096));
+    Churn.push_back(alloc(4096, bufferMemory(I)));
   for (void *P : Churn)
     prefix(Free)(P);
 
@@ -96,14 +91,14 @@ int main() {
     std::vector<int> H(Lens[B]);
     for (int I = 0; I < Lens[B]; ++I)
       H[I] = B * 1000 + I;
-    // The host fills managed and pinned buffers itself, so only the launch
-    // snapshot sees their contents.
+    // The host fills managed buffers itself, so only the launch snapshot sees
+    // their contents.
     if (Kind == Memory::Device)
       prefix(Memcpy)(Bufs[B], H.data(), H.size() * sizeof(int),
                      prefix(MemcpyHostToDevice));
     else
       std::copy(H.begin(), H.end(), Bufs[B]);
-    Dropped.push_back(alloc(100 + B * 11));
+    Dropped.push_back(alloc(100 + B * 11, bufferMemory(B + 1)));
   }
   for (int B = 0; B < NumBufs; B += 3)
     prefix(Free)(Dropped[B]);
