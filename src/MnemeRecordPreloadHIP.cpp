@@ -45,27 +45,35 @@ __attribute__((constructor)) static void configureKernelTiming() {
 }
 
 using MmapFn = void *(*)(void *, size_t, int, int, int, off_t);
+using MunmapFn = int (*)(void *, size_t);
 
-static MmapFn lookupMmap(const char *Name) {
-  auto Fn = reinterpret_cast<MmapFn>(dlsym(RTLD_NEXT, Name));
-  if (!Fn)
+template <typename Fn> static Fn lookupLibc(const char *Name) {
+  auto F = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, Name));
+  if (!F)
     LOG_FATAL("Could not find the libc {}: {}", Name, dlerror());
-  return Fn;
+  return F;
 }
 
 extern "C" {
-// Hooked so that Mneme can place the memory the runtime maps for managed and
-// pinned allocations.
+// Hooked so that Mneme can place the memory the runtime maps for managed
+// allocations.
 void *mmap(void *Addr, size_t Len, int Prot, int Flags, int Fd,
            off_t Off) noexcept {
-  static MmapFn Orig = lookupMmap("mmap");
+  static MmapFn Orig = lookupLibc<MmapFn>("mmap");
   return placeOrForwardMmap(Orig, Addr, Len, Prot, Flags, Fd, Off);
 }
 
 void *mmap64(void *Addr, size_t Len, int Prot, int Flags, int Fd,
              off_t Off) noexcept {
-  static MmapFn Orig = lookupMmap("mmap64");
+  static MmapFn Orig = lookupLibc<MmapFn>("mmap64");
   return placeOrForwardMmap(Orig, Addr, Len, Prot, Flags, Fd, Off);
+}
+
+// Hooked so that the addresses of managed memory the runtime frees stay
+// reserved for Mneme to reuse.
+int munmap(void *Addr, size_t Len) noexcept {
+  static MunmapFn Orig = lookupLibc<MunmapFn>("munmap");
+  return keepOrForwardMunmap(Orig, Addr, Len);
 }
 
 hipError_t hipMalloc(void **ptr, size_t size) {

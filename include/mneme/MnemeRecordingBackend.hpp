@@ -38,14 +38,19 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   // stream-ordered, ...). They are not captured, but the application may
   // release them with the device free, which must then be forwarded.
   llvm::DenseSet<void *> PassthroughAllocs;
-  // Managed and pinned allocations that the vendor runtime made at an address
-  // Mneme chose. They are captured like Mneme's own blobs, but the runtime
-  // keeps owning and releasing their memory.
-  llvm::DenseSet<void *> RuntimeBlobs;
+  // Managed allocations that the vendor runtime made at an address Mneme
+  // chose, with the mapping the runtime made for each. They are captured like
+  // Mneme's own blobs, but the runtime keeps owning and releasing their memory.
+  llvm::DenseMap<void *, RuntimeMapping> RuntimeBlobs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
   std::unique_ptr<DeviceChunkSource<VendorTypes>> DeviceChunks;
   std::unique_ptr<ChunkAllocator> Packer;
+  // Address space for the mappings behind runtime allocations; null unless
+  // the runtime's allocations can be placed.
+  std::unique_ptr<ReservedChunkSource<VendorTypes>> ReservedChunks;
+  std::unique_ptr<ChunkAllocator> RuntimePacker;
   bool WarnedUnpacked = false;
+  bool WarnedUnseenUnmap = false;
 
   // The exit handler that drains the timer is registered on the first timed
   // launch, after the device runtime has initialized, so it runs before the
@@ -72,6 +77,11 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
         std::make_unique<DeviceChunkSource<VendorTypes>>(*PM, DeviceID);
     Packer = std::make_unique<ChunkAllocator>(*DeviceChunks,
                                               Config::get().ChunkSize);
+    if (MnemeDeviceRT::PlacesRuntimeAllocs) {
+      ReservedChunks = std::make_unique<ReservedChunkSource<VendorTypes>>(*PM);
+      RuntimePacker = std::make_unique<ChunkAllocator>(*ReservedChunks,
+                                                       Config::get().ChunkSize);
+    }
     return *PM;
   }
 
@@ -132,9 +142,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   template <typename AllocFn>
   DeviceError_t captureRuntimeAlloc(void **ptr, size_t size, const char *api,
                                     AllocFn Alloc) {
-    auto &Pages = getOrCreatePageManager();
-    RuntimeMmapPlacement Placement{Pages.anchor(size),
-                                   PageManager<VendorTypes>::MaxAddr, size};
+    getOrCreatePageManager();
+    RuntimeMmapPlacement Placement{*RuntimePacker, size};
     DeviceError_t ret;
     {
       PlaceRuntimeMmap Scope(Placement);
@@ -142,35 +151,61 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     }
     if (ret != MnemeDeviceRT::DeviceSuccess)
       return ret;
-    if (!Placement.contains(*ptr, size))
+    const RuntimeMapping &Placed = Placement.Placed;
+    if (!Placed.contains(*ptr, size))
       LOG_FATAL("{} returned PTR:{} SIZE:{} outside the mapping Mneme placed "
                 "at {} SIZE:{}; this runtime does not map the allocation with "
                 "its own anonymous mmap, so Mneme cannot record it",
-                api, *ptr, size, reinterpret_cast<void *>(Placement.Start),
-                Placement.Size);
+                api, *ptr, size, reinterpret_cast<void *>(Placed.Start),
+                Placed.Size);
 
     MnemeMemoryBlob<VendorTypes> MemBlob(Packer->actualSize(size), nullptr,
                                          size);
     MemBlob.mapInto(*ptr);
     LOG_DEBUG("Intercepted {} PTR:{} SIZE:{} MAPPING:{} MAPPINGSIZE:{}", api,
-              *ptr, size, reinterpret_cast<void *>(Placement.Start),
-              Placement.Size);
+              *ptr, size, reinterpret_cast<void *>(Placed.Start), Placed.Size);
     AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
-    RuntimeBlobs.insert(*ptr);
+    RuntimeBlobs.insert({*ptr, Placed});
     return ret;
   }
 
-  // Frees a captured runtime allocation with Free, the runtime's own free.
+  // Frees a captured runtime allocation with Free, the runtime's own free
+  // named api, and reuses its addresses once the runtime has unmapped them.
   template <typename FreeFn>
-  DeviceError_t releaseRuntimeBlob(void *ptr, FreeFn Free) {
-    auto ret = Free();
-    if (ret != MnemeDeviceRT::DeviceSuccess)
+  DeviceError_t releaseRuntimeBlob(void *ptr, const char *api, FreeFn Free) {
+    RuntimeMunmapRelease Release{RuntimeBlobs.lookup(ptr)};
+    const RuntimeMapping &Mapping = Release.Mapping;
+    DeviceError_t ret;
+    {
+      KeepRuntimeMunmap Scope(Release);
+      ret = Free();
+    }
+    if (ret != MnemeDeviceRT::DeviceSuccess) {
+      if (Release.IsSeen)
+        LOG_FATAL("{} failed after unmapping PTR:{} MAPPING:{} SIZE:{}, so "
+                  "Mneme can no longer record it",
+                  api, ptr, reinterpret_cast<void *>(Mapping.Start),
+                  Mapping.Size);
       return ret;
+    }
     LOG_DEBUG("Forwarded free of captured runtime allocation PTR:{}", ptr);
     auto It = AllocatedBlobs.find(ptr);
     It->second.release();
     AllocatedBlobs.erase(It);
     RuntimeBlobs.erase(ptr);
+
+    if (Release.IsSeen) {
+      RuntimePacker->release(reinterpret_cast<void *>(Mapping.Start),
+                             RuntimePacker->actualSize(Mapping.Size));
+    } else if (!WarnedUnseenUnmap) {
+      // The runtime may unmap the range later, which would destroy a new
+      // allocation placed there.
+      LOG_WARN("{} did not unmap the mapping at {} SIZE:{} of PTR:{} before "
+               "returning; Mneme will not reuse the addresses of such "
+               "allocations",
+               api, reinterpret_cast<void *>(Mapping.Start), Mapping.Size, ptr);
+      WarnedUnseenUnmap = true;
+    }
     return ret;
   }
 
@@ -272,14 +307,9 @@ public:
 
   DeviceError_t rtHostMalloc(void **ptr, size_t size,
                              unsigned int flags) override {
-    const char *Api = MnemeDeviceRT::getPinnedMallocFnName();
-    auto Alloc = [&] { return Runtime.origMallocPinned(ptr, size, flags); };
-    if (MnemeDeviceRT::PlacesRuntimeAllocs && size != 0)
-      return captureRuntimeAlloc(ptr, size, Api, Alloc);
-
-    auto ret = Alloc();
+    auto ret = Runtime.origMallocPinned(ptr, size, flags);
     if (ret == MnemeDeviceRT::DeviceSuccess)
-      trackPassthroughAlloc(*ptr, size, Api);
+      trackPassthroughAlloc(*ptr, size, MnemeDeviceRT::getPinnedMallocFnName());
     return ret;
   }
 
@@ -298,7 +328,7 @@ public:
       return MnemeDeviceRT::DeviceSuccess;
     }
     if (RuntimeBlobs.contains(ptr))
-      return releaseRuntimeBlob(ptr,
+      return releaseRuntimeBlob(ptr, MnemeDeviceRT::getDeviceFreeFnName(),
                                 [&] { return Runtime.origFreeDevice(ptr); });
     if (!AllocatedBlobs.contains(ptr)) {
       if (PassthroughAllocs.erase(ptr)) {
@@ -321,8 +351,9 @@ public:
 
   DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
     if (RuntimeBlobs.contains(ptr))
-      return releaseRuntimeBlob(
-          ptr, [&] { return Runtime.origFreeAsync(ptr, stream); });
+      return releaseRuntimeBlob(ptr, MnemeDeviceRT::getAsyncFreeFnName(), [&] {
+        return Runtime.origFreeAsync(ptr, stream);
+      });
     if (AllocatedBlobs.contains(ptr)) {
       // Mneme releases its memory right away, so first wait for the work
       // queued on the stream that may still use it. The sync fails during
@@ -344,8 +375,6 @@ public:
   }
 
   DeviceError_t rtHostFree(void *ptr) override {
-    if (RuntimeBlobs.contains(ptr))
-      return releaseRuntimeBlob(ptr, [&] { return Runtime.origFreeHost(ptr); });
     PassthroughAllocs.erase(ptr);
     auto ret = Runtime.origFreeHost(ptr);
     LOG_DEBUG("Free pinned address:{}", ptr);
@@ -436,6 +465,14 @@ public:
 
     Packer.reset();
     DeviceChunks.reset();
+    // The runtime still owns these allocations and may touch or unmap them
+    // after Mneme is gone, so their reserved chunks must stay mapped.
+    if (!RuntimeBlobs.empty()) {
+      (void)RuntimePacker.release();
+      (void)ReservedChunks.release();
+    }
+    RuntimePacker.reset();
+    ReservedChunks.reset();
     PM.reset();
 
     LOG_DEBUG("RecordingBackend destructor complete");

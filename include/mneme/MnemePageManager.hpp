@@ -80,6 +80,7 @@ public:
 // address, using /proc/self/maps as the free list.
 template <mneme::DeviceVendors VendorTypes> class PageManager {
   using DT = mneme::DeviceTraits<VendorTypes>;
+  static constexpr uintptr_t MaxAddr = 1ULL << 47;
 
   uintptr_t Anchor = 0;
 
@@ -92,19 +93,9 @@ template <mneme::DeviceVendors VendorTypes> class PageManager {
   }
 
 public:
-  static constexpr uintptr_t MaxAddr = 1ULL << 47;
-
   // Mapping granularity: large pages, and whole driver VA blocks on CUDA.
   static constexpr uint64_t Align =
       std::max(mneme::util::LargePageSize, DT::VABlockSize);
-
-  // The lowest address for recorded allocations, picked on first use so that
-  // Size bytes fit above it.
-  uintptr_t anchor(uint64_t Size) {
-    if (!Anchor)
-      pickAnchor(Size);
-    return Anchor;
-  }
 
   struct AddrRange {
     void *Addr;
@@ -119,8 +110,9 @@ public:
   std::optional<AddrRange> mapAddr(uint64_t Size, MapFn Map) {
     uint64_t ActualSize = mneme::util::roundUp(Size, Align);
 
-    auto Addr = mneme::util::firstFreeVAddr(anchor(ActualSize), MaxAddr,
-                                            ActualSize, Align);
+    if (!Anchor)
+      pickAnchor(ActualSize);
+    auto Addr = mneme::util::firstFreeVAddr(Anchor, MaxAddr, ActualSize, Align);
     if (!Addr)
       LOG_FATAL("No device address range for {} bytes", Size);
     AddrRange R{reinterpret_cast<void *>(*Addr), ActualSize, Align};
