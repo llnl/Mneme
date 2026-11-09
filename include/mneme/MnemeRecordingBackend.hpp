@@ -43,7 +43,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   // keeps owning and releasing their memory.
   llvm::DenseSet<void *> RuntimeBlobs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
-  std::unique_ptr<ChunkAllocator<VendorTypes>> Packer;
+  std::unique_ptr<DeviceChunkSource<VendorTypes>> DeviceChunks;
+  std::unique_ptr<ChunkAllocator> Packer;
   bool WarnedUnpacked = false;
 
   // The exit handler that drains the timer is registered on the first timed
@@ -67,8 +68,10 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     if (DeviceID == -1)
       Runtime.origGetDeviceID(&DeviceID);
     PM = std::make_unique<PageManager<VendorTypes>>();
-    Packer = std::make_unique<ChunkAllocator<VendorTypes>>(
-        *PM, DeviceID, Config::get().ChunkSize);
+    DeviceChunks =
+        std::make_unique<DeviceChunkSource<VendorTypes>>(*PM, DeviceID);
+    Packer = std::make_unique<ChunkAllocator>(*DeviceChunks,
+                                              Config::get().ChunkSize);
     return *PM;
   }
 
@@ -146,8 +149,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                 api, *ptr, size, reinterpret_cast<void *>(Placement.Start),
                 Placement.Size);
 
-    MnemeMemoryBlob<VendorTypes> MemBlob(
-        ChunkAllocator<VendorTypes>::actualSize(size), nullptr, size);
+    MnemeMemoryBlob<VendorTypes> MemBlob(Packer->actualSize(size), nullptr,
+                                         size);
     MemBlob.mapInto(*ptr);
     LOG_DEBUG("Intercepted {} PTR:{} SIZE:{} MAPPING:{} MAPPINGSIZE:{}", api,
               *ptr, size, reinterpret_cast<void *>(Placement.Start),
@@ -432,6 +435,7 @@ public:
     }
 
     Packer.reset();
+    DeviceChunks.reset();
     PM.reset();
 
     LOG_DEBUG("RecordingBackend destructor complete");
