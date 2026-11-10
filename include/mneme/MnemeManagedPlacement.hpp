@@ -23,11 +23,11 @@ struct ManagedMapping {
 };
 
 class PlaceManagedMmap;
-class KeepManagedRangeReserved;
+class ReserveOnManagedMunmap;
 
 namespace detail {
 inline thread_local PlaceManagedMmap *ActivePlacement = nullptr;
-inline thread_local KeepManagedRangeReserved *ActiveRelease = nullptr;
+inline thread_local ReserveOnManagedMunmap *ActiveMunmapReserve = nullptr;
 
 inline uint64_t roundUpToPage(uint64_t Size) {
   static const uint64_t PageSize = sysconf(_SC_PAGESIZE);
@@ -76,26 +76,27 @@ public:
   const ManagedMapping &placed() const { return Placed; }
 };
 
-// While alive, this thread's munmap of exactly Mapping leaves the range
-// reserved instead, so no other mapping can take its addresses before Mneme
-// hands them out again.
-class KeepManagedRangeReserved {
+// The runtime unmaps a managed allocation's mapping when the allocation is
+// freed. While alive, this object makes that munmap, recognised on this thread
+// by the address and length of Mapping, replace the mapping with reserved
+// address space instead of unmapping it. Otherwise the kernel could give the
+// addresses to another mapping before Mneme reuses them.
+class ReserveOnManagedMunmap {
   ManagedMapping Mapping;
   bool WasUnmapped = false;
 
   template <typename MunmapFn>
-  friend int keepOrForwardMunmap(MunmapFn Munmap, void *Addr, size_t Len);
+  friend int reserveOrForwardMunmap(MunmapFn Munmap, void *Addr, size_t Len);
 
 public:
-  explicit KeepManagedRangeReserved(const ManagedMapping &Mapping)
+  explicit ReserveOnManagedMunmap(const ManagedMapping &Mapping)
       : Mapping(Mapping) {
-    detail::ActiveRelease = this;
+    detail::ActiveMunmapReserve = this;
   }
-  ~KeepManagedRangeReserved() { detail::ActiveRelease = nullptr; }
+  ~ReserveOnManagedMunmap() { detail::ActiveMunmapReserve = nullptr; }
 
-  KeepManagedRangeReserved(const KeepManagedRangeReserved &) = delete;
-  KeepManagedRangeReserved &
-  operator=(const KeepManagedRangeReserved &) = delete;
+  ReserveOnManagedMunmap(const ReserveOnManagedMunmap &) = delete;
+  ReserveOnManagedMunmap &operator=(const ReserveOnManagedMunmap &) = delete;
 
   bool wasUnmapped() const { return WasUnmapped; }
 };
@@ -132,16 +133,17 @@ void *placeOrForwardMmap(MmapFn Mmap, void *Addr, size_t Len, int Prot,
   return Got;
 }
 
-// The body of the munmap hook. Forwards to Munmap, except for the mapping of a
-// KeepManagedRangeReserved active on this thread, which stays reserved.
+// The body of the munmap hook. Forwards to Munmap, unless a
+// ReserveOnManagedMunmap is active on this thread and the call unmaps its
+// mapping.
 template <typename MunmapFn>
-int keepOrForwardMunmap(MunmapFn Munmap, void *Addr, size_t Len) {
-  KeepManagedRangeReserved *R = detail::ActiveRelease;
+int reserveOrForwardMunmap(MunmapFn Munmap, void *Addr, size_t Len) {
+  ReserveOnManagedMunmap *R = detail::ActiveMunmapReserve;
   if (!R || reinterpret_cast<uintptr_t>(Addr) != R->Mapping.Start ||
       Len != R->Mapping.Size)
     return Munmap(Addr, Len);
 
-  detail::ActiveRelease = nullptr;
+  detail::ActiveMunmapReserve = nullptr;
   detail::reserveFixed(Addr, Len);
   R->WasUnmapped = true;
   return 0;

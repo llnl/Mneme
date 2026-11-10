@@ -73,7 +73,7 @@ void *mmap64(void *Addr, size_t Len, int Prot, int Flags, int Fd,
 // reserved for Mneme to reuse.
 int munmap(void *Addr, size_t Len) noexcept {
   static MunmapFn Orig = lookupLibc<MunmapFn>("munmap");
-  return keepOrForwardMunmap(Orig, Addr, Len);
+  return reserveOrForwardMunmap(Orig, Addr, Len);
 }
 
 hipError_t hipMalloc(void **ptr, size_t size) {
@@ -192,8 +192,8 @@ hipError_t hipGetDevice(int *deviceID) {
 }
 
 hipError_t __proteus_launch_kernel(void *Kernel, dim3 GridDim, dim3 BlockDim,
-                               void **KernelArgs, uint64_t ShmemSize,
-                               void *Stream) {
+                                   void **KernelArgs, uint64_t ShmemSize,
+                                   void *Stream) {
   LOG_DEBUG("Enetering Mneme to launch kernel");
   auto &mneme = MnemeRecorderHIPPreload::instance();
   return mneme.rtLaunchKernel(Kernel, GridDim, BlockDim, KernelArgs, ShmemSize,

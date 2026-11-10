@@ -193,9 +193,9 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     DeviceError_t ret;
     bool WasUnmapped;
     {
-      KeepManagedRangeReserved Keep(Mapping);
+      ReserveOnManagedMunmap Reserve(Mapping);
       ret = Free();
-      WasUnmapped = Keep.wasUnmapped();
+      WasUnmapped = Reserve.wasUnmapped();
     }
     if (ret != MnemeDeviceRT::DeviceSuccess) {
       if (WasUnmapped)
