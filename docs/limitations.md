@@ -8,8 +8,7 @@ These are not fundamental design blockers, but they may affect certain applicati
 ## 1. Only `cudaMalloc`/`hipMalloc` and HIP Managed Memory Are Recorded
 
 Mneme records memory allocated with `cudaMalloc`/`hipMalloc`. On HIP, it also
-records managed memory from `hipMallocManaged`. This support is experimental
-and has been tested with ROCm 6.4.0.
+records managed memory from `hipMallocManaged`. This support is experimental.
 
 Memory from other allocation functions, such as pinned host, pitched, or
 stream-ordered memory, is not recorded, and neither is managed memory on CUDA.
