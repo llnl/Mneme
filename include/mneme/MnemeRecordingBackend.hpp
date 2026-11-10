@@ -51,7 +51,6 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   std::unique_ptr<ReservedChunkSource<VendorTypes>> ReservedChunks;
   std::unique_ptr<ChunkAllocator> ReservedPacker;
   bool WarnedUnpacked = false;
-  bool WarnedManagedNotUnmapped = false;
 
   // The exit handler that drains the timer is registered on the first timed
   // launch, after the device runtime has initialized, so it runs before the
@@ -171,7 +170,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   }
 
   // Frees a captured managed allocation with Free, the runtime's own free
-  // named api, and reuses its addresses once the runtime has unmapped them.
+  // named api, which must unmap its mapping before returning so that Mneme can
+  // keep the addresses reserved and reuse them.
   template <typename FreeFn>
   DeviceError_t releaseManagedBlob(void *ptr, const char *api, FreeFn Free) {
     ManagedMunmapRelease Release{ManagedBlobs.lookup(ptr)};
@@ -189,24 +189,19 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                   Mapping.Size);
       return ret;
     }
+    if (!Release.WasUnmapped)
+      LOG_FATAL("{} did not unmap the mapping at {} SIZE:{} of PTR:{} before "
+                "returning, so Mneme cannot keep its addresses reserved and "
+                "cannot record managed memory with this runtime",
+                api, reinterpret_cast<void *>(Mapping.Start), Mapping.Size,
+                ptr);
     LOG_DEBUG("Forwarded free of captured managed allocation PTR:{}", ptr);
     auto It = AllocatedBlobs.find(ptr);
     It->second.release();
     AllocatedBlobs.erase(It);
     ManagedBlobs.erase(ptr);
-
-    if (Release.WasUnmapped) {
-      ReservedPacker->release(reinterpret_cast<void *>(Mapping.Start),
-                              ReservedPacker->actualSize(Mapping.Size));
-    } else if (!WarnedManagedNotUnmapped) {
-      // The runtime may unmap the range later, which would destroy a new
-      // allocation placed there.
-      LOG_WARN("{} did not unmap the mapping at {} SIZE:{} of PTR:{} before "
-               "returning; Mneme will not reuse the addresses of such "
-               "allocations",
-               api, reinterpret_cast<void *>(Mapping.Start), Mapping.Size, ptr);
-      WarnedManagedNotUnmapped = true;
-    }
+    ReservedPacker->release(reinterpret_cast<void *>(Mapping.Start),
+                            ReservedPacker->actualSize(Mapping.Size));
     return ret;
   }
 
