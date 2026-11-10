@@ -68,8 +68,15 @@ int main() {
   void *Big = Allocator.allocate(BigSize);
   expect(Big != nullptr, "should allocate more than a chunk");
   expect(isReserved(Big, BigSize), "a large allocation should be reserved");
+  auto *C = static_cast<char *>(Allocator.allocate(Page));
+  uint64_t BigChunkSize = util::roundUp(BigSize, PageManager<Vendor>::Align);
+  expect(C && (C < Big || C >= static_cast<char *>(Big) + BigChunkSize),
+         "a large allocation should not share its chunk");
+  Allocator.release(C, Page);
 
   Allocator.release(Big, BigSize);
+  expect(!isReserved(Big, BigSize),
+         "a released large allocation should be unmapped");
   Allocator.release(B, Page);
   Allocator.release(A, Page);
   return 0;

@@ -246,7 +246,8 @@ public:
 
 // Packs allocations into shared ChunkSize-byte chunks mapped by a ChunkSource,
 // since mapping each allocation separately is slow. Chunks shrink when the
-// source is short on memory.
+// source is short on memory. An allocation larger than ChunkSize gets a
+// dedicated chunk that nothing else shares and that is unmapped on release.
 class ChunkAllocator {
   struct Chunk {
     uint64_t Size = 0;
@@ -265,6 +266,20 @@ class ChunkAllocator {
     return std::prev(Chunks.upper_bound(Addr));
   }
 
+  // Shared chunks only shrink from ChunkSize, and a dedicated chunk holds more
+  // than ChunkSize bytes.
+  bool isDedicated(const Chunk &C) const { return C.Size > ChunkSize; }
+
+  void *allocateDedicated(uint64_t Size) {
+    auto R = Source.map(Size);
+    if (!R)
+      return nullptr;
+    LOG_DEBUG("New {}-byte dedicated chunk {}", R->Size,
+              reinterpret_cast<void *>(R->Start));
+    Chunks[R->Start] = {R->Size, Size};
+    return reinterpret_cast<void *>(R->Start);
+  }
+
   bool mapChunk(uint64_t Size) {
     auto R = Source.map(Size);
     if (!R)
@@ -280,7 +295,7 @@ class ChunkAllocator {
   bool growFor(uint64_t MinSize) {
     uint64_t Unit = Source.unit();
     uint64_t Min = mneme::util::roundUp(MinSize, Unit);
-    for (uint64_t Size = std::max(ChunkSize, Min);;
+    for (uint64_t Size = ChunkSize;;
          Size = std::max(Min, mneme::util::roundUp(Size / 2, Unit))) {
       if (mapChunk(Size))
         return true;
@@ -300,10 +315,13 @@ public:
     return std::max(mneme::util::roundUp(Size, Alignment), Alignment);
   }
 
-  bool packs(uint64_t Size) const { return Size < ChunkSize; }
+  // Size must come from actualSize().
+  bool packs(uint64_t Size) const { return Size <= ChunkSize; }
 
   // Size must come from actualSize(). Nullptr when out of memory.
   void *allocate(uint64_t Size) {
+    if (!packs(Size))
+      return allocateDedicated(Size);
     auto Addr = Free.allocate(Size, Source.alignment());
     if (!Addr) {
       if (!growFor(Size))
@@ -319,6 +337,11 @@ public:
     auto It = chunkOf(A);
     auto &C = It->second;
     uintptr_t Start = It->first;
+    if (isDedicated(C)) {
+      Source.unmap(Start, C.Size);
+      Chunks.erase(It);
+      return;
+    }
     Free.release(A, Size, Start, Start + C.Size);
     C.Used -= Size;
     // One empty chunk stays mapped so malloc/free loops don't remap.
