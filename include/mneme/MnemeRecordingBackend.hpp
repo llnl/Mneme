@@ -77,7 +77,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
         std::make_unique<DeviceChunkSource<VendorTypes>>(*PM, DeviceID);
     DevicePacker = std::make_unique<ChunkAllocator>(*DeviceChunks,
                                                     Config::get().ChunkSize);
-    if (MnemeDeviceRT::PlacesRuntimeAllocs) {
+    if (MnemeDeviceRT::PlacesManagedMemory) {
       ReservedChunks = std::make_unique<ReservedChunkSource<VendorTypes>>(*PM);
       ReservedPacker = std::make_unique<ChunkAllocator>(
           *ReservedChunks, Config::get().ChunkSize);
@@ -283,7 +283,7 @@ public:
                                 unsigned int flags) override {
     const char *Api = MnemeDeviceRT::getManagedMallocFnName();
     auto Alloc = [&] { return Runtime.origMallocManaged(ptr, size, flags); };
-    if (MnemeDeviceRT::PlacesRuntimeAllocs && size != 0)
+    if (MnemeDeviceRT::PlacesManagedMemory && size != 0)
       return captureRuntimeAlloc(ptr, size, Api, Alloc);
 
     auto ret = Alloc();
