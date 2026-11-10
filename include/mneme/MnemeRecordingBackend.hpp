@@ -85,15 +85,34 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return *PM;
   }
 
+  // Captures the memory at Ptr from now on. Managed is the runtime's mapping
+  // when Ptr is a managed allocation.
+  void addBlob(void *Ptr, uint64_t ActualSize, uint64_t Size,
+               std::optional<ManagedMapping> Managed = std::nullopt) {
+    MnemeMemoryBlob<VendorTypes> Blob(ActualSize, nullptr, Size);
+    Blob.mapInto(Ptr);
+    AllocatedBlobs.insert({Ptr, std::move(Blob)});
+    if (Managed)
+      ManagedBlobs.insert({Ptr, *Managed});
+  }
+
+  // Releases the blob at Ptr and stops capturing its memory.
+  DeviceError_t dropBlob(void *Ptr) {
+    auto It = AllocatedBlobs.find(Ptr);
+    auto ret = It->second.release();
+    AllocatedBlobs.erase(It);
+    ManagedBlobs.erase(Ptr);
+    return ret;
+  }
+
   // The caller must first wait for work that may still use the memory.
   DeviceError_t releaseBlob(void *ptr) {
-    auto It = AllocatedBlobs.find(ptr);
-    auto &Blob = It->second;
+    const auto &Blob = AllocatedBlobs.find(ptr)->second;
+    uint64_t ActualSize = Blob.getActualSize();
     LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
-              Blob.getSize(), Blob.getActualSize());
-    auto ret = Blob.release();
-    DevicePacker->release(ptr, Blob.getActualSize());
-    AllocatedBlobs.erase(It);
+              Blob.getSize(), ActualSize);
+    auto ret = dropBlob(ptr);
+    DevicePacker->release(ptr, ActualSize);
     return ret;
   }
 
@@ -159,13 +178,9 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                 api, *ptr, size, reinterpret_cast<void *>(Placed.Start),
                 Placed.Size);
 
-    MnemeMemoryBlob<VendorTypes> MemBlob(DevicePacker->actualSize(size),
-                                         nullptr, size);
-    MemBlob.mapInto(*ptr);
+    addBlob(*ptr, DevicePacker->actualSize(size), size, Placed);
     LOG_DEBUG("Intercepted {} PTR:{} SIZE:{} MAPPING:{} MAPPINGSIZE:{}", api,
               *ptr, size, reinterpret_cast<void *>(Placed.Start), Placed.Size);
-    AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
-    ManagedBlobs.insert({*ptr, Placed});
     return ret;
   }
 
@@ -197,10 +212,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                 api, reinterpret_cast<void *>(Mapping.Start), Mapping.Size,
                 ptr);
     LOG_DEBUG("Forwarded free of captured managed allocation PTR:{}", ptr);
-    auto It = AllocatedBlobs.find(ptr);
-    It->second.release();
-    AllocatedBlobs.erase(It);
-    ManagedBlobs.erase(ptr);
+    dropBlob(ptr);
     ReservedPacker->release(reinterpret_cast<void *>(Mapping.Start),
                             ReservedPacker->actualSize(Mapping.Size));
     return ret;
@@ -269,11 +281,9 @@ public:
     *ptr = DevicePacker->allocate(ActualSize);
     if (!*ptr)
       return MnemeDeviceRT::DeviceOutOfMemory;
-    MnemeMemoryBlob<VendorTypes> MemBlob(ActualSize, nullptr, size);
-    MemBlob.mapInto(*ptr);
+    addBlob(*ptr, ActualSize, size);
     LOG_DEBUG("Intercepted Device Malloc PTR:{} SIZE:{} ACTUALSIZE:{}", *ptr,
-              size, MemBlob.getActualSize());
-    AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
+              size, ActualSize);
     return MnemeDeviceRT::DeviceSuccess;
   }
 
