@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemePageManager.hpp"
@@ -28,6 +29,11 @@ namespace detail {
 inline thread_local PlaceManagedMmap *ActivePlacement = nullptr;
 inline thread_local KeepManagedRangeReserved *ActiveRelease = nullptr;
 
+inline uint64_t roundUpToPage(uint64_t Size) {
+  static const uint64_t PageSize = sysconf(_SC_PAGESIZE);
+  return util::roundUp(Size, PageSize);
+}
+
 // Replaces whatever is mapped at [Addr, Addr + Len) with reserved address
 // space, which Mneme owns.
 inline void reserveFixed(void *Addr, size_t Len) {
@@ -38,17 +44,19 @@ inline void reserveFixed(void *Addr, size_t Len) {
 }
 } // namespace detail
 
-// While alive, the first anonymous mmap of at least MinSize bytes that this
-// thread makes without an address is placed in address space that Allocator
-// reserved. Replay maps recorded memory at its recorded address, so that
-// address must be free in the replay process. The runtime's own choice lies in
-// the mmap region, which the replay process fills with its libraries. The
-// object must go out of scope before the caller does anything else that may
-// map memory, such as logging, so that only the runtime's mapping is placed.
+// While alive, the first anonymous mmap that this thread makes without an
+// address and that spans the same pages as an allocation of Size bytes is
+// placed in address space that Allocator reserved. Replay maps recorded memory
+// at its recorded address, so that address must be free in the replay process.
+// The runtime's own choice lies in the mmap region, which the replay process
+// fills with its libraries. The object must go out of scope before the caller
+// does anything else that may map memory, such as logging, so that only the
+// runtime's mapping is placed.
 class PlaceManagedMmap {
   ChunkAllocator &Allocator;
-  // Smaller mappings are runtime bookkeeping, not the allocation.
-  uint64_t MinSize;
+  // The runtime maps the allocation with its size, which some versions round
+  // to whole pages first. Its other mappings are bookkeeping.
+  uint64_t PageRoundedSize;
   ManagedMapping Placed;
 
   template <typename MmapFn>
@@ -56,8 +64,8 @@ class PlaceManagedMmap {
                                   int Flags, int Fd, off_t Off);
 
 public:
-  PlaceManagedMmap(ChunkAllocator &Allocator, uint64_t MinSize)
-      : Allocator(Allocator), MinSize(MinSize) {
+  PlaceManagedMmap(ChunkAllocator &Allocator, uint64_t Size)
+      : Allocator(Allocator), PageRoundedSize(detail::roundUpToPage(Size)) {
     detail::ActivePlacement = this;
   }
   ~PlaceManagedMmap() { detail::ActivePlacement = nullptr; }
@@ -101,7 +109,7 @@ void *placeOrForwardMmap(MmapFn Mmap, void *Addr, size_t Len, int Prot,
                          int Flags, int Fd, off_t Off) {
   PlaceManagedMmap *P = detail::ActivePlacement;
   if (!P || Addr || !(Flags & MAP_ANONYMOUS) || (Flags & MAP_FIXED) ||
-      Len < P->MinSize)
+      detail::roundUpToPage(Len) != P->PageRoundedSize)
     return Mmap(Addr, Len, Prot, Flags, Fd, Off);
 
   // Only one mapping is placed, and growing the allocator maps memory itself.

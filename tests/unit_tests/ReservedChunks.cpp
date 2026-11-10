@@ -37,6 +37,54 @@ bool isReserved(void *Addr, uint64_t Size) {
   return false;
 }
 
+void *forwardMmap(void *Addr, size_t Len) {
+  auto Mmap = [](void *Addr, size_t Len, int Prot, int Flags, int Fd,
+                 off_t Off) { return mmap(Addr, Len, Prot, Flags, Fd, Off); };
+  void *Got = placeOrForwardMmap(Mmap, Addr, Len, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  expect(Got != MAP_FAILED, "mmap should succeed");
+  return Got;
+}
+
+// Only the mapping that spans the pages of an allocation of Size bytes is
+// placed. The runtime maps it with MappedLen, which is Size or Size rounded to
+// whole pages.
+void expectPlacesOnlyAllocation(ChunkAllocator &Allocator, uint64_t Size,
+                                uint64_t MappedLen) {
+  uint64_t Page = sysconf(_SC_PAGESIZE);
+  uint64_t Rounded = util::roundUp(Size, Page);
+  PlaceManagedMmap Placement(Allocator, Size);
+
+  for (uint64_t Other : {Rounded - Page, Rounded + Page, 16 * Rounded}) {
+    void *Unplaced = forwardMmap(nullptr, Other);
+    expect(Placement.placed().Size == 0,
+           "a mapping of another size should not be placed");
+    munmap(Unplaced, Other);
+  }
+
+  void *Hinted = forwardMmap(&Page, MappedLen);
+  expect(Placement.placed().Size == 0,
+         "a mapping with an address should not be placed");
+  munmap(Hinted, MappedLen);
+
+  void *Got = forwardMmap(nullptr, MappedLen);
+  expect(Placement.placed().contains(Got, Size) &&
+             Placement.placed().Size == MappedLen,
+         "the allocation's mapping should be placed with its length");
+  std::memset(Got, 1, Size);
+
+  void *Second = forwardMmap(nullptr, MappedLen);
+  expect(Placement.placed().Start == reinterpret_cast<uintptr_t>(Got),
+         "only one mapping should be placed");
+  munmap(Second, MappedLen);
+
+  detail::reserveFixed(Got, Rounded);
+  Allocator.release(Got, Rounded);
+  expect(Allocator.allocate(Rounded) == Got,
+         "the placed mapping should lie in the allocator's address space");
+  Allocator.release(Got, Rounded);
+}
+
 } // namespace
 
 int main() {
@@ -77,6 +125,11 @@ int main() {
   Allocator.release(Big, BigSize);
   expect(!isReserved(Big, BigSize),
          "a released large allocation should be unmapped");
+
+  uint64_t Unrounded = 2 * Page + 100;
+  expectPlacesOnlyAllocation(Allocator, Unrounded, Unrounded);
+  expectPlacesOnlyAllocation(Allocator, Unrounded, 3 * Page);
+
   Allocator.release(B, Page);
   Allocator.release(A, Page);
   return 0;
