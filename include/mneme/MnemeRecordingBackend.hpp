@@ -92,8 +92,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
               Blob.getSize(), Blob.getActualSize());
     auto ret = Blob.release();
-    if (DevicePacker->packs(Blob.getSize()))
-      DevicePacker->release(ptr, Blob.getActualSize());
+    DevicePacker->release(ptr, Blob.getActualSize());
     AllocatedBlobs.erase(It);
     return ret;
   }
@@ -260,32 +259,20 @@ public:
       return ret;
     }
 
-    auto &Pages = getOrCreatePageManager();
+    getOrCreatePageManager();
 
-    MnemeMemoryBlob<VendorTypes> MemBlob;
-    if (DevicePacker->packs(size)) {
-      uint64_t ActualSize = DevicePacker->actualSize(size);
-      void *Addr = DevicePacker->allocate(ActualSize);
-      if (Addr) {
-        MemBlob = MnemeMemoryBlob<VendorTypes>(ActualSize, nullptr, size);
-        MemBlob.mapInto(Addr);
-      }
-    } else {
-      if (!WarnedUnpacked) {
-        LOG_WARN("Mapping {}-byte allocation separately; raise "
-                 "MNEME_CHUNK_SIZE to pack it",
-                 size);
-        WarnedUnpacked = true;
-      }
-      Pages.mapAddr(size, [&](const auto &R) {
-        MemBlob = MnemeMemoryBlob<VendorTypes>(R.Size, nullptr, size);
-        return MemBlob.mapFixed(R.Addr, R.Addr, R.Size, R.Align, DeviceID);
-      });
+    uint64_t ActualSize = DevicePacker->actualSize(size);
+    if (!DevicePacker->packs(ActualSize) && !WarnedUnpacked) {
+      LOG_WARN("Mapping {}-byte allocation separately; raise "
+               "MNEME_CHUNK_SIZE to pack it",
+               size);
+      WarnedUnpacked = true;
     }
-
-    *ptr = MemBlob.getBlobAddr();
+    *ptr = DevicePacker->allocate(ActualSize);
     if (!*ptr)
       return MnemeDeviceRT::DeviceOutOfMemory;
+    MnemeMemoryBlob<VendorTypes> MemBlob(ActualSize, nullptr, size);
+    MemBlob.mapInto(*ptr);
     LOG_DEBUG("Intercepted Device Malloc PTR:{} SIZE:{} ACTUALSIZE:{}", *ptr,
               size, MemBlob.getActualSize());
     AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
