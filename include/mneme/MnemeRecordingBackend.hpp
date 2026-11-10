@@ -4,11 +4,11 @@
 #include "mneme/MnemeKernelInfo.hpp"
 #include "mneme/MnemeLaunchTimer.hpp"
 #include "mneme/MnemeLogger.hpp"
+#include "mneme/MnemeManagedPlacement.hpp"
 #include "mneme/MnemeMemory.hpp"
 #include "mneme/MnemePageManager.hpp"
 #include "mneme/MnemeRecordScope.hpp"
 #include "mneme/MnemeRecorderBackend.hpp"
-#include "mneme/MnemeRuntimeAllocPlacement.hpp"
 #include "mneme/MnemeSnapshot.hpp"
 
 #include <cstddef>
@@ -34,23 +34,24 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   std::unique_ptr<LaunchTimer<VendorTypes>> Timer;
   RecordDatabase DB;
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
-  // Allocations served by the vendor runtime (managed, pinned, pitched,
-  // stream-ordered, ...). They are not captured, but the application may
-  // release them with the device free, which must then be forwarded.
+  // Allocations served by the vendor runtime (pinned, pitched, stream-ordered,
+  // managed where Mneme cannot place it, ...). They are not captured, but the
+  // application may release them with the device free, which must then be
+  // forwarded.
   llvm::DenseSet<void *> PassthroughAllocs;
   // Managed allocations that the vendor runtime made at an address Mneme
   // chose, with the mapping the runtime made for each. They are captured like
   // Mneme's own blobs, but the runtime keeps owning and releasing their memory.
-  llvm::DenseMap<void *, RuntimeMapping> RuntimeBlobs;
+  llvm::DenseMap<void *, ManagedMapping> ManagedBlobs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
   std::unique_ptr<DeviceChunkSource<VendorTypes>> DeviceChunks;
   std::unique_ptr<ChunkAllocator> DevicePacker;
-  // Address space for the mappings behind runtime allocations; null unless
-  // the runtime's allocations can be placed.
+  // Address space for the mappings behind managed allocations; null unless
+  // managed allocations can be placed.
   std::unique_ptr<ReservedChunkSource<VendorTypes>> ReservedChunks;
   std::unique_ptr<ChunkAllocator> ReservedPacker;
   bool WarnedUnpacked = false;
-  bool WarnedUnseenUnmap = false;
+  bool WarnedManagedNotUnmapped = false;
 
   // The exit handler that drains the timer is registered on the first timed
   // launch, after the device runtime has initialized, so it runs before the
@@ -136,21 +137,22 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return ret;
   }
 
-  // Runs Alloc, which makes a vendor runtime allocation of size bytes at *ptr,
-  // with its mapping placed where replay can map it again, and captures it.
-  template <typename AllocFn>
-  DeviceError_t captureRuntimeAlloc(void **ptr, size_t size, const char *api,
-                                    AllocFn Alloc) {
+  // Makes a managed allocation of size bytes at *ptr with the runtime's own
+  // managed malloc, with its mapping placed where replay can map it again, and
+  // captures it.
+  DeviceError_t captureManagedAlloc(void **ptr, size_t size,
+                                    unsigned int flags) {
+    const char *api = MnemeDeviceRT::getManagedMallocFnName();
     getOrCreatePageManager();
-    RuntimeMmapPlacement Placement{*ReservedPacker, size};
+    ManagedMmapPlacement Placement{*ReservedPacker, size};
     DeviceError_t ret;
     {
-      PlaceRuntimeMmap Scope(Placement);
-      ret = Alloc();
+      PlaceManagedMmap Scope(Placement);
+      ret = Runtime.origMallocManaged(ptr, size, flags);
     }
     if (ret != MnemeDeviceRT::DeviceSuccess)
       return ret;
-    const RuntimeMapping &Placed = Placement.Placed;
+    const ManagedMapping &Placed = Placement.Placed;
     if (!Placed.contains(*ptr, size))
       LOG_FATAL("{} returned PTR:{} SIZE:{} outside the mapping Mneme placed "
                 "at {} SIZE:{}; this runtime does not map the allocation with "
@@ -164,46 +166,46 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     LOG_DEBUG("Intercepted {} PTR:{} SIZE:{} MAPPING:{} MAPPINGSIZE:{}", api,
               *ptr, size, reinterpret_cast<void *>(Placed.Start), Placed.Size);
     AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
-    RuntimeBlobs.insert({*ptr, Placed});
+    ManagedBlobs.insert({*ptr, Placed});
     return ret;
   }
 
-  // Frees a captured runtime allocation with Free, the runtime's own free
+  // Frees a captured managed allocation with Free, the runtime's own free
   // named api, and reuses its addresses once the runtime has unmapped them.
   template <typename FreeFn>
-  DeviceError_t releaseRuntimeBlob(void *ptr, const char *api, FreeFn Free) {
-    RuntimeMunmapRelease Release{RuntimeBlobs.lookup(ptr)};
-    const RuntimeMapping &Mapping = Release.Mapping;
+  DeviceError_t releaseManagedBlob(void *ptr, const char *api, FreeFn Free) {
+    ManagedMunmapRelease Release{ManagedBlobs.lookup(ptr)};
+    const ManagedMapping &Mapping = Release.Mapping;
     DeviceError_t ret;
     {
-      KeepRuntimeMunmap Scope(Release);
+      KeepManagedRangeReserved Scope(Release);
       ret = Free();
     }
     if (ret != MnemeDeviceRT::DeviceSuccess) {
-      if (Release.IsSeen)
+      if (Release.WasUnmapped)
         LOG_FATAL("{} failed after unmapping PTR:{} MAPPING:{} SIZE:{}, so "
                   "Mneme can no longer record it",
                   api, ptr, reinterpret_cast<void *>(Mapping.Start),
                   Mapping.Size);
       return ret;
     }
-    LOG_DEBUG("Forwarded free of captured runtime allocation PTR:{}", ptr);
+    LOG_DEBUG("Forwarded free of captured managed allocation PTR:{}", ptr);
     auto It = AllocatedBlobs.find(ptr);
     It->second.release();
     AllocatedBlobs.erase(It);
-    RuntimeBlobs.erase(ptr);
+    ManagedBlobs.erase(ptr);
 
-    if (Release.IsSeen) {
+    if (Release.WasUnmapped) {
       ReservedPacker->release(reinterpret_cast<void *>(Mapping.Start),
                               ReservedPacker->actualSize(Mapping.Size));
-    } else if (!WarnedUnseenUnmap) {
+    } else if (!WarnedManagedNotUnmapped) {
       // The runtime may unmap the range later, which would destroy a new
       // allocation placed there.
       LOG_WARN("{} did not unmap the mapping at {} SIZE:{} of PTR:{} before "
                "returning; Mneme will not reuse the addresses of such "
                "allocations",
                api, reinterpret_cast<void *>(Mapping.Start), Mapping.Size, ptr);
-      WarnedUnseenUnmap = true;
+      WarnedManagedNotUnmapped = true;
     }
     return ret;
   }
@@ -281,14 +283,13 @@ public:
 
   DeviceError_t rtManagedMalloc(void **ptr, size_t size,
                                 unsigned int flags) override {
-    const char *Api = MnemeDeviceRT::getManagedMallocFnName();
-    auto Alloc = [&] { return Runtime.origMallocManaged(ptr, size, flags); };
     if (MnemeDeviceRT::PlacesManagedMemory && size != 0)
-      return captureRuntimeAlloc(ptr, size, Api, Alloc);
+      return captureManagedAlloc(ptr, size, flags);
 
-    auto ret = Alloc();
+    auto ret = Runtime.origMallocManaged(ptr, size, flags);
     if (ret == MnemeDeviceRT::DeviceSuccess)
-      trackPassthroughAlloc(*ptr, size, Api);
+      trackPassthroughAlloc(*ptr, size,
+                            MnemeDeviceRT::getManagedMallocFnName());
     return ret;
   }
 
@@ -314,8 +315,8 @@ public:
       LOG_WARN("Mneme was instructed to de-allocate nullptr..., skipping");
       return MnemeDeviceRT::DeviceSuccess;
     }
-    if (RuntimeBlobs.contains(ptr))
-      return releaseRuntimeBlob(ptr, MnemeDeviceRT::getDeviceFreeFnName(),
+    if (ManagedBlobs.contains(ptr))
+      return releaseManagedBlob(ptr, MnemeDeviceRT::getDeviceFreeFnName(),
                                 [&] { return Runtime.origFreeDevice(ptr); });
     if (!AllocatedBlobs.contains(ptr)) {
       if (PassthroughAllocs.erase(ptr)) {
@@ -337,8 +338,8 @@ public:
   }
 
   DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
-    if (RuntimeBlobs.contains(ptr))
-      return releaseRuntimeBlob(ptr, MnemeDeviceRT::getAsyncFreeFnName(), [&] {
+    if (ManagedBlobs.contains(ptr))
+      return releaseManagedBlob(ptr, MnemeDeviceRT::getAsyncFreeFnName(), [&] {
         return Runtime.origFreeAsync(ptr, stream);
       });
     if (AllocatedBlobs.contains(ptr)) {
@@ -454,7 +455,7 @@ public:
     DeviceChunks.reset();
     // The runtime still owns these allocations and may touch or unmap them
     // after Mneme is gone, so their reserved chunks must stay mapped.
-    if (!RuntimeBlobs.empty()) {
+    if (!ManagedBlobs.empty()) {
       (void)ReservedPacker.release();
       (void)ReservedChunks.release();
     }

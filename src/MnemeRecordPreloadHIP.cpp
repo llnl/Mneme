@@ -4,8 +4,8 @@
 #include "mneme/MnemeKernelTimer.hpp"
 #include "mneme/MnemeLLVMUtils.hpp"
 #include "mneme/MnemeLogger.hpp"
+#include "mneme/MnemeManagedPlacement.hpp"
 #include "mneme/MnemeRecord.hpp"
-#include "mneme/MnemeRuntimeAllocPlacement.hpp"
 #include <cstdlib>
 #include <dlfcn.h>
 #include <hip/hip_runtime.h>
