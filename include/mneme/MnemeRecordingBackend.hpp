@@ -44,11 +44,11 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   llvm::DenseMap<void *, RuntimeMapping> RuntimeBlobs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
   std::unique_ptr<DeviceChunkSource<VendorTypes>> DeviceChunks;
-  std::unique_ptr<ChunkAllocator> Packer;
+  std::unique_ptr<ChunkAllocator> DevicePacker;
   // Address space for the mappings behind runtime allocations; null unless
   // the runtime's allocations can be placed.
   std::unique_ptr<ReservedChunkSource<VendorTypes>> ReservedChunks;
-  std::unique_ptr<ChunkAllocator> RuntimePacker;
+  std::unique_ptr<ChunkAllocator> ReservedPacker;
   bool WarnedUnpacked = false;
   bool WarnedUnseenUnmap = false;
 
@@ -75,12 +75,12 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     PM = std::make_unique<PageManager<VendorTypes>>();
     DeviceChunks =
         std::make_unique<DeviceChunkSource<VendorTypes>>(*PM, DeviceID);
-    Packer = std::make_unique<ChunkAllocator>(*DeviceChunks,
-                                              Config::get().ChunkSize);
+    DevicePacker = std::make_unique<ChunkAllocator>(*DeviceChunks,
+                                                    Config::get().ChunkSize);
     if (MnemeDeviceRT::PlacesRuntimeAllocs) {
       ReservedChunks = std::make_unique<ReservedChunkSource<VendorTypes>>(*PM);
-      RuntimePacker = std::make_unique<ChunkAllocator>(*ReservedChunks,
-                                                       Config::get().ChunkSize);
+      ReservedPacker = std::make_unique<ChunkAllocator>(
+          *ReservedChunks, Config::get().ChunkSize);
     }
     return *PM;
   }
@@ -92,8 +92,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
               Blob.getSize(), Blob.getActualSize());
     auto ret = Blob.release();
-    if (Packer->packs(Blob.getSize()))
-      Packer->release(ptr, Blob.getActualSize());
+    if (DevicePacker->packs(Blob.getSize()))
+      DevicePacker->release(ptr, Blob.getActualSize());
     AllocatedBlobs.erase(It);
     return ret;
   }
@@ -143,7 +143,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   DeviceError_t captureRuntimeAlloc(void **ptr, size_t size, const char *api,
                                     AllocFn Alloc) {
     getOrCreatePageManager();
-    RuntimeMmapPlacement Placement{*RuntimePacker, size};
+    RuntimeMmapPlacement Placement{*ReservedPacker, size};
     DeviceError_t ret;
     {
       PlaceRuntimeMmap Scope(Placement);
@@ -159,8 +159,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                 api, *ptr, size, reinterpret_cast<void *>(Placed.Start),
                 Placed.Size);
 
-    MnemeMemoryBlob<VendorTypes> MemBlob(Packer->actualSize(size), nullptr,
-                                         size);
+    MnemeMemoryBlob<VendorTypes> MemBlob(DevicePacker->actualSize(size),
+                                         nullptr, size);
     MemBlob.mapInto(*ptr);
     LOG_DEBUG("Intercepted {} PTR:{} SIZE:{} MAPPING:{} MAPPINGSIZE:{}", api,
               *ptr, size, reinterpret_cast<void *>(Placed.Start), Placed.Size);
@@ -195,8 +195,8 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     RuntimeBlobs.erase(ptr);
 
     if (Release.IsSeen) {
-      RuntimePacker->release(reinterpret_cast<void *>(Mapping.Start),
-                             RuntimePacker->actualSize(Mapping.Size));
+      ReservedPacker->release(reinterpret_cast<void *>(Mapping.Start),
+                              ReservedPacker->actualSize(Mapping.Size));
     } else if (!WarnedUnseenUnmap) {
       // The runtime may unmap the range later, which would destroy a new
       // allocation placed there.
@@ -263,9 +263,9 @@ public:
     auto &Pages = getOrCreatePageManager();
 
     MnemeMemoryBlob<VendorTypes> MemBlob;
-    if (Packer->packs(size)) {
-      uint64_t ActualSize = Packer->actualSize(size);
-      void *Addr = Packer->allocate(ActualSize);
+    if (DevicePacker->packs(size)) {
+      uint64_t ActualSize = DevicePacker->actualSize(size);
+      void *Addr = DevicePacker->allocate(ActualSize);
       if (Addr) {
         MemBlob = MnemeMemoryBlob<VendorTypes>(ActualSize, nullptr, size);
         MemBlob.mapInto(Addr);
@@ -463,15 +463,15 @@ public:
       }
     }
 
-    Packer.reset();
+    DevicePacker.reset();
     DeviceChunks.reset();
     // The runtime still owns these allocations and may touch or unmap them
     // after Mneme is gone, so their reserved chunks must stay mapped.
     if (!RuntimeBlobs.empty()) {
-      (void)RuntimePacker.release();
+      (void)ReservedPacker.release();
       (void)ReservedChunks.release();
     }
-    RuntimePacker.reset();
+    ReservedPacker.reset();
     ReservedChunks.reset();
     PM.reset();
 
