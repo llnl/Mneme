@@ -143,15 +143,15 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
                                     unsigned int flags) {
     const char *api = MnemeDeviceRT::getManagedMallocFnName();
     getOrCreatePageManager();
-    ManagedMmapPlacement Placement{*ReservedPacker, size};
     DeviceError_t ret;
+    ManagedMapping Placed;
     {
-      PlaceManagedMmap Scope(Placement);
+      PlaceManagedMmap Placement(*ReservedPacker, size);
       ret = Runtime.origMallocManaged(ptr, size, flags);
+      Placed = Placement.placed();
     }
     if (ret != MnemeDeviceRT::DeviceSuccess)
       return ret;
-    const ManagedMapping &Placed = Placement.Placed;
     if (!Placed.contains(*ptr, size))
       LOG_FATAL("{} returned PTR:{} SIZE:{} outside the mapping Mneme placed "
                 "at {} SIZE:{}; this runtime does not map the allocation with "
@@ -174,22 +174,23 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   // keep the addresses reserved and reuse them.
   template <typename FreeFn>
   DeviceError_t releaseManagedBlob(void *ptr, const char *api, FreeFn Free) {
-    ManagedMunmapRelease Release{ManagedBlobs.lookup(ptr)};
-    const ManagedMapping &Mapping = Release.Mapping;
+    ManagedMapping Mapping = ManagedBlobs.lookup(ptr);
     DeviceError_t ret;
+    bool WasUnmapped;
     {
-      KeepManagedRangeReserved Scope(Release);
+      KeepManagedRangeReserved Keep(Mapping);
       ret = Free();
+      WasUnmapped = Keep.wasUnmapped();
     }
     if (ret != MnemeDeviceRT::DeviceSuccess) {
-      if (Release.WasUnmapped)
+      if (WasUnmapped)
         LOG_FATAL("{} failed after unmapping PTR:{} MAPPING:{} SIZE:{}, so "
                   "Mneme can no longer record it",
                   api, ptr, reinterpret_cast<void *>(Mapping.Start),
                   Mapping.Size);
       return ret;
     }
-    if (!Release.WasUnmapped)
+    if (!WasUnmapped)
       LOG_FATAL("{} did not unmap the mapping at {} SIZE:{} of PTR:{} before "
                 "returning, so Mneme cannot keep its addresses reserved and "
                 "cannot record managed memory with this runtime",

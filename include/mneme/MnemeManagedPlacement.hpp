@@ -21,28 +21,12 @@ struct ManagedMapping {
   }
 };
 
-// Where the mapping behind a managed allocation should go. Replay maps recorded
-// memory at its recorded address, so that address must be free in the replay
-// process. The runtime's own choice lies in the mmap region, which the
-// replay process fills with its libraries, so the mapping is placed in address
-// space that Allocator reserved instead.
-struct ManagedMmapPlacement {
-  ChunkAllocator &Allocator;
-  // Smaller mappings are runtime bookkeeping, not the allocation.
-  uint64_t MinSize;
-  ManagedMapping Placed;
-};
-
-// The runtime's unmap of a placed mapping while it frees the managed
-// allocation.
-struct ManagedMunmapRelease {
-  ManagedMapping Mapping;
-  bool WasUnmapped = false;
-};
+class PlaceManagedMmap;
+class KeepManagedRangeReserved;
 
 namespace detail {
-inline thread_local ManagedMmapPlacement *ActivePlacement = nullptr;
-inline thread_local ManagedMunmapRelease *ActiveRelease = nullptr;
+inline thread_local PlaceManagedMmap *ActivePlacement = nullptr;
+inline thread_local KeepManagedRangeReserved *ActiveRelease = nullptr;
 
 // Replaces whatever is mapped at [Addr, Addr + Len) with reserved address
 // space, which Mneme owns.
@@ -54,32 +38,58 @@ inline void reserveFixed(void *Addr, size_t Len) {
 }
 } // namespace detail
 
-// While in scope, the first anonymous mmap of at least MinSize bytes that this
-// thread makes without an address is placed by Placement.
+// While alive, the first anonymous mmap of at least MinSize bytes that this
+// thread makes without an address is placed in address space that Allocator
+// reserved. Replay maps recorded memory at its recorded address, so that
+// address must be free in the replay process. The runtime's own choice lies in
+// the mmap region, which the replay process fills with its libraries. The
+// object must go out of scope before the caller does anything else that may
+// map memory, such as logging, so that only the runtime's mapping is placed.
 class PlaceManagedMmap {
+  ChunkAllocator &Allocator;
+  // Smaller mappings are runtime bookkeeping, not the allocation.
+  uint64_t MinSize;
+  ManagedMapping Placed;
+
+  template <typename MmapFn>
+  friend void *placeOrForwardMmap(MmapFn Mmap, void *Addr, size_t Len, int Prot,
+                                  int Flags, int Fd, off_t Off);
+
 public:
-  explicit PlaceManagedMmap(ManagedMmapPlacement &Placement) {
-    detail::ActivePlacement = &Placement;
+  PlaceManagedMmap(ChunkAllocator &Allocator, uint64_t MinSize)
+      : Allocator(Allocator), MinSize(MinSize) {
+    detail::ActivePlacement = this;
   }
   ~PlaceManagedMmap() { detail::ActivePlacement = nullptr; }
 
   PlaceManagedMmap(const PlaceManagedMmap &) = delete;
   PlaceManagedMmap &operator=(const PlaceManagedMmap &) = delete;
+
+  const ManagedMapping &placed() const { return Placed; }
 };
 
-// While in scope, this thread's munmap of exactly Release's mapping leaves the
-// range reserved instead, so no other mapping can take its addresses before
-// Mneme hands them out again.
+// While alive, this thread's munmap of exactly Mapping leaves the range
+// reserved instead, so no other mapping can take its addresses before Mneme
+// hands them out again.
 class KeepManagedRangeReserved {
+  ManagedMapping Mapping;
+  bool WasUnmapped = false;
+
+  template <typename MunmapFn>
+  friend int keepOrForwardMunmap(MunmapFn Munmap, void *Addr, size_t Len);
+
 public:
-  explicit KeepManagedRangeReserved(ManagedMunmapRelease &Release) {
-    detail::ActiveRelease = &Release;
+  explicit KeepManagedRangeReserved(const ManagedMapping &Mapping)
+      : Mapping(Mapping) {
+    detail::ActiveRelease = this;
   }
   ~KeepManagedRangeReserved() { detail::ActiveRelease = nullptr; }
 
   KeepManagedRangeReserved(const KeepManagedRangeReserved &) = delete;
   KeepManagedRangeReserved &
   operator=(const KeepManagedRangeReserved &) = delete;
+
+  bool wasUnmapped() const { return WasUnmapped; }
 };
 
 // The body of the mmap hook. Forwards to Mmap, placing the mapping when a
@@ -89,7 +99,7 @@ public:
 template <typename MmapFn>
 void *placeOrForwardMmap(MmapFn Mmap, void *Addr, size_t Len, int Prot,
                          int Flags, int Fd, off_t Off) {
-  ManagedMmapPlacement *P = detail::ActivePlacement;
+  PlaceManagedMmap *P = detail::ActivePlacement;
   if (!P || Addr || !(Flags & MAP_ANONYMOUS) || (Flags & MAP_FIXED) ||
       Len < P->MinSize)
     return Mmap(Addr, Len, Prot, Flags, Fd, Off);
@@ -118,7 +128,7 @@ void *placeOrForwardMmap(MmapFn Mmap, void *Addr, size_t Len, int Prot,
 // KeepManagedRangeReserved active on this thread, which stays reserved.
 template <typename MunmapFn>
 int keepOrForwardMunmap(MunmapFn Munmap, void *Addr, size_t Len) {
-  ManagedMunmapRelease *R = detail::ActiveRelease;
+  KeepManagedRangeReserved *R = detail::ActiveRelease;
   if (!R || reinterpret_cast<uintptr_t>(Addr) != R->Mapping.Start ||
       Len != R->Mapping.Size)
     return Munmap(Addr, Len);
