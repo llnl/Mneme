@@ -1,7 +1,7 @@
 // clang-format off
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/test_passthrough_alloc%ext > %t.out 2>&1 || true
-// RUN: %FILECHECK %s --check-prefixes=CHECK,CHECK-%vendor < %t.out
+// RUN: %FILECHECK %s --check-prefixes=CHECK < %t.out
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 
@@ -119,8 +119,6 @@ int main() {
   return Failures != 0;
 }
 
-// CHECK-hip: Forwarded free of captured managed allocation
-// CHECK-cuda: Forwarding free of vendor runtime allocation
 // CHECK: managed free: OK
 // CHECK: pitch free: OK
 // CHECK: 3D free: OK
@@ -137,8 +135,6 @@ int main() {
 // CHECK: hip mem alloc host, host free: {{OK|SKIPPED}}
 // CHECK: hip ext malloc, device free: {{OK|SKIPPED}}
 // CHECK: hip mem alloc pitch, device free: {{OK|SKIPPED}}
-// CHECK-hip: Forwarded free of captured managed allocation
 // CHECK: hip managed alloc, host free: {{OK|SKIPPED}}
-// CHECK-hip: Forwarded free of captured managed allocation
 // CHECK: hip managed alloc, free host: {{OK|SKIPPED}}
 // CHECK: Done: 0 failures

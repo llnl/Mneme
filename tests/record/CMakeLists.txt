@@ -107,7 +107,6 @@ config.substitutions.append(('%ext', EXT))
 config.substitutions.append(('%FILECHECK', FILECHECK))
 config.substitutions.append(('%build', '${CMAKE_CURRENT_BINARY_DIR}'))
 config.substitutions.append(('%PYTHON', '${Python3_EXECUTABLE}'))
-config.substitutions.append(('%vendor', '${MNEME_GPU_BACKEND}'))
 "
 )
 
