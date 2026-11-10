@@ -195,6 +195,10 @@ public:
   void discardFailure() override { DT::clearLastError(); }
 };
 
+namespace mneme {
+inline constexpr int ReserveFlags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+} // namespace mneme
+
 // Chunks of reserved address space with no memory behind them. The vendor
 // runtime's own mappings are placed inside them.
 template <mneme::DeviceVendors VendorTypes>
@@ -203,10 +207,8 @@ class ReservedChunkSource final : public ChunkSource {
   uint64_t PageSize = sysconf(_SC_PAGESIZE);
 
   static mneme::MapStatus reserve(void *Addr, uint64_t Size) {
-    void *Got =
-        mmap(Addr, Size, PROT_NONE,
-             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE,
-             -1, 0);
+    void *Got = mmap(Addr, Size, PROT_NONE,
+                     mneme::ReserveFlags | MAP_FIXED_NOREPLACE, -1, 0);
     if (Got == Addr)
       return mneme::MapStatus::Mapped;
     // Kernels before 4.17 treat the address as a hint.

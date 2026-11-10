@@ -1,3 +1,4 @@
+#include "mneme/MnemeManagedPlacement.hpp"
 #include "mneme/MnemePageManager.hpp"
 
 #include <cerrno>
@@ -58,8 +59,7 @@ int main() {
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
   expect(Mapped == A, "should map over the reservation");
   std::memset(A, 1, Page);
-  mmap(A, Page, PROT_NONE,
-       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+  detail::reserveFixed(A, Page);
 
   Allocator.release(A, Page);
   expect(Allocator.allocate(Page) == A, "should reuse a released address");

@@ -47,9 +47,7 @@ inline thread_local ManagedMunmapRelease *ActiveRelease = nullptr;
 // Replaces whatever is mapped at [Addr, Addr + Len) with reserved address
 // space, which Mneme owns.
 inline void reserveFixed(void *Addr, size_t Len) {
-  void *Got =
-      mmap(Addr, Len, PROT_NONE,
-           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+  void *Got = mmap(Addr, Len, PROT_NONE, ReserveFlags | MAP_FIXED, -1, 0);
   if (Got == MAP_FAILED)
     LOG_FATAL("Cannot keep {} bytes at {} reserved: {}", Len, Addr,
               std::strerror(errno));
