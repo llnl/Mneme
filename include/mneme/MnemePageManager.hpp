@@ -167,7 +167,7 @@ public:
   DeviceChunkSource(PageManager<VendorTypes> &PM, int DeviceID)
       : PM(PM), DeviceID(DeviceID) {}
 
-  // Chunks are whole mapping units, so CUDA chunks are 32 MiB multiples.
+  // Chunks are whole multiples of the page manager's mapping unit.
   uint64_t unit() const override { return PageManager<VendorTypes>::Align; }
 
   // Matches the device malloc alignment guarantee.
