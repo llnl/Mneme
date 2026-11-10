@@ -68,13 +68,31 @@ static Memory bufferMemory(int B) {
   return Memory::Device;
 }
 
+// HIP also releases managed memory with either host free, so Which spreads
+// managed buffers over all three frees.
+static void release(void *P, Memory Kind, int Which) {
+#ifdef __ENABLE_HIP__
+  if (Kind == Memory::Managed) {
+    hipError_t EC = Which % 3 == 0   ? hipFree(P)
+                    : Which % 3 == 1 ? hipHostFree(P)
+                                     : hipFreeHost(P);
+    if (EC != hipSuccess) {
+      printf("managed free failed\n");
+      exit(1);
+    }
+    return;
+  }
+#endif
+  prefix(Free)(P);
+}
+
 int main() {
   // Filled and emptied first so chunks are unmapped and their addresses reused.
   std::vector<void *> Churn;
   for (int I = 0; I < 3000; ++I)
     Churn.push_back(alloc(4096, bufferMemory(I)));
-  for (void *P : Churn)
-    prefix(Free)(P);
+  for (int I = 0; I < 3000; ++I)
+    release(Churn[I], bufferMemory(I), I / 2);
 
   // Freed before the launch, so the first recorded blob of its chunk is not
   // page aligned.
@@ -101,7 +119,7 @@ int main() {
     Dropped.push_back(alloc(100 + B * 11, bufferMemory(B + 1)));
   }
   for (int B = 0; B < NumBufs; B += 3)
-    prefix(Free)(Dropped[B]);
+    release(Dropped[B], bufferMemory(B + 1), B / 6);
 
   int *Big = alloc(3 << 20);
   std::vector<int> HBig((3 << 20) / sizeof(int), 5);

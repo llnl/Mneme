@@ -363,6 +363,9 @@ public:
   }
 
   DeviceError_t rtHostFree(void *ptr) override {
+    if (ManagedBlobs.contains(ptr))
+      return releaseManagedBlob(ptr, MnemeDeviceRT::getPinnedFreeFnName(),
+                                [&] { return Runtime.origFreeHost(ptr); });
     PassthroughAllocs.erase(ptr);
     auto ret = Runtime.origFreeHost(ptr);
     LOG_DEBUG("Free pinned address:{}", ptr);
