@@ -23,7 +23,6 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/xxhash.h>
 
-#include <proteus/impl/Config.h>
 #include <proteus/impl/CoreLLVM.h>
 
 #include "mneme/DeviceTraits.hpp"
@@ -223,41 +222,30 @@ inline KernelArgLayout getKernelArgLayout(const llvm::Function &F) {
   return Layout;
 }
 
-// Optimizes the module the way Proteus optimizes the kernel before code
-// generation: the kernel's Proteus optimization level or custom pipeline, with
-// a target machine for the kernel's architecture. HIP RTC hands the module to
-// hiprtc, which applies its own optimization, which is taken as O3.
-inline void optimizeLikeProteus(llvm::Module &M,
-                                const std::string &KernelName) {
+// Optimizes the module at O3, with a target machine for the kernel's
+// architecture. A byte the optimized kernel never reads cannot affect the
+// kernel under any pipeline, so the strongest fixed pipeline gives the most
+// precise answer; the record run's PROTEUS_* settings and JIT pass plugins are
+// deliberately ignored so profiles do not depend on them.
+inline void optimizeAtO3(llvm::Module &M, const std::string &KernelName) {
   static proteus::InitLLVMTargets InitTargets;
   llvm::Function *F = M.getFunction(KernelName);
   if (!F || !F->hasFnAttribute("target-cpu"))
     LOG_FATAL("Kernel " + KernelName +
               " has no target-cpu attribute to optimize its arguments for");
   std::string Arch = F->getFnAttribute("target-cpu").getValueAsString().str();
-  const proteus::CodeGenerationConfig &CG =
-      proteus::Config::get().getCGConfig(KernelName);
-#if defined(MNEME_ENABLE_HIP)
-  bool IsOptimizedByHiprtc = CG.codeGenOption() == proteus::CodegenOption::RTC;
-#else
-  bool IsOptimizedByHiprtc = false;
-#endif
-  proteus::OptimizationPipelineConfig OptConfig =
-      IsOptimizedByHiprtc ? proteus::OptimizationPipelineConfig(
-                                std::nullopt, '3', CG.codeGenOptLevel())
-                          : proteus::OptimizationPipelineConfig(CG);
-  proteus::optimizeIR(M, Arch, OptConfig);
+  proteus::detail::runOptimizationPassPipeline(M, Arch, '3', 3);
 }
 
 // Marks the leaves that the kernel cannot read. The captured bitcode is not yet
 // optimized, so every argument still has uses that copy it to the stack; the
-// module is optimized first, as Proteus would optimize it, which removes the
+// module is optimized first, at O3, which removes the
 // copies of unread bytes. Uses the analysis cannot follow, such as passing the
 // argument to a call that was not inlined, keep every leaf of that argument as
 // read.
 inline void markUnreadLeaves(llvm::Module &M, const std::string &KernelName,
                              KernelArgLayout &Layout) {
-  optimizeLikeProteus(M, KernelName);
+  optimizeAtO3(M, KernelName);
   llvm::Function *F = M.getFunction(KernelName);
   if (!F || F->arg_size() != Layout.ArgNames.size())
     return;

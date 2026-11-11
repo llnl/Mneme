@@ -1,6 +1,8 @@
 // clang-format off
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
-// RUN: MNEME_PROFILE_ARG_VALUES=1 MNEME_FILTER_MODE=scoped LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_arg_values%ext | %FILECHECK %s --check-prefixes=CHECK
+// The read analysis always optimizes at O3, so the record run's Proteus opt
+// level must not change which leaves are read.
+// RUN: PROTEUS_OPT_LEVEL=0 MNEME_PROFILE_ARG_VALUES=1 MNEME_FILTER_MODE=scoped LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_DATA_DIR="%t.$$.mneme" %build/test_arg_values%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %PYTHON %S/read-arg-values.py "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-PROFILE
 // RUN: %PYTHON %S/read-arg-values.py "%t.$$.mneme" --top 6 | %FILECHECK %s --check-prefix=CHECK-INF
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
