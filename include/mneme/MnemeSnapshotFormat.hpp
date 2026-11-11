@@ -174,6 +174,8 @@ private:
   std::string Filename;
 };
 
+namespace snapshot_detail {
+
 // Section decoders shared by the readers. A helper decodes a section as it
 // appears in every layout that calls it. When a new layout changes a section,
 // add a new helper instead of changing one an older reader calls.
@@ -275,6 +277,8 @@ llvm::MutableArrayRef<uint8_t> hostBytes(MnemeMemoryBlob<VendorTypes> &Blob) {
   return llvm::MutableArrayRef<uint8_t>(Blob.getHostData(), Blob.getSize());
 }
 
+} // namespace snapshot_detail
+
 template <DeviceVendors VendorTypes>
 class BytesReaderV0 : public SnapshotReader<VendorTypes> {
 public:
@@ -291,12 +295,12 @@ public:
     Snap.KInfo = std::make_shared<KernelInfo>(KernelName);
     const char *CurrentPtr = this->payload();
 
-    readGlobals(CurrentPtr, Snap.GlobalVars);
+    snapshot_detail::readGlobals(CurrentPtr, Snap.GlobalVars);
     size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
     for (size_t I = 0; I < TotalMemBlobs; ++I)
       Snap.DeviceMemory.insert(
           MnemeMemoryBlob<VendorTypes>::fromBuffer(CurrentPtr));
-    readArgs(CurrentPtr, *Snap.KInfo);
+    snapshot_detail::readArgs(CurrentPtr, *Snap.KInfo);
     return Snap;
   }
 };
@@ -315,17 +319,21 @@ public:
   Snapshot<VendorTypes>
   read(const std::string &KernelName,
        const BaseSnapshotSource<VendorTypes> &Base) const override {
-    Snapshot<VendorTypes> Snap = loadDiffBase(Base, KernelName, this->Filename);
+    Snapshot<VendorTypes> Snap =
+        snapshot_detail::loadDiffBase(Base, KernelName, this->Filename);
     const char *CurrentPtr = this->payload();
 
-    applyGlobalDiffs(CurrentPtr, Snap.GlobalVars, this->Filename);
+    snapshot_detail::applyGlobalDiffs(CurrentPtr, Snap.GlobalVars,
+                                      this->Filename);
     size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
-    expectCount(TotalMemBlobs, Snap.DeviceMemory.size(), this->Filename,
-                "memory blob");
+    snapshot_detail::expectCount(TotalMemBlobs, Snap.DeviceMemory.size(),
+                                 this->Filename, "memory blob");
     for (size_t I = 0; I < TotalMemBlobs; ++I) {
-      auto &Blob = readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
+      auto &Blob =
+          snapshot_detail::readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
       Blob.setMetadata(metadata::fromBuffer(CurrentPtr));
-      applyDiffRanges(CurrentPtr, hostBytes(Blob));
+      snapshot_detail::applyDiffRanges(CurrentPtr,
+                                       snapshot_detail::hostBytes(Blob));
     }
     return Snap;
   }
