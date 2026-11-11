@@ -309,7 +309,12 @@ def build_chunked_allocs_program(
 
 
 @pytest.fixture(params=["full", "reachable"])
-def recorded_execution(request, build_test_program, tmp_path):
+def capture_mode(request):
+    return request.param
+
+
+@pytest.fixture
+def recorded_execution(request, build_test_program, capture_mode, tmp_path):
     """
     Test that 'mneme record <binary>' correctly generates
     a JSON recording file and registers at least one kernel.
@@ -333,7 +338,7 @@ def recorded_execution(request, build_test_program, tmp_path):
         "--record-db-dir",
         str(out_dir),
         "--capture-mode",
-        request.param,
+        capture_mode,
         "--",
         str(binary),
         str(num_elements),
@@ -356,7 +361,7 @@ def recorded_execution(request, build_test_program, tmp_path):
             len(recorded_execution.llvm_files) == 1
         ), "Mneme record should have 1 llvm file"
         assert (
-            recorded_execution.capture_mode == request.param
+            recorded_execution.capture_mode == capture_mode
         ), "Recorded capture mode should match the CLI flag"
         assert (
             len(recorded_execution.kernel_instances.keys()) == 1
