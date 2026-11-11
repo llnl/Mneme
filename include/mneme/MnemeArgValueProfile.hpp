@@ -18,11 +18,13 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
-#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Format.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/xxhash.h>
+
+#include <proteus/impl/Config.h>
+#include <proteus/impl/CoreLLVM.h>
 
 #include "mneme/DeviceTraits.hpp"
 
@@ -221,26 +223,41 @@ inline KernelArgLayout getKernelArgLayout(const llvm::Function &F) {
   return Layout;
 }
 
+// Optimizes the module the way Proteus optimizes the kernel before code
+// generation: the kernel's Proteus optimization level or custom pipeline, with
+// a target machine for the kernel's architecture. HIP RTC hands the module to
+// hiprtc, which applies its own optimization, which is taken as O3.
+inline void optimizeLikeProteus(llvm::Module &M,
+                                const std::string &KernelName) {
+  static proteus::InitLLVMTargets InitTargets;
+  llvm::Function *F = M.getFunction(KernelName);
+  if (!F || !F->hasFnAttribute("target-cpu"))
+    LOG_FATAL("Kernel " + KernelName +
+              " has no target-cpu attribute to optimize its arguments for");
+  std::string Arch = F->getFnAttribute("target-cpu").getValueAsString().str();
+  const proteus::CodeGenerationConfig &CG =
+      proteus::Config::get().getCGConfig(KernelName);
+#if defined(MNEME_ENABLE_HIP)
+  bool IsOptimizedByHiprtc = CG.codeGenOption() == proteus::CodegenOption::RTC;
+#else
+  bool IsOptimizedByHiprtc = false;
+#endif
+  proteus::OptimizationPipelineConfig OptConfig =
+      IsOptimizedByHiprtc ? proteus::OptimizationPipelineConfig(
+                                std::nullopt, '3', CG.codeGenOptLevel())
+                          : proteus::OptimizationPipelineConfig(CG);
+  proteus::optimizeIR(M, Arch, OptConfig);
+}
+
 // Marks the leaves that the kernel cannot read. The captured bitcode is not yet
 // optimized, so every argument still has uses that copy it to the stack; the
-// module is optimized first, which removes the copies of unread bytes. Uses
-// the analysis cannot follow, such as passing the argument to a call that was
-// not inlined, keep every leaf of that argument as read.
+// module is optimized first, as Proteus would optimize it, which removes the
+// copies of unread bytes. Uses the analysis cannot follow, such as passing the
+// argument to a call that was not inlined, keep every leaf of that argument as
+// read.
 inline void markUnreadLeaves(llvm::Module &M, const std::string &KernelName,
                              KernelArgLayout &Layout) {
-  {
-    llvm::LoopAnalysisManager LAM;
-    llvm::FunctionAnalysisManager FAM;
-    llvm::CGSCCAnalysisManager CGAM;
-    llvm::ModuleAnalysisManager MAM;
-    llvm::PassBuilder PB;
-    PB.registerModuleAnalyses(MAM);
-    PB.registerCGSCCAnalyses(CGAM);
-    PB.registerFunctionAnalyses(FAM);
-    PB.registerLoopAnalyses(LAM);
-    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-    PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2).run(M, MAM);
-  }
+  optimizeLikeProteus(M, KernelName);
   llvm::Function *F = M.getFunction(KernelName);
   if (!F || F->arg_size() != Layout.ArgNames.size())
     return;
