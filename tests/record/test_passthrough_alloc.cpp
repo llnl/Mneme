@@ -5,10 +5,10 @@
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 
-// Mneme serves only hipMalloc/cudaMalloc. Memory from the other allocation
-// functions comes from the vendor runtime, and applications may release it
-// with the device free (or the async/host free). Recording must forward those
-// frees instead of aborting on an address it did not allocate.
+// Mneme makes device allocations itself and, on HIP, records managed memory at
+// addresses it picks. All other memory comes from the vendor runtime, and
+// applications may release any of it with the device, async or host free.
+// Recording must forward each free to the right owner instead of aborting.
 
 #include <cstdio>
 
@@ -99,6 +99,11 @@ int main() {
   expectOK(hipFree(P), "hip ext malloc, device free");
   expectOK(hipMemAllocPitch(&P, &Pitch, 1000, 100, 4), "hip mem alloc pitch");
   expectOK(hipFree(P), "hip mem alloc pitch, device free");
+  // HIP also releases managed memory with either host free.
+  expectOK(hipMallocManaged(&P, Size, hipMemAttachGlobal), "hip managed alloc");
+  expectOK(hipHostFree(P), "hip managed alloc, host free");
+  expectOK(hipMallocManaged(&P, Size, hipMemAttachGlobal), "hip managed alloc");
+  expectOK(hipFreeHost(P), "hip managed alloc, free host");
 #else
   skip("hip host malloc, device free");
   skip("hip host malloc, host free");
@@ -106,6 +111,8 @@ int main() {
   skip("hip mem alloc host, host free");
   skip("hip ext malloc, device free");
   skip("hip mem alloc pitch, device free");
+  skip("hip managed alloc, host free");
+  skip("hip managed alloc, free host");
 #endif
 
   printf("Done: %d failures\n", Failures);
@@ -128,4 +135,6 @@ int main() {
 // CHECK: hip mem alloc host, host free: {{OK|SKIPPED}}
 // CHECK: hip ext malloc, device free: {{OK|SKIPPED}}
 // CHECK: hip mem alloc pitch, device free: {{OK|SKIPPED}}
+// CHECK: hip managed alloc, host free: {{OK|SKIPPED}}
+// CHECK: hip managed alloc, free host: {{OK|SKIPPED}}
 // CHECK: Done: 0 failures

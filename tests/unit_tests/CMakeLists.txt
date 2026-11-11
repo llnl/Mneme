@@ -74,3 +74,6 @@ add_test(NAME DeviceKernel::CompareMemory COMMAND CompareMemoryBlob)
 
 BUILD_UNIT_TEST("VASpace" VASpace.cpp)
 add_test(NAME VASpace::FirstFree COMMAND VASpace)
+
+BUILD_UNIT_TEST("ReservedChunks" ReservedChunks.cpp)
+add_test(NAME ChunkAllocator::Reserved COMMAND ReservedChunks)

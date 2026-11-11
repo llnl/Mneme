@@ -96,6 +96,9 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   static constexpr auto DeviceOutOfMemory = hipErrorOutOfMemory;
   // Unit that device address reservations should cover; none on HIP.
   static constexpr uint64_t VABlockSize = 1;
+  // The runtime maps managed memory with a fresh anonymous mmap, which the
+  // record preload hooks to choose the address.
+  static constexpr bool PlacesManagedMemory = true;
 
   static inline void *getRTLib() {
     static void *Lib = loadRTLib("libamdhip64.so");
@@ -482,6 +485,8 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   // allocations in the unreserved part of a block, which then stays reserved
   // after we free ours. Reservations should cover whole blocks.
   static constexpr uint64_t VABlockSize = 32ULL << 20;
+  // Managed memory is not placed, so it is not recorded.
+  static constexpr bool PlacesManagedMemory = false;
 
   static inline void *getRTLib() {
     static void *Lib = loadRTLib("libcudart.so");

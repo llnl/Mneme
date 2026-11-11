@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -32,22 +33,66 @@ __global__ void gather(int **Table, const int *Lens, int NumBufs,
   }
 }
 
-static int *alloc(size_t Bytes) {
+enum class Memory { Device, Managed };
+
+static int *alloc(size_t Bytes, Memory Kind = Memory::Device) {
   void *P = nullptr;
-  if (prefix(Malloc)(&P, Bytes) != prefix(Success)) {
+  prefix(Error_t) EC = prefix(Success);
+  switch (Kind) {
+  case Memory::Device:
+    EC = prefix(Malloc)(&P, Bytes);
+    break;
+#ifdef __ENABLE_HIP__
+  case Memory::Managed:
+    EC = hipMallocManaged(&P, Bytes, hipMemAttachGlobal);
+    break;
+#else
+  default:
+    printf("only HIP records managed memory\n");
+    exit(1);
+#endif
+  }
+  if (EC != prefix(Success)) {
     printf("malloc failed\n");
     exit(1);
   }
   return static_cast<int *>(P);
 }
 
+// Recording captures managed memory only on HIP.
+static Memory bufferMemory(int B) {
+#ifdef __ENABLE_HIP__
+  if (B % 2 == 1)
+    return Memory::Managed;
+#endif
+  return Memory::Device;
+}
+
+// HIP also releases managed memory with either host free, so Which spreads
+// managed buffers over all three frees.
+static void release(void *P, Memory Kind, int Which) {
+#ifdef __ENABLE_HIP__
+  if (Kind == Memory::Managed) {
+    hipError_t EC = Which % 3 == 0   ? hipFree(P)
+                    : Which % 3 == 1 ? hipHostFree(P)
+                                     : hipFreeHost(P);
+    if (EC != hipSuccess) {
+      printf("managed free failed\n");
+      exit(1);
+    }
+    return;
+  }
+#endif
+  prefix(Free)(P);
+}
+
 int main() {
   // Filled and emptied first so chunks are unmapped and their addresses reused.
   std::vector<void *> Churn;
   for (int I = 0; I < 3000; ++I)
-    Churn.push_back(alloc(4096));
-  for (void *P : Churn)
-    prefix(Free)(P);
+    Churn.push_back(alloc(4096, bufferMemory(I)));
+  for (int I = 0; I < 3000; ++I)
+    release(Churn[I], bufferMemory(I), I / 2);
 
   // Freed before the launch, so the first recorded blob of its chunk is not
   // page aligned.
@@ -59,16 +104,22 @@ int main() {
   std::vector<int *> Dropped;
   for (int B = 0; B < NumBufs; ++B) {
     Lens[B] = 7 + B * 53;
-    Bufs[B] = alloc(Lens[B] * sizeof(int));
+    Memory Kind = bufferMemory(B);
+    Bufs[B] = alloc(Lens[B] * sizeof(int), Kind);
     std::vector<int> H(Lens[B]);
     for (int I = 0; I < Lens[B]; ++I)
       H[I] = B * 1000 + I;
-    prefix(Memcpy)(Bufs[B], H.data(), H.size() * sizeof(int),
-                   prefix(MemcpyHostToDevice));
-    Dropped.push_back(alloc(100 + B * 11));
+    // The host fills managed buffers itself, so only the launch snapshot sees
+    // their contents.
+    if (Kind == Memory::Device)
+      prefix(Memcpy)(Bufs[B], H.data(), H.size() * sizeof(int),
+                     prefix(MemcpyHostToDevice));
+    else
+      std::copy(H.begin(), H.end(), Bufs[B]);
+    Dropped.push_back(alloc(100 + B * 11, bufferMemory(B + 1)));
   }
   for (int B = 0; B < NumBufs; B += 3)
-    prefix(Free)(Dropped[B]);
+    release(Dropped[B], bufferMemory(B + 1), B / 6);
 
   int *Big = alloc(3 << 20);
   std::vector<int> HBig((3 << 20) / sizeof(int), 5);

@@ -4,6 +4,7 @@
 #include "mneme/MnemeKernelInfo.hpp"
 #include "mneme/MnemeLaunchTimer.hpp"
 #include "mneme/MnemeLogger.hpp"
+#include "mneme/MnemeManagedPlacement.hpp"
 #include "mneme/MnemeMemory.hpp"
 #include "mneme/MnemePageManager.hpp"
 #include "mneme/MnemeRecordScope.hpp"
@@ -33,12 +34,22 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   std::unique_ptr<LaunchTimer<VendorTypes>> Timer;
   RecordDatabase DB;
   llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
-  // Allocations served by the vendor runtime (managed, pinned, pitched,
-  // stream-ordered, ...). They are not captured, but the application may
-  // release them with the device free, which must then be forwarded.
+  // Allocations served by the vendor runtime (pinned, pitched, stream-ordered,
+  // managed where Mneme cannot place it, ...). They are not captured, but the
+  // application may release them with the device free, which must then be
+  // forwarded.
   llvm::DenseSet<void *> PassthroughAllocs;
+  // Managed allocations that the vendor runtime made at an address Mneme
+  // chose, with the mapping the runtime made for each. They are captured like
+  // Mneme's own blobs, but the runtime keeps owning and releasing their memory.
+  llvm::DenseMap<void *, ManagedMapping> ManagedBlobs;
   std::unique_ptr<PageManager<VendorTypes>> PM;
-  std::unique_ptr<ChunkAllocator<VendorTypes>> Packer;
+  std::unique_ptr<DeviceChunkSource<VendorTypes>> DeviceChunks;
+  std::unique_ptr<ChunkAllocator> DevicePacker;
+  // Address space for the mappings behind managed allocations; null unless
+  // managed allocations can be placed.
+  std::unique_ptr<ReservedChunkSource<VendorTypes>> ReservedChunks;
+  std::unique_ptr<ChunkAllocator> ReservedPacker;
   bool WarnedUnpacked = false;
 
   // The exit handler that drains the timer is registered on the first timed
@@ -62,21 +73,46 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     if (DeviceID == -1)
       Runtime.origGetDeviceID(&DeviceID);
     PM = std::make_unique<PageManager<VendorTypes>>();
-    Packer = std::make_unique<ChunkAllocator<VendorTypes>>(
-        *PM, DeviceID, Config::get().ChunkSize);
+    DeviceChunks =
+        std::make_unique<DeviceChunkSource<VendorTypes>>(*PM, DeviceID);
+    DevicePacker = std::make_unique<ChunkAllocator>(*DeviceChunks,
+                                                    Config::get().ChunkSize);
+    if (MnemeDeviceRT::PlacesManagedMemory) {
+      ReservedChunks = std::make_unique<ReservedChunkSource<VendorTypes>>(*PM);
+      ReservedPacker = std::make_unique<ChunkAllocator>(
+          *ReservedChunks, Config::get().ChunkSize);
+    }
     return *PM;
+  }
+
+  // Captures the memory at Ptr from now on. Managed is the runtime's mapping
+  // when Ptr is a managed allocation.
+  void addBlob(void *Ptr, uint64_t ActualSize, uint64_t Size,
+               std::optional<ManagedMapping> Managed = std::nullopt) {
+    MnemeMemoryBlob<VendorTypes> Blob(ActualSize, nullptr, Size);
+    Blob.mapInto(Ptr);
+    AllocatedBlobs.insert({Ptr, std::move(Blob)});
+    if (Managed)
+      ManagedBlobs.insert({Ptr, *Managed});
+  }
+
+  // Releases the blob at Ptr and stops capturing its memory.
+  DeviceError_t dropBlob(void *Ptr) {
+    auto It = AllocatedBlobs.find(Ptr);
+    auto ret = It->second.release();
+    AllocatedBlobs.erase(It);
+    ManagedBlobs.erase(Ptr);
+    return ret;
   }
 
   // The caller must first wait for work that may still use the memory.
   DeviceError_t releaseBlob(void *ptr) {
-    auto It = AllocatedBlobs.find(ptr);
-    auto &Blob = It->second;
+    const auto &Blob = AllocatedBlobs.find(ptr)->second;
+    uint64_t ActualSize = Blob.getActualSize();
     LOG_DEBUG("Intercepted device Free PTR:{} SIZE:{} ACTUALSIZE:{}", ptr,
-              Blob.getSize(), Blob.getActualSize());
-    auto ret = Blob.release();
-    if (Packer->packs(Blob.getSize()))
-      Packer->release(ptr, Blob.getActualSize());
-    AllocatedBlobs.erase(It);
+              Blob.getSize(), ActualSize);
+    auto ret = dropBlob(ptr);
+    DevicePacker->release(ptr, ActualSize);
     return ret;
   }
 
@@ -116,6 +152,69 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     auto ret = launchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     if (Started)
       Timer->end(*Started, ret);
+    return ret;
+  }
+
+  // Makes a managed allocation of size bytes at *ptr with the runtime's own
+  // managed malloc, with its mapping placed where replay can map it again, and
+  // captures it.
+  DeviceError_t captureManagedAlloc(void **ptr, size_t size,
+                                    unsigned int flags) {
+    const char *api = MnemeDeviceRT::getManagedMallocFnName();
+    getOrCreatePageManager();
+    DeviceError_t ret;
+    ManagedMapping Placed;
+    {
+      PlaceManagedMmap Placement(*ReservedPacker, size);
+      ret = Runtime.origMallocManaged(ptr, size, flags);
+      Placed = Placement.placed();
+    }
+    if (ret != MnemeDeviceRT::DeviceSuccess)
+      return ret;
+    if (!Placed.contains(*ptr, size))
+      LOG_FATAL("{} returned PTR:{} SIZE:{} outside the mapping Mneme placed "
+                "at {} SIZE:{}; this runtime does not map the allocation with "
+                "its own anonymous mmap, so Mneme cannot record it",
+                api, *ptr, size, reinterpret_cast<void *>(Placed.Start),
+                Placed.Size);
+
+    addBlob(*ptr, DevicePacker->actualSize(size), size, Placed);
+    LOG_DEBUG("Intercepted {} PTR:{} SIZE:{} MAPPING:{} MAPPINGSIZE:{}", api,
+              *ptr, size, reinterpret_cast<void *>(Placed.Start), Placed.Size);
+    return ret;
+  }
+
+  // Frees a captured managed allocation with Free, the runtime's own free
+  // named api, which must unmap its mapping before returning so that Mneme can
+  // keep the addresses reserved and reuse them.
+  template <typename FreeFn>
+  DeviceError_t releaseManagedBlob(void *ptr, const char *api, FreeFn Free) {
+    ManagedMapping Mapping = ManagedBlobs.lookup(ptr);
+    DeviceError_t ret;
+    bool WasUnmapped;
+    {
+      ReserveOnManagedMunmap Reserve(Mapping);
+      ret = Free();
+      WasUnmapped = Reserve.wasUnmapped();
+    }
+    if (ret != MnemeDeviceRT::DeviceSuccess) {
+      if (WasUnmapped)
+        LOG_FATAL("{} failed after unmapping PTR:{} MAPPING:{} SIZE:{}, so "
+                  "Mneme can no longer record it",
+                  api, ptr, reinterpret_cast<void *>(Mapping.Start),
+                  Mapping.Size);
+      return ret;
+    }
+    if (!WasUnmapped)
+      LOG_FATAL("{} did not unmap the mapping at {} SIZE:{} of PTR:{} before "
+                "returning, so Mneme cannot keep its addresses reserved and "
+                "cannot record managed memory with this runtime",
+                api, reinterpret_cast<void *>(Mapping.Start), Mapping.Size,
+                ptr);
+    LOG_DEBUG("Forwarded free of captured managed allocation PTR:{}", ptr);
+    dropBlob(ptr);
+    ReservedPacker->release(reinterpret_cast<void *>(Mapping.Start),
+                            ReservedPacker->actualSize(Mapping.Size));
     return ret;
   }
 
@@ -170,40 +269,29 @@ public:
       return ret;
     }
 
-    auto &Pages = getOrCreatePageManager();
+    getOrCreatePageManager();
 
-    MnemeMemoryBlob<VendorTypes> MemBlob;
-    if (Packer->packs(size)) {
-      uint64_t ActualSize = Packer->actualSize(size);
-      void *Addr = Packer->allocate(ActualSize);
-      if (Addr) {
-        MemBlob = MnemeMemoryBlob<VendorTypes>(ActualSize, nullptr, size);
-        MemBlob.mapInto(Addr);
-      }
-    } else {
-      if (!WarnedUnpacked) {
-        LOG_WARN("Mapping {}-byte allocation separately; raise "
-                 "MNEME_CHUNK_SIZE to pack it",
-                 size);
-        WarnedUnpacked = true;
-      }
-      Pages.mapAddr(size, [&](const auto &R) {
-        MemBlob = MnemeMemoryBlob<VendorTypes>(R.Size, nullptr, size);
-        return MemBlob.mapFixed(R.Addr, R.Addr, R.Size, R.Align, DeviceID);
-      });
+    uint64_t ActualSize = DevicePacker->actualSize(size);
+    if (!DevicePacker->packs(ActualSize) && !WarnedUnpacked) {
+      LOG_WARN("Mapping {}-byte allocation separately; raise "
+               "MNEME_CHUNK_SIZE to pack it",
+               size);
+      WarnedUnpacked = true;
     }
-
-    *ptr = MemBlob.getBlobAddr();
+    *ptr = DevicePacker->allocate(ActualSize);
     if (!*ptr)
       return MnemeDeviceRT::DeviceOutOfMemory;
+    addBlob(*ptr, ActualSize, size);
     LOG_DEBUG("Intercepted Device Malloc PTR:{} SIZE:{} ACTUALSIZE:{}", *ptr,
-              size, MemBlob.getActualSize());
-    AllocatedBlobs.insert({*ptr, std::move(MemBlob)});
+              size, ActualSize);
     return MnemeDeviceRT::DeviceSuccess;
   }
 
   DeviceError_t rtManagedMalloc(void **ptr, size_t size,
                                 unsigned int flags) override {
+    if (MnemeDeviceRT::PlacesManagedMemory && size != 0)
+      return captureManagedAlloc(ptr, size, flags);
+
     auto ret = Runtime.origMallocManaged(ptr, size, flags);
     if (ret == MnemeDeviceRT::DeviceSuccess)
       trackPassthroughAlloc(*ptr, size,
@@ -233,6 +321,9 @@ public:
       LOG_WARN("Mneme was instructed to de-allocate nullptr..., skipping");
       return MnemeDeviceRT::DeviceSuccess;
     }
+    if (ManagedBlobs.contains(ptr))
+      return releaseManagedBlob(ptr, MnemeDeviceRT::getDeviceFreeFnName(),
+                                [&] { return Runtime.origFreeDevice(ptr); });
     if (!AllocatedBlobs.contains(ptr)) {
       if (PassthroughAllocs.erase(ptr)) {
         LOG_DEBUG("Forwarding free of vendor runtime allocation PTR:{}", ptr);
@@ -253,6 +344,10 @@ public:
   }
 
   DeviceError_t rtFreeAsync(void *ptr, DeviceStream_t stream) override {
+    if (ManagedBlobs.contains(ptr))
+      return releaseManagedBlob(ptr, MnemeDeviceRT::getAsyncFreeFnName(), [&] {
+        return Runtime.origFreeAsync(ptr, stream);
+      });
     if (AllocatedBlobs.contains(ptr)) {
       // Mneme releases its memory right away, so first wait for the work
       // queued on the stream that may still use it. The sync fails during
@@ -274,6 +369,9 @@ public:
   }
 
   DeviceError_t rtHostFree(void *ptr) override {
+    if (ManagedBlobs.contains(ptr))
+      return releaseManagedBlob(ptr, MnemeDeviceRT::getPinnedFreeFnName(),
+                                [&] { return Runtime.origFreeHost(ptr); });
     PassthroughAllocs.erase(ptr);
     auto ret = Runtime.origFreeHost(ptr);
     LOG_DEBUG("Free pinned address:{}", ptr);
@@ -362,7 +460,16 @@ public:
       }
     }
 
-    Packer.reset();
+    DevicePacker.reset();
+    DeviceChunks.reset();
+    // The runtime still owns these allocations and may touch or unmap them
+    // after Mneme is gone, so their reserved chunks must stay mapped.
+    if (!ManagedBlobs.empty()) {
+      (void)ReservedPacker.release();
+      (void)ReservedChunks.release();
+    }
+    ReservedPacker.reset();
+    ReservedChunks.reset();
     PM.reset();
 
     LOG_DEBUG("RecordingBackend destructor complete");
