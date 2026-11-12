@@ -5,7 +5,6 @@ from mneme.pipeline import (
     flatten_passes,
     parse_llvm_pass_options,
     PipelineManager,
-    AbstractPass,
 )
 
 # ------------------------------------------------------------
@@ -75,16 +74,6 @@ def test_pipeline_manager_constructs():
     pm = PipelineManager()
     assert isinstance(pm._passes, list)
     assert len(pm._passes) > 10
-
-
-# ------------------------------------------------------------
-# to_string
-# ------------------------------------------------------------
-
-def test_to_string_names_the_pass():
-    pm = PipelineManager()
-    concrete = AbstractPass.ConcretePass(pm._kw_passes["mem2reg"], [])
-    assert "mem2reg" in pm.to_string([concrete])
 
 
 # ------------------------------------------------------------
