@@ -367,6 +367,27 @@ def test_specialize_dims_assume(gpu_backend):
         ))
 
 
+@pytest.mark.parametrize("pipeline", ["O3", "default<O3>", "function(sroa),default<O3>"])
+def test_check_pass_pipeline_accepts_valid_pipeline(gpu_backend, native_arch, pipeline):
+    mod = parse_assembly(_get_add_ir(gpu_backend))
+
+    jit.check_pass_pipeline(mod, native_arch, pipeline, 3)
+
+
+@pytest.mark.parametrize(
+    "pipeline, llvm_error",
+    [
+        ("defualt<O3>", "unknown pass name 'defualt<O3>'"),
+        ("sroa,globalopt", "unknown function pass 'globalopt'"),
+    ],
+)
+def test_optimize_raises_on_invalid_pipeline(gpu_backend, native_arch, pipeline, llvm_error):
+    mod = parse_assembly(_get_add_ir(gpu_backend))
+
+    with pytest.raises(jit.InvalidPassPipelineError, match=llvm_error):
+        jit.optimize(mod, native_arch, pipeline, 3)
+
+
 def test_specialize_dims(gpu_backend, native_arch):
     # 1. Construct minimal IR
     IR = _get_complex_ir(gpu_backend)

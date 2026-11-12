@@ -34,6 +34,7 @@ from mneme.llvm import utils
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
 from mneme.profile import init_profiler
+from mneme.proteus import jit
 from mneme.recorded_execution import RecordedExecution
 from mneme.replay_executor import BaseExecutor, noop_verifies_warning
 from mneme.tuning.cli import add_tune_args, run_tune
@@ -861,6 +862,10 @@ class Replay(BaseExecutor):
         # We currently link all LLVM IR modules together
         # NOTE: Does this break with externals on CUDA?
         root_ir = executor.link_ir()
+        # Check before open() loads the snapshots onto the device.
+        jit.check_pass_pipeline(
+            root_ir, executor.device_arch, executor.passes, executor.codegen_opt
+        )
 
         with executor as Memory:
             if executor.noop_verifies:

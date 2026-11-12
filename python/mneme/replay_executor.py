@@ -823,7 +823,12 @@ class TuneWorker(BaseExecutor):
         """
         result = ExperimentResult()
         result.start_time = datetime.now(timezone.utc).isoformat()
-        generated_ir = super()._execute(result, config, ir_module)
+        try:
+            generated_ir = super()._execute(result, config, ir_module)
+        except jit.InvalidPassPipelineError as error:
+            result.failed = True
+            result.error = str(error)
+            generated_ir = ir_module
         result.end_time = datetime.now(timezone.utc).isoformat()
         result.gpu_id = self.device_id
         return result, generated_ir

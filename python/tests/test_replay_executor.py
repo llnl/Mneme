@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import pytest
 
+from mneme.tuning.session import classify_result
+
 
 MODULE_PATH = "mneme.replay_executor"
 
@@ -801,6 +803,37 @@ def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
     assert res.end_time != ""
     assert res.executed is True
     assert isinstance(out_ir, FakeModule)
+
+
+def test_tuneworker_process_payload_reports_invalid_pipeline(monkeypatch):
+    mod = _reload_with_identity_decorators(monkeypatch)
+
+    kernel = FakeKernelDescr()
+    rec = FakeRecordedExecution(kernel)
+
+    monkeypatch.setattr(
+        mod.RecordedExecution, "from_json", staticmethod(lambda _: rec), raising=True
+    )
+    monkeypatch.setattr(mod, "set_device", lambda _: None, raising=True)
+    monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
+    monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
+    monkeypatch.setattr(mod, "init_profiler", lambda: None, raising=True)
+
+    worker = mod.TuneWorker(record_db="x", record_id="rid", device_id=2, iterations=3)
+
+    def fake_execute(self, result, cfg, ir_mod):
+        raise mod.jit.InvalidPassPipelineError(
+            "Invalid LLVM pass pipeline 'defualt<O3>': unknown pass name 'defualt<O3>'"
+        )
+
+    monkeypatch.setattr(mod.BaseExecutor, "_execute", fake_execute, raising=True)
+
+    res, _ = worker.process_payload(FakeModule("root"), mod.ExperimentConfiguration())
+
+    assert res.failed is True
+    assert res.executed is False
+    assert "unknown pass name 'defualt<O3>'" in res.error
+    assert classify_result(res) == "compile_error"
 
 
 @pytest.mark.parametrize("short_circuit", [False, True])
