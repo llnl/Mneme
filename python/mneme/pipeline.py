@@ -686,12 +686,11 @@ class PipelineManager:
     ``PipelineManager`` provides:
       - Parsing of an LLVM "available passes" listing into structured pass objects.
       - Accessors for available pass names and "concrete pass" templates.
-      - Conversion between internal pass representations and LLVM pipeline strings.
+      - Conversion of internal pass representations to LLVM pipeline strings.
 
     The main external APIs used by Mneme are:
       - :meth:`get_passes`
       - :meth:`get_concrete_passes`
-      - :meth:`from_string`
       - :meth:`to_string`
 
     Notes
@@ -1001,63 +1000,6 @@ class PipelineManager:
             random_selection.append(sp)
 
         return random_selection
-
-    def from_string(self, str_pipeline: str) -> List[AbstractPass.ConcretePass]:
-        """
-        Parse an LLVM pipeline string into a list of concrete pass objects.
-
-        This parser strips known adaptor wrappers (e.g., ``function(...)``,
-        ``cgscc(...)``, ``loop(...)``, ``loop-mssa(...)``) and reconstructs concrete
-        passes with any explicitly provided options.
-
-        Parameters
-        ----------
-        str_pipeline : str
-            LLVM pipeline string.
-
-        Returns
-        -------
-        list[AbstractPass.ConcretePass]
-            Parsed concrete pass sequence.
-
-        Raises
-        ------
-        RuntimeError
-            If an unknown pass name is encountered.
-        """
-
-        def get_options(names):
-            if len(names) <= 1:
-                return []
-
-            opts_str = names[1:]
-            opts_str[-1] = opts_str[-1].rstrip(">")
-            options = (
-                [opts_str[-1].strip() for opt in opts_str[-1].split(",")]
-                if opts_str
-                else []
-            )
-            return options
-
-        # We first replace all adaptors.
-        no_funtion = str_pipeline.replace("function<eager-inv>(", "")
-        no_funtion = no_funtion.replace("function(", "")
-        no_cgscc = no_funtion.replace("cgscc(", "")
-        no_loop = no_cgscc.replace("loop(", "")
-        no_loopmassa = no_loop.replace("loop-mssa(", "")
-        no_loopnest = no_loopmassa.replace("loopnest", "")
-        passes = no_loopnest.replace(")", "").split(",")
-
-        passes = [x for x in passes if x != ""]
-        pipeline = []
-        for p in passes:
-            names = p.split("<", 1)
-            name = names[0]
-            options = get_options(names)
-            if name not in self._kw_passes:
-                raise RuntimeError(f"Unknown pass {name}")
-            pipeline.append(AbstractPass.ConcretePass(self._kw_passes[name], options))
-        return pipeline
 
     @staticmethod
     def to_string(passes: List[AbstractPass.ConcretePass]) -> str:

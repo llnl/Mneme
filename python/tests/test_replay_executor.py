@@ -243,7 +243,9 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
     kernel = FakeKernelDescr(prologue=Snapshot(), epilogue=Snapshot())
     _patch_executor_init_dependencies(monkeypatch, mod, FakeRecordedExecution(kernel))
     calls = []
-    monkeypatch.setattr(mod.jit, "optimize", lambda *args: calls.append("optimize"))
+    monkeypatch.setattr(
+        mod.jit, "optimize", lambda _mod, _arch, passes, _cg: calls.append(passes)
+    )
 
     def codegen(*args):
         calls.append("codegen")
@@ -264,7 +266,9 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
 
     assert result.verified is verified
     assert result.executed
-    assert calls == ["optimize", "codegen", "optimize", "codegen"]
+    assert calls == [
+        "default<O3>", "codegen", "purge-autoinit", "default<O3>", "codegen"
+    ]
     assert [call[-1] for call in function.profile_calls] == [1, 5]
     names = {event["name"] for event in events}
     assert {
@@ -750,7 +754,7 @@ def test_execute_orchestrates_verification_and_tracked_run(
     expected_builds = [(False, "default<O3>")]
     if not timing_skipped:
         expected_runs.append((True, 5))
-        expected_builds.append((True, "purge-autoinit,default<O3>"))
+        expected_builds.append((True, "default<O3>"))
     assert run_calls == expected_runs
     assert build_calls == expected_builds
     assert res.executed is (not timing_skipped)

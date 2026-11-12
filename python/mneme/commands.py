@@ -15,7 +15,7 @@ The CLI supports workflows for:
 
 This module is intentionally procedural and orchestration-focused.
 It delegates all heavy lifting to lower-level Mneme components such as
-``RecordedExecution``, ``BaseExecutor``, and ``PipelineManager``.
+``RecordedExecution`` and ``BaseExecutor``.
 """
 
 import argparse
@@ -33,7 +33,6 @@ import yaml
 from mneme.llvm import utils
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
-from mneme.pipeline import PipelineManager
 from mneme.profile import init_profiler
 from mneme.recorded_execution import RecordedExecution
 from mneme.replay_executor import BaseExecutor, noop_verifies_warning
@@ -766,20 +765,6 @@ class Replay(BaseExecutor):
         self.output_ll = kwargs.pop("output_ll", None)
 
         super().__init__(*args, **kwargs)
-        self.pass_manager = PipelineManager()
-        if self.passes not in (
-            "default<O3>",
-            "default<O2>",
-            "default<O1>",
-            "default<O0>",
-            "default<Os>",
-            "default<Oz>",
-        ):
-            self.passes = self.pass_manager.to_string(
-                self.pass_manager.from_string(self.passes)
-            )
-        else:
-            self.passes = self.passes
         self._db = None
 
     def get_mneme_config(self, passes):
@@ -792,7 +777,7 @@ class Replay(BaseExecutor):
         Parameters
         ----------
         passes
-            Either a parsed pipeline (list of concrete passes) or a default pipeline string.
+            Textual LLVM pass pipeline, as accepted by ``opt -passes``.
 
         Returns
         -------

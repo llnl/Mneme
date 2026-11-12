@@ -32,7 +32,6 @@ TuneWorker:
 """
 
 import os
-from dataclasses import replace
 from datetime import datetime, timezone
 from multiprocessing import Event, Queue
 from pathlib import Path
@@ -340,6 +339,7 @@ class BaseExecutor:
         result: ExperimentResult,
         config: ExperimentConfiguration,
         ir_module: ModuleRef,
+        purge_autoinit: bool,
     ):
         """
         Apply optimization passes to the IR module prior to code generation.
@@ -363,6 +363,8 @@ class BaseExecutor:
         ir_module : ModuleRef
             The intermediate representation to be optimized. The module is mutated
             in-place by the underlying JIT subsystem.
+        purge_autoinit : bool
+            Whether to run the ``purge-autoinit`` pass before ``config.passes``.
 
         Notes
         -----
@@ -372,6 +374,10 @@ class BaseExecutor:
         * This method does not return a value; the IR module is modified directly.
 
         """
+        # purge-autoinit runs as its own pipeline because prefixing it to
+        # config.passes would change how LLVM infers the nesting of a flat list.
+        if purge_autoinit:
+            jit.optimize(ir_module, self.device_arch, "purge-autoinit", config.codegen_opt)
         jit.optimize(ir_module, self.device_arch, config.passes, config.codegen_opt)
 
     @tracing.traced("ir.codegen")
@@ -528,7 +534,8 @@ class BaseExecutor:
             The module may be transformed during preprocessing and optimization.
         track : bool
             Whether to collect profiling information and resource-usage statistics
-            during the build process.
+            during the build process. A tracked build also runs ``purge-autoinit``
+            before the optimization pipeline.
 
         Returns
         -------
@@ -542,7 +549,7 @@ class BaseExecutor:
         * Tracking is optional but recommended when performance analysis is needed.
         """
         self._preprocess_ir(result, config, ir_module, profile=track)
-        self._optimize(result, config, ir_module, profile=track)
+        self._optimize(result, config, ir_module, purge_autoinit=track, profile=track)
         mem_buffer = self._codegen(result, config, ir_module, profile=track)
         if track:
             result.obj_size = mem_buffer.get_size()
@@ -654,7 +661,7 @@ class BaseExecutor:
            match, allowing the system to validate kernel determinism and correctness.
 
         2. **IR sanitization**
-           The tracked build prepends the ``purge-autoinit`` pass to the optimization
+           The tracked build runs the ``purge-autoinit`` pass before the optimization
            pipeline, removing automatically inserted Clang initialization code. Only
            IR regions explicitly marked by Clang are removed to avoid disturbing user
            code.
@@ -713,15 +720,14 @@ class BaseExecutor:
             )
             return ver_mod
 
-        # NOTE: 2-3. Build and run with tracking on. The tracked build prepends the
+        # NOTE: 2-3. Build and run with tracking on. The tracked build first runs the
         # purge-autoinit pass (registered via Proteus' JIT pass plugin API) to strip
         # the Clang-inserted auto-init memsets; verification above ran without it.
         with tracing.span("execution.tracked"):
             with tracing.span("ir.clone"):
                 ir_module = ir_module.clone()
 
-            tracked_config = replace(config, passes=f"purge-autoinit,{config.passes}")
-            mem_buffer = self._build(result, tracked_config, ir_module, True)
+            mem_buffer = self._build(result, config, ir_module, True)
             self._run(
                 result, config, mem_buffer, self.prologue, self.epilogue,
                 False, True, self._iterations + self._warmup,
