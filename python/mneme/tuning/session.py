@@ -21,6 +21,7 @@ from mneme.async_executor import AsyncReplayExecutor
 from mneme.convert import export_proteus_tuned_kernel
 from mneme.futures import EvalFuture
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
+from mneme.pass_plugins import resolve_pass_plugins
 from mneme.recorded_execution import RecordedExecution
 from mneme.replay_executor import noop_verifies_warning
 from mneme.tuning.builtin_spaces import (
@@ -106,6 +107,7 @@ class TuneOptions:
     codegen_opt_range: Optional[str] = None
     fixed_codegen_opt: Optional[int] = None
     codegen_method: Optional[str] = None
+    pass_plugins: List[str] = field(default_factory=list)
 
     # Configuration-space controls.
     specialize_space: Optional[str] = None
@@ -173,6 +175,8 @@ class TuneOptions:
         
         if self.warmup < 0:
             raise ValueError("--warmup must be a non-negative integer")
+
+        self.pass_plugins = list(resolve_pass_plugins(self.pass_plugins))
 
     def __post_init__(self):
         self._validate()
@@ -362,8 +366,8 @@ class TuningSession:
         """Use ``ir`` for this session, optionally on a caller-owned executor.
 
         A borrowed executor must target the same record, instance, worker count,
-        iterations, and warmup as ``options``. The caller remains responsible for
-        shutting it down.
+        iterations, warmup, and pass plugins as ``options``. The caller remains
+        responsible for shutting it down.
         """
         self.options = options
         self._borrowed_executor = executor
@@ -459,6 +463,7 @@ class TuningSession:
             "pipeline_file",
             "codegen_opt_range",
             "fixed_codegen_opt",
+            "pass_plugins",
             "specialize_space",
             "specialize_dims_space",
             "launch_bounds_space",
@@ -466,6 +471,7 @@ class TuningSession:
             "require_verified_baseline",
         ]
         existing.setdefault("launch_candidates", [])
+        existing.setdefault("pass_plugins", [])
         existing.setdefault("require_verified_baseline", True)
         mismatched = [
             key for key in immutable if existing.get(key) != resolved_config.get(key)
@@ -886,6 +892,8 @@ class TuningSession:
         self._print(f"  sampler:         {self.options.sampler}")
         self._print(f"  trials:          {self.options.trials}")
         self._print(f"  workers:         {self.options.workers}")
+        if self.options.pass_plugins:
+            self._print(f"  pass plugins:    {', '.join(self.options.pass_plugins)}")
 
         # A caller may reuse an executor across tuning sessions with different IR.
         owns_executor = self._borrowed_executor is None
@@ -899,6 +907,7 @@ class TuningSession:
                 num_workers=self.options.workers,
                 warmup=self.options.warmup,
                 short_circuit=self.options.short_circuit,
+                pass_plugins=self.options.pass_plugins,
             )
         # the main tuning phase
         try:
@@ -1109,6 +1118,9 @@ class TuningSession:
             self._print("")
             self._print("Use with full application:")
             self._print(f"  export PROTEUS_TUNED_KERNELS={Path(self.options.proteus_output).resolve()}")
+            if self.options.pass_plugins:
+                self._print("  Register each --pass-plugin with proteus::registerJITPassPlugin(path)")
+                self._print("  in the application so the exported pipelines can name its passes.")
         
         return 0
 

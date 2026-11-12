@@ -769,6 +769,32 @@ def test_execute_orchestrates_verification_and_tracked_run(
     ex.close()
 
 
+def test_executor_registers_pass_plugins_after_its_own(monkeypatch, tmp_path):
+    mod = _reload_with_identity_decorators(monkeypatch)
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
+    )
+    registered = []
+    monkeypatch.setattr(mod.jit, "register_pass_plugin", registered.append)
+    library = tmp_path / "libMyPass.so"
+    library.touch()
+
+    mod.BaseExecutor(record_db="x", record_id="rid", pass_plugins=[str(library)])
+
+    assert registered == [mod.MNEME_PASS_PLUGIN_LIB, str(library)]
+
+
+def test_executor_rejects_missing_pass_plugin(monkeypatch, tmp_path):
+    mod = _reload_with_identity_decorators(monkeypatch)
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
+    )
+    missing = tmp_path / "libMissing.so"
+
+    with pytest.raises(ValueError, match=f"Pass plugin library not found: {missing}"):
+        mod.BaseExecutor(record_db="x", record_id="rid", pass_plugins=[str(missing)])
+
+
 def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
     mod = _reload_with_identity_decorators(monkeypatch)
 
@@ -851,17 +877,25 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
     set_ir_calls = []
     process_ir_names = []
     worker_options = []
+    pass_plugins = ["/path/libMyPass.so"]
 
     class FakeWorker:
         def __init__(
-            self, record_db, record_id, device_id, iterations, warmup, short_circuit
+            self,
+            record_db,
+            record_id,
+            device_id,
+            iterations,
+            warmup,
+            short_circuit,
+            pass_plugins,
         ):
             self.record_db = record_db
             self.record_id = record_id
             self.device_id = device_id
             self.iterations = iterations
             self.warmup = warmup
-            worker_options.append(short_circuit)
+            worker_options.append((short_circuit, pass_plugins))
 
         def link_ir(self):
             return FakeModule("root_ir")
@@ -919,9 +953,10 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
         results_db_dir=str(tmp_path),
         state=state,
         short_circuit=short_circuit,
+        pass_plugins=pass_plugins,
     )
 
-    assert worker_options == [short_circuit]
+    assert worker_options == [(short_circuit, pass_plugins)]
     assert state.set_called == 1
     assert set_ir_calls == ["replacement asm"]
     assert process_ir_names == ["replacement_ir_clone"]
@@ -950,7 +985,14 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
 
     class FakeWorker:
         def __init__(
-            self, record_db, record_id, device_id, iterations, warmup, short_circuit
+            self,
+            record_db,
+            record_id,
+            device_id,
+            iterations,
+            warmup,
+            short_circuit,
+            pass_plugins,
         ):
             self.device_id = device_id
 

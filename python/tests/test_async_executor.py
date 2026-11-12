@@ -513,3 +513,30 @@ def test_async_executor_shutdown(monkeypatch):
 
     exe.shutdown()
     assert len(joined) == 2
+
+
+def test_worker_process_receives_pass_plugins(monkeypatch):
+    import mneme.async_executor as mod
+
+    spawned = []
+
+    def make_process(target=None, args=(), daemon=None):
+        spawned.append(args)
+        return DummyProcess()
+
+    monkeypatch.setattr(mod.threading, "Thread", NoopThread, raising=True)
+    monkeypatch.setattr(mod, "Process", make_process)
+    monkeypatch.setattr(mod, "ProcessEvent", DummyEvent)
+    monkeypatch.setattr(mod, "ProcessQueue", DummyQueue)
+
+    pass_plugins = ["/path/libMyPass.so"]
+    mod.AsyncReplayExecutor(
+        record_db="db",
+        record_id="rid",
+        iterations=3,
+        results_db_dir="/tmp",
+        num_workers=2,
+        pass_plugins=pass_plugins,
+    )
+
+    assert [args[-1] for args in spawned] == [pass_plugins, pass_plugins]
