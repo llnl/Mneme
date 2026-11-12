@@ -184,6 +184,7 @@ def _reload_with_identity_decorators(monkeypatch):
     mod = importlib.import_module(MODULE_PATH)
     mod = importlib.reload(mod)
     monkeypatch.setattr(mod.jit, "register_pass_plugin", lambda path: None, raising=True)
+    monkeypatch.setattr(mod.jit, "check_pass_plugin", lambda path: None, raising=True)
     return mod
 
 

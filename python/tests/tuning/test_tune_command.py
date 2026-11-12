@@ -166,6 +166,7 @@ def test_tune_cli_gives_pass_plugins_to_the_executor(monkeypatch, tmp_path):
         return FakeExecutor()
 
     monkeypatch.setattr(tune_session, "AsyncReplayExecutor", make_executor)
+    monkeypatch.setattr("mneme.proteus.jit.check_pass_plugin", lambda path: None)
     library = tmp_path / "libMyPass.so"
     library.touch()
 
@@ -200,6 +201,23 @@ def test_tune_cli_rejects_missing_pass_plugin(tmp_path, capsys):
 
     assert tune_cli.run_tune(args, None) == 3
     assert f"Pass plugin library not found: {missing}" in capsys.readouterr().out
+
+
+def test_tune_config_rejects_pass_plugins_string(tmp_path, capsys):
+    from mneme.tuning import cli as tune_cli
+
+    config = tmp_path / "tune.json"
+    config.write_text(json.dumps({"pass_plugins": "libMyPass.so"}))
+    parser = tune_cli.argparse.ArgumentParser(prog="mneme tune")
+    tune_cli.add_tune_args(parser)
+    args = parser.parse_args(
+        ["-rdb", "db.json", "-rid", "rid", "--trials", "3", "--config", str(config)]
+    )
+
+    assert tune_cli.run_tune(args, None) == 3
+    assert "Pass plugins must be a list of paths, not the string 'libMyPass.so'" in (
+        capsys.readouterr().out
+    )
 
 
 def test_tune_config_round_trips_candidate_and_baseline_options(tmp_path):

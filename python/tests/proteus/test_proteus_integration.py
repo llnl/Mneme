@@ -388,6 +388,17 @@ def test_optimize_raises_on_invalid_pipeline(gpu_backend, native_arch, pipeline,
         jit.optimize(mod, native_arch, pipeline, 3)
 
 
+def test_check_pass_plugin(tmp_path):
+    from mneme.llvm._lib_path_config import MNEME_PASS_PLUGIN_LIB
+
+    jit.check_pass_plugin(MNEME_PASS_PLUGIN_LIB)
+
+    not_a_plugin = tmp_path / "libNotAPlugin.so"
+    not_a_plugin.write_text("not a shared library")
+    with pytest.raises(ValueError, match=f"Cannot load pass plugin '{not_a_plugin}'"):
+        jit.check_pass_plugin(str(not_a_plugin))
+
+
 def test_specialize_dims(gpu_backend, native_arch):
     # 1. Construct minimal IR
     IR = _get_complex_ir(gpu_backend)

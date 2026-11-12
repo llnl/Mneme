@@ -10,6 +10,8 @@ can be named in ``ExperimentConfiguration.passes`` like any built-in pass.
 import os
 from typing import Optional, Sequence, Tuple
 
+from mneme.proteus import jit
+
 
 def resolve_pass_plugins(libraries: Optional[Sequence[str]]) -> Tuple[str, ...]:
     """
@@ -18,12 +20,19 @@ def resolve_pass_plugins(libraries: Optional[Sequence[str]]) -> Tuple[str, ...]:
     Raises
     ------
     ValueError
-        If any library does not exist.
+        If ``libraries`` is a single string, or any library does not exist or
+        cannot be loaded as an LLVM pass plugin.
     """
+    if isinstance(libraries, str):
+        raise ValueError(
+            f"Pass plugins must be a list of paths, not the string '{libraries}'"
+        )
     resolved = tuple(os.path.abspath(path) for path in libraries or ())
     missing = [path for path in resolved if not os.path.isfile(path)]
     if missing:
         raise ValueError(f"Pass plugin library not found: {', '.join(missing)}")
+    for path in resolved:
+        jit.check_pass_plugin(path)
     return resolved
 
 
