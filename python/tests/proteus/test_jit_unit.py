@@ -55,6 +55,8 @@ def test_pruneIR_raises_for_wrong_type():
 def test_optimize_invokes_ffi_correctly():
     m = DummyModule()
     with patch("mneme.proteus.jit.ffi.lib", autospec=True) as fake_lib:
+        fake_lib.ProteusPY_isValidPassPipeline = MagicMock(return_value=True)
+        fake_lib.LLVMPY_DisposeString = MagicMock()
         fn = fake_lib.ProteusPY_optimize = MagicMock()
         jit.optimize(m, "gfx942", "default<O2>", 2)
         assert fn.called

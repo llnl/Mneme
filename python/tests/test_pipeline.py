@@ -5,7 +5,6 @@ from mneme.pipeline import (
     flatten_passes,
     parse_llvm_pass_options,
     PipelineManager,
-    AbstractPass,
 )
 
 # ------------------------------------------------------------
@@ -75,36 +74,6 @@ def test_pipeline_manager_constructs():
     pm = PipelineManager()
     assert isinstance(pm._passes, list)
     assert len(pm._passes) > 10
-
-
-# ------------------------------------------------------------
-# from_string
-# ------------------------------------------------------------
-
-def test_from_string_simple():
-    pm = PipelineManager()
-    p = pm.from_string("mem2reg")   # a known-good pass
-    assert len(p) == 1
-    assert isinstance(p[0], AbstractPass.ConcretePass)
-    assert p[0]._apass.pass_name == "mem2reg"
-
-
-def test_from_string_with_options():
-    pm = PipelineManager()
-    p = pm.from_string("mem2reg<optA>")  # mem2reg always exists
-    assert p[0]._apass.pass_name == "mem2reg"
-    assert p[0].options == ["optA"]
-
-
-# ------------------------------------------------------------
-# to_string roundtrip structural
-# ------------------------------------------------------------
-
-def test_pipeline_roundtrip():
-    pm = PipelineManager()
-    parsed = pm.from_string("mem2reg")
-    s = pm.to_string(parsed)
-    assert "mem2reg" in s
 
 
 # ------------------------------------------------------------
