@@ -140,6 +140,10 @@ class TuneOptions:
     def to_config_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["results_dir"] = self.resolved_results_dir()
+        data["pass_plugin_hashes"] = [
+            hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            for path in self.pass_plugins
+        ]
         if self.proteus_enabled and self.proteus_output is None:
             data["proteus_output"] = str(Path(data["results_dir"]) / "proteus_tuned_kernels.json")
         return data
@@ -464,6 +468,7 @@ class TuningSession:
             "codegen_opt_range",
             "fixed_codegen_opt",
             "pass_plugins",
+            "pass_plugin_hashes",
             "specialize_space",
             "specialize_dims_space",
             "launch_bounds_space",
@@ -472,6 +477,7 @@ class TuningSession:
         ]
         existing.setdefault("launch_candidates", [])
         existing.setdefault("pass_plugins", [])
+        existing.setdefault("pass_plugin_hashes", [])
         existing.setdefault("require_verified_baseline", True)
         mismatched = [
             key for key in immutable if existing.get(key) != resolved_config.get(key)
