@@ -151,6 +151,75 @@ def test_tune_cli_wires_options(monkeypatch):
     assert captured["options"].proteus_enabled is False
 
 
+def test_tune_cli_gives_pass_plugins_to_the_executor(monkeypatch, tmp_path):
+    from mneme.tuning import cli as tune_cli
+
+    monkeypatch.setattr(
+        tune_session.RecordedExecution,
+        "from_json",
+        staticmethod(lambda _: FakeRecorded()),
+    )
+    executor_kwargs = {}
+
+    def make_executor(**kwargs):
+        executor_kwargs.update(kwargs)
+        return FakeExecutor()
+
+    monkeypatch.setattr(tune_session, "AsyncReplayExecutor", make_executor)
+    monkeypatch.setattr("mneme.proteus.jit.check_pass_plugin", lambda path: None)
+    library = tmp_path / "libMyPass.so"
+    library.touch()
+
+    parser = tune_cli.argparse.ArgumentParser(prog="mneme tune")
+    tune_cli.add_tune_args(parser)
+    args = parser.parse_args([
+        "-rdb", "db.json",
+        "-rid", "rid",
+        "--space-preset", "compiler",
+        "--sampler", "exhaustive",
+        "--passes", "default<O3>",
+        "--codegen-opt-range", "3:3",
+        "--results-dir", str(tmp_path / "results"),
+        "--no-proteus-output",
+        "--quiet",
+        "--pass-plugin", str(library),
+    ])
+
+    assert tune_cli.run_tune(args, None) == 0
+    assert executor_kwargs["pass_plugins"] == [str(library)]
+
+
+def test_tune_cli_rejects_missing_pass_plugin(tmp_path, capsys):
+    from mneme.tuning import cli as tune_cli
+
+    parser = tune_cli.argparse.ArgumentParser(prog="mneme tune")
+    tune_cli.add_tune_args(parser)
+    missing = tmp_path / "libMissing.so"
+    args = parser.parse_args(
+        ["-rdb", "db.json", "-rid", "rid", "--trials", "3", "--pass-plugin", str(missing)]
+    )
+
+    assert tune_cli.run_tune(args, None) == 3
+    assert f"Pass plugin library not found: {missing}" in capsys.readouterr().out
+
+
+def test_tune_config_rejects_pass_plugins_string(tmp_path, capsys):
+    from mneme.tuning import cli as tune_cli
+
+    config = tmp_path / "tune.json"
+    config.write_text(json.dumps({"pass_plugins": "libMyPass.so"}))
+    parser = tune_cli.argparse.ArgumentParser(prog="mneme tune")
+    tune_cli.add_tune_args(parser)
+    args = parser.parse_args(
+        ["-rdb", "db.json", "-rid", "rid", "--trials", "3", "--config", str(config)]
+    )
+
+    assert tune_cli.run_tune(args, None) == 3
+    assert "Pass plugins must be a list of paths, not the string 'libMyPass.so'" in (
+        capsys.readouterr().out
+    )
+
+
 def test_tune_config_round_trips_candidate_and_baseline_options(tmp_path):
     from mneme.tuning import cli as tune_cli
 

@@ -145,6 +145,27 @@ This is the primary “compiler pipeline” knob for replay and tuning. It
 controls the sequence of transformations applied to the recorded LLVM IR
 before code generation.
 
+### Pass plugins
+
+`--pass-plugin PATH` loads an LLVM pass plugin for use in Mneme replays. 
+You can repeat
+the option to load several plugins. Once a plugin is loaded, its passes can be
+named in `passes` like any built-in pass:
+
+```bash
+mneme replay -rdb kernel.json --pass-plugin ./libMyPass.so "my-pass,default<O3>"
+
+mneme tune -rdb kernel.json -rid <id> --sampler random --trials 50 \
+  --pass-plugin ./libMyPass.so --passes "my-pass,default<O3>" "my-pass,default<O2>"
+```
+
+From Python, pass the library paths as `pass_plugins=` to `AsyncReplayExecutor`
+or to a `BaseExecutor` subclass. Each tuning worker loads the plugins itself.
+
+When `mneme tune` exports its results to Proteus JSON, the exported pipelines
+keep the plugin's pass names. Before using that file in the full application,
+register each plugin there with `proteus::registerJITPassPlugin(path)`.
+
 ### Codegen optimization level
 
 - `codegen_opt: int`  
@@ -207,6 +228,9 @@ The `mneme replay` CLI flags correspond directly to configuration fields:
 - `--codegen-opt` → `codegen_opt`
 - `--codegen-method` → `codegen_method`
 
+`--pass-plugin` configures the executor rather than `ExperimentConfiguration`;
+see [Pass plugins](#pass-plugins).
+
 For CLI details, see **[Usage → CLI](../usage/cli.md)**.
 
 ---
@@ -236,4 +260,3 @@ Replay configuration is Mneme’s “control surface” for:
 A single recorded kernel instance can be replayed under many
 configurations, but each configuration remains explicit, serializable,
 and reproducible.
-

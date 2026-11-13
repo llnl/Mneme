@@ -3,6 +3,7 @@ import json
 from dataclasses import fields
 from typing import Any, Dict
 
+from mneme.pass_plugins import add_pass_plugin_args
 from mneme.tuning.session import TuneOptions, TuningSession, merge_config_and_args
 
 
@@ -250,6 +251,7 @@ def add_tune_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Codegen method metadata to attach to the built-in search space.",
     )
+    add_pass_plugin_args(compiler)
 
     config_space = parser.add_argument_group("configuration-space controls")
     config_space.add_argument(
@@ -337,6 +339,8 @@ def _options_from_mapping(data: Dict[str, Any]) -> TuneOptions:
     
     if kwargs.get("space_arg") is None:
         kwargs["space_arg"] = []
+    if kwargs.get("pass_plugins") is None:
+        kwargs["pass_plugins"] = []
     return TuneOptions(**kwargs)
 
 

@@ -91,6 +91,8 @@ ffi.lib.ProteusPY_getCodegenMethod.argtypes = []
 ffi.lib.ProteusPY_getCodegenMethod.restype = c_char_p
 
 ffi.lib.ProteusPY_registerJITPassPlugin.argtypes = [c_char_p]
+ffi.lib.ProteusPY_loadPassPlugin.argtypes = [c_char_p, POINTER(c_char_p)]
+ffi.lib.ProteusPY_loadPassPlugin.restype = c_bool
 ffi.lib.ProteusPY_isValidPassPipeline.argtypes = [
     ffi.LLVMModuleRef,
     c_char_p,
@@ -120,6 +122,23 @@ def register_pass_plugin(path: str):
         Filesystem path to the plugin shared library.
     """
     ffi.lib.ProteusPY_registerJITPassPlugin(_encode_string(path))
+
+
+def check_pass_plugin(path: str):
+    """
+    Check that LLVM can load the pass plugin shared library at ``path``.
+
+    Loading fails, for example, when the file is not an LLVM pass plugin or
+    the plugin was built against a different LLVM version than Proteus.
+
+    Raises
+    ------
+    ValueError
+        If LLVM cannot load the plugin.
+    """
+    with ffi.OutputString() as message:
+        if not ffi.lib.ProteusPY_loadPassPlugin(_encode_string(path), message):
+            raise ValueError(f"Cannot load pass plugin '{path}': {message}")
 
 
 def pruneIR(mod: ModuleRef):

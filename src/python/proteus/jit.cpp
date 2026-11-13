@@ -290,4 +290,13 @@ API_EXPORT(void)
 ProteusPY_registerJITPassPlugin(const char *Path) {
   proteus::registerJITPassPlugin(Path);
 }
+
+API_EXPORT(bool)
+ProteusPY_loadPassPlugin(const char *Path, const char **OutMsg) {
+  auto Plugin = llvm::PassPlugin::Load(Path);
+  if (Plugin)
+    return true;
+  *OutMsg = LLVMPY_CreateString(llvm::toString(Plugin.takeError()).c_str());
+  return false;
+}
 }

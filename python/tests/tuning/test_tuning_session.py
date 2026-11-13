@@ -290,6 +290,26 @@ def test_resume_rejects_changed_ir_hash(monkeypatch, tmp_path, capsys):
     assert "ir_hash" in capsys.readouterr().out
 
 
+def test_resume_rejects_changed_pass_plugin(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(TuningSession, "_load_record", lambda self: (FakeRecorded(), FakeKernel()))
+    monkeypatch.setattr(TuningSession, "_build_space", lambda self, kernel: (GridSpace(), {}))
+    monkeypatch.setattr("mneme.proteus.jit.check_pass_plugin", lambda path: None)
+    plugin = tmp_path / "libMyPass.so"
+    plugin.write_bytes(b"first build")
+    options = dict(pass_plugins=[str(plugin)], print_space=True)
+
+    first = TuningSession(make_options(tmp_path, **options))
+    assert first.run() == 0
+
+    same = TuningSession(make_options(tmp_path, resume=True, **options))
+    assert same.run() == 0
+
+    plugin.write_bytes(b"second build")
+    rebuilt = TuningSession(make_options(tmp_path, resume=True, **options))
+    assert rebuilt.run() == EXIT_INVALID_CONFIGURATION
+    assert "pass_plugin_hashes" in capsys.readouterr().out
+
+
 def test_run_rejects_legacy_checkpoint_with_new_ir(tmp_path, capsys):
     # check that we reject when checkpoint is missing ir
     session = TuningSession(make_options(tmp_path, resume=True), ir="new IR")

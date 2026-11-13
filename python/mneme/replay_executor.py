@@ -35,7 +35,7 @@ import os
 from datetime import datetime, timezone
 from multiprocessing import Event, Queue
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 from mneme import tracing
 from mneme.device import (
@@ -50,6 +50,7 @@ from mneme.llvm.buffer import MemBufferRef
 from mneme.llvm.module import ModuleRef, parse_assembly, parse_bitcode
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
+from mneme.pass_plugins import resolve_pass_plugins
 from mneme.profile import init_profiler
 from mneme.proteus import jit
 from mneme.recorded_execution import RecordedExecution, MemStateRef
@@ -122,7 +123,8 @@ class BaseExecutor:
         iterations: int = 3,
         device_id: int = 0,
         warmup: int = 2,
-        short_circuit: bool = False
+        short_circuit: bool = False,
+        pass_plugins: Sequence[str] = (),
     ):
         self.record_db = record_db
         self.device_id = device_id
@@ -157,6 +159,8 @@ class BaseExecutor:
             f"GPU Affinity of process was set to device:{self.device_id} out of {self.num_devices}"
         )
         jit.register_pass_plugin(MNEME_PASS_PLUGIN_LIB)
+        for library in resolve_pass_plugins(pass_plugins):
+            jit.register_pass_plugin(library)
         with tracing.span(
             "metadata.record",
             lambda: {
@@ -846,6 +850,7 @@ class TuneWorker(BaseExecutor):
         state: Event,
         warmup: int = 2,
         short_circuit: bool = False,
+        pass_plugins: Sequence[str] = (),
     ):
         """
         Worker process entry point: initialize resources and serve requests from a queue.
@@ -892,6 +897,8 @@ class TuneWorker(BaseExecutor):
             Number of warmup iterations to execute before measured iterations.
         short_circuit : bool
             Whether to skip timing runs when verification fails.
+        pass_plugins : Sequence[str]
+            Pass plugin libraries the worker loads into the JIT.
         results_db_dir : str
             Directory where per-worker logs and output artifacts are written.
         state : multiprocessing.Event
@@ -922,6 +929,7 @@ class TuneWorker(BaseExecutor):
             iterations=iterations,
             warmup=warmup,
             short_circuit=short_circuit,
+            pass_plugins=pass_plugins,
         )
         # Open GPU memory, setup prologue epilogue and create a single
         # LLVM IR file to start working on optimizations

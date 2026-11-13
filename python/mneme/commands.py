@@ -33,6 +33,7 @@ import yaml
 from mneme.llvm import utils
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
+from mneme.pass_plugins import add_pass_plugin_args
 from mneme.profile import init_profiler
 from mneme.proteus import jit
 from mneme.recorded_execution import RecordedExecution
@@ -739,6 +740,8 @@ class Replay(BaseExecutor):
             help="Skip timing runs if verification fails",
             default=False,
         )
+
+        add_pass_plugin_args(parser)
 
         parser.set_defaults(func=Replay.run)
 
