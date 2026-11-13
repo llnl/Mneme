@@ -14,7 +14,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [
   {name = "Konstantinos Parasyris", email = "koparasy@gmail.com"},
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: OS Independent"
