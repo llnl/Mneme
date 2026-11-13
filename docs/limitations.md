@@ -5,15 +5,18 @@ These are not fundamental design blockers, but they may affect certain applicati
 
 ---
 
-## 1. Only `cudaMalloc`/`hipMalloc` Memory Is Recorded
+## 1. Only `cudaMalloc`/`hipMalloc` and HIP Managed Memory Are Recorded
 
-Mneme records only memory allocated with `cudaMalloc`/`hipMalloc`. Memory from
-other allocation functions, such as managed, pinned host, pitched, or
-stream-ordered memory, is not recorded, so kernels that access it may fail
-during replay.
+Mneme records memory allocated with `cudaMalloc`/`hipMalloc`. On HIP, it also
+records managed memory from `hipMallocManaged`. This support is experimental.
+
+Memory from other allocation functions, such as pinned host, pitched, or
+stream-ordered memory, is not recorded, and neither is managed memory on CUDA.
+Kernels that access it may fail during replay.
 
 **Workaround:**
-- Allocate memory that recorded kernels access with `cudaMalloc`/`hipMalloc`.
+- Allocate memory that recorded kernels access with `cudaMalloc`/`hipMalloc`,
+  or with `hipMallocManaged` on HIP.
 
 ---
 

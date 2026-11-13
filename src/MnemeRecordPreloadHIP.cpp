@@ -1,9 +1,12 @@
 #include "MnemeAnnotationRuntime.hpp"
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeCrashHandler.hpp"
+#include "mneme/MnemeKernelTimer.hpp"
 #include "mneme/MnemeLLVMUtils.hpp"
 #include "mneme/MnemeLogger.hpp"
+#include "mneme/MnemeManagedPlacement.hpp"
 #include "mneme/MnemeRecord.hpp"
+#include <cstdlib>
 #include <dlfcn.h>
 #include <hip/hip_runtime.h>
 #include <utility>
@@ -31,7 +34,48 @@ public:
 
 using Recorder = MnemeRecorderHIPPreload;
 
+// Runs at load time because the HIP runtime may initialize before the first
+// intercepted call, and rocprofiler-sdk must be configured before that. It
+// parses only MNEME_KERNEL_TIMING and ignores an invalid value, because Config
+// would throw here, where the program cannot catch it; Config reports it later.
+__attribute__((constructor)) static void configureKernelTiming() {
+  const char *Timing = std::getenv("MNEME_KERNEL_TIMING");
+  if (Timing && parseKernelTiming(Timing) == KernelTimingType::Profiler)
+    KernelTimer::configure();
+}
+
+using MmapFn = void *(*)(void *, size_t, int, int, int, off_t);
+using MunmapFn = int (*)(void *, size_t);
+
+template <typename Fn> static Fn lookupLibc(const char *Name) {
+  auto F = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, Name));
+  if (!F)
+    LOG_FATAL("Could not find the libc {}: {}", Name, dlerror());
+  return F;
+}
+
 extern "C" {
+// Hooked so that Mneme can place the memory the runtime maps for managed
+// allocations.
+void *mmap(void *Addr, size_t Len, int Prot, int Flags, int Fd,
+           off_t Off) noexcept {
+  static MmapFn Orig = lookupLibc<MmapFn>("mmap");
+  return placeOrForwardMmap(Orig, Addr, Len, Prot, Flags, Fd, Off);
+}
+
+void *mmap64(void *Addr, size_t Len, int Prot, int Flags, int Fd,
+             off_t Off) noexcept {
+  static MmapFn Orig = lookupLibc<MmapFn>("mmap64");
+  return placeOrForwardMmap(Orig, Addr, Len, Prot, Flags, Fd, Off);
+}
+
+// Hooked so that the addresses of managed memory the runtime frees stay
+// reserved for Mneme to reuse.
+int munmap(void *Addr, size_t Len) noexcept {
+  static MunmapFn Orig = lookupLibc<MunmapFn>("munmap");
+  return reserveOrForwardMunmap(Orig, Addr, Len);
+}
+
 hipError_t hipMalloc(void **ptr, size_t size) {
   LOG_DEBUG("Entering Mneme to Malloc pointer of size : {}", size);
   auto &mneme = MnemeRecorderHIPPreload::instance();
@@ -148,8 +192,8 @@ hipError_t hipGetDevice(int *deviceID) {
 }
 
 hipError_t __proteus_launch_kernel(void *Kernel, dim3 GridDim, dim3 BlockDim,
-                               void **KernelArgs, uint64_t ShmemSize,
-                               void *Stream) {
+                                   void **KernelArgs, uint64_t ShmemSize,
+                                   void *Stream) {
   LOG_DEBUG("Enetering Mneme to launch kernel");
   auto &mneme = MnemeRecorderHIPPreload::instance();
   return mneme.rtLaunchKernel(Kernel, GridDim, BlockDim, KernelArgs, ShmemSize,

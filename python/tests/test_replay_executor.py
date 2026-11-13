@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import pytest
 
+from mneme.tuning.session import classify_result
+
 
 MODULE_PATH = "mneme.replay_executor"
 
@@ -182,6 +184,7 @@ def _reload_with_identity_decorators(monkeypatch):
     mod = importlib.import_module(MODULE_PATH)
     mod = importlib.reload(mod)
     monkeypatch.setattr(mod.jit, "register_pass_plugin", lambda path: None, raising=True)
+    monkeypatch.setattr(mod.jit, "check_pass_plugin", lambda path: None, raising=True)
     return mod
 
 
@@ -243,7 +246,9 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
     kernel = FakeKernelDescr(prologue=Snapshot(), epilogue=Snapshot())
     _patch_executor_init_dependencies(monkeypatch, mod, FakeRecordedExecution(kernel))
     calls = []
-    monkeypatch.setattr(mod.jit, "optimize", lambda *args: calls.append("optimize"))
+    monkeypatch.setattr(
+        mod.jit, "optimize", lambda _mod, _arch, passes, _cg: calls.append(passes)
+    )
 
     def codegen(*args):
         calls.append("codegen")
@@ -264,7 +269,9 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
 
     assert result.verified is verified
     assert result.executed
-    assert calls == ["optimize", "codegen", "optimize", "codegen"]
+    assert calls == [
+        "default<O3>", "codegen", "purge-autoinit", "default<O3>", "codegen"
+    ]
     assert [call[-1] for call in function.profile_calls] == [1, 5]
     names = {event["name"] for event in events}
     assert {
@@ -750,7 +757,7 @@ def test_execute_orchestrates_verification_and_tracked_run(
     expected_builds = [(False, "default<O3>")]
     if not timing_skipped:
         expected_runs.append((True, 5))
-        expected_builds.append((True, "purge-autoinit,default<O3>"))
+        expected_builds.append((True, "default<O3>"))
     assert run_calls == expected_runs
     assert build_calls == expected_builds
     assert res.executed is (not timing_skipped)
@@ -761,6 +768,32 @@ def test_execute_orchestrates_verification_and_tracked_run(
     assert out_ir is not ir
 
     ex.close()
+
+
+def test_executor_registers_pass_plugins_after_its_own(monkeypatch, tmp_path):
+    mod = _reload_with_identity_decorators(monkeypatch)
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
+    )
+    registered = []
+    monkeypatch.setattr(mod.jit, "register_pass_plugin", registered.append)
+    library = tmp_path / "libMyPass.so"
+    library.touch()
+
+    mod.BaseExecutor(record_db="x", record_id="rid", pass_plugins=[str(library)])
+
+    assert registered == [mod.MNEME_PASS_PLUGIN_LIB, str(library)]
+
+
+def test_executor_rejects_missing_pass_plugin(monkeypatch, tmp_path):
+    mod = _reload_with_identity_decorators(monkeypatch)
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
+    )
+    missing = tmp_path / "libMissing.so"
+
+    with pytest.raises(ValueError, match=f"Pass plugin library not found: {missing}"):
+        mod.BaseExecutor(record_db="x", record_id="rid", pass_plugins=[str(missing)])
 
 
 def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
@@ -799,6 +832,37 @@ def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
     assert isinstance(out_ir, FakeModule)
 
 
+def test_tuneworker_process_payload_reports_invalid_pipeline(monkeypatch):
+    mod = _reload_with_identity_decorators(monkeypatch)
+
+    kernel = FakeKernelDescr()
+    rec = FakeRecordedExecution(kernel)
+
+    monkeypatch.setattr(
+        mod.RecordedExecution, "from_json", staticmethod(lambda _: rec), raising=True
+    )
+    monkeypatch.setattr(mod, "set_device", lambda _: None, raising=True)
+    monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
+    monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
+    monkeypatch.setattr(mod, "init_profiler", lambda: None, raising=True)
+
+    worker = mod.TuneWorker(record_db="x", record_id="rid", device_id=2, iterations=3)
+
+    def fake_execute(self, result, cfg, ir_mod):
+        raise mod.jit.InvalidPassPipelineError(
+            "Invalid LLVM pass pipeline 'defualt<O3>': unknown pass name 'defualt<O3>'"
+        )
+
+    monkeypatch.setattr(mod.BaseExecutor, "_execute", fake_execute, raising=True)
+
+    res, _ = worker.process_payload(FakeModule("root"), mod.ExperimentConfiguration())
+
+    assert res.failed is True
+    assert res.executed is False
+    assert "unknown pass name 'defualt<O3>'" in res.error
+    assert classify_result(res) == "compile_error"
+
+
 @pytest.mark.parametrize("short_circuit", [False, True])
 def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circuit):
     events, flushes = _capture_tracing(monkeypatch)
@@ -814,17 +878,25 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
     set_ir_calls = []
     process_ir_names = []
     worker_options = []
+    pass_plugins = ["/path/libMyPass.so"]
 
     class FakeWorker:
         def __init__(
-            self, record_db, record_id, device_id, iterations, warmup, short_circuit
+            self,
+            record_db,
+            record_id,
+            device_id,
+            iterations,
+            warmup,
+            short_circuit,
+            pass_plugins,
         ):
             self.record_db = record_db
             self.record_id = record_id
             self.device_id = device_id
             self.iterations = iterations
             self.warmup = warmup
-            worker_options.append(short_circuit)
+            worker_options.append((short_circuit, pass_plugins))
 
         def link_ir(self):
             return FakeModule("root_ir")
@@ -882,9 +954,10 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
         results_db_dir=str(tmp_path),
         state=state,
         short_circuit=short_circuit,
+        pass_plugins=pass_plugins,
     )
 
-    assert worker_options == [short_circuit]
+    assert worker_options == [(short_circuit, pass_plugins)]
     assert state.set_called == 1
     assert set_ir_calls == ["replacement asm"]
     assert process_ir_names == ["replacement_ir_clone"]
@@ -913,7 +986,14 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
 
     class FakeWorker:
         def __init__(
-            self, record_db, record_id, device_id, iterations, warmup, short_circuit
+            self,
+            record_db,
+            record_id,
+            device_id,
+            iterations,
+            warmup,
+            short_circuit,
+            pass_plugins,
         ):
             self.device_id = device_id
 

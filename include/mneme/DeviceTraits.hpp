@@ -96,6 +96,9 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   static constexpr auto DeviceOutOfMemory = hipErrorOutOfMemory;
   // Unit that device address reservations should cover; none on HIP.
   static constexpr uint64_t VABlockSize = 1;
+  // The runtime maps managed memory with a fresh anonymous mmap, which the
+  // record preload hooks to choose the address.
+  static constexpr bool PlacesManagedMemory = true;
 
   static inline void *getRTLib() {
     static void *Lib = loadRTLib("libamdhip64.so");
@@ -153,6 +156,14 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
   }
 
   static hipError_t DeviceSynchronize() { return hipDeviceSynchronize(); }
+
+  // Whether Stream is capturing is meaningful only when the error is success.
+  static std::pair<hipError_t, bool>
+  deviceStreamIsCapturing(hipStream_t Stream) {
+    hipStreamCaptureStatus Status;
+    hipError_t Err = hipStreamIsCapturing(Stream, &Status);
+    return {Err, Err == hipSuccess && Status == hipStreamCaptureStatusActive};
+  }
 
   static std::string GetDeviceArch() {
     DeviceHandle_t Dev;
@@ -474,6 +485,8 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   // allocations in the unreserved part of a block, which then stays reserved
   // after we free ours. Reservations should cover whole blocks.
   static constexpr uint64_t VABlockSize = 32ULL << 20;
+  // Managed memory is not placed, so it is not recorded.
+  static constexpr bool PlacesManagedMemory = false;
 
   static inline void *getRTLib() {
     static void *Lib = loadRTLib("libcudart.so");
@@ -569,6 +582,14 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   }
 
   static DeviceError_t DeviceSynchronize() { return cudaDeviceSynchronize(); }
+
+  // Whether Stream is capturing is meaningful only when the error is success.
+  static std::pair<DeviceError_t, bool>
+  deviceStreamIsCapturing(DeviceStream_t Stream) {
+    cudaStreamCaptureStatus Status;
+    DeviceError_t Err = cudaStreamIsCapturing(Stream, &Status);
+    return {Err, Err == cudaSuccess && Status == cudaStreamCaptureStatusActive};
+  }
 
   static std::string GetDeviceArch() {
     DeviceHandle_t Dev;

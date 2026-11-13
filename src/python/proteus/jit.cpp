@@ -240,8 +240,63 @@ API_EXPORT(const char*) ProteusPY_getCodegenMethod(){
   return getRTCMethod();
 }
 
+// Parses the pipeline that ProteusPY_optimize would run without running it,
+// because a parse failure inside optimizeIR aborts the process.
+API_EXPORT(bool)
+ProteusPY_isValidPassPipeline(LLVMModuleRef Mod, const char *DeviceArch,
+                              const char *OptLevel, unsigned CodegenOptLevel,
+                              const char **OutMsg) {
+  auto Fail = [OutMsg](const std::string &Msg) {
+    *OutMsg = LLVMPY_CreateString(Msg.c_str());
+    return false;
+  };
+
+  auto OptConfig = makeOptimizationConfig(OptLevel, CodegenOptLevel);
+  const auto Plugins = getJITPassPluginConfigs();
+  if (!OptConfig.PassPipeline &&
+      !proteus::detail::hasJITPassPluginInsertion(Plugins))
+    return true;
+
+  auto TM = proteus::detail::createTargetMachine(*llvm::unwrap(Mod), DeviceArch,
+                                                 CodegenOptLevel);
+  if (auto Err = TM.takeError())
+    return Fail(llvm::toString(std::move(Err)));
+
+  std::vector<llvm::PassPlugin> LoadedPlugins;
+  for (const auto &Path :
+       proteus::detail::getUniqueJITPassPluginPaths(Plugins)) {
+    auto Plugin = llvm::PassPlugin::Load(Path);
+    if (!Plugin)
+      return Fail("Failed to load JIT pass plugin '" + Path +
+                  "': " + llvm::toString(Plugin.takeError()));
+    LoadedPlugins.push_back(std::move(*Plugin));
+  }
+
+  llvm::PassBuilder PB(TM->get());
+  for (const auto &Plugin : LoadedPlugins)
+    Plugin.registerPassBuilderCallbacks(PB);
+
+  const std::string Pipeline =
+      proteus::detail::normalizeOptimizationPassPipeline(
+          proteus::detail::composeOptimizationPassPipeline(
+              OptConfig.PassPipeline, OptConfig.OptLevel, Plugins));
+  llvm::ModulePassManager Passes;
+  if (auto Err = PB.parsePassPipeline(Passes, Pipeline))
+    return Fail(llvm::toString(std::move(Err)));
+  return true;
+}
+
 API_EXPORT(void)
 ProteusPY_registerJITPassPlugin(const char *Path) {
   proteus::registerJITPassPlugin(Path);
+}
+
+API_EXPORT(bool)
+ProteusPY_loadPassPlugin(const char *Path, const char **OutMsg) {
+  auto Plugin = llvm::PassPlugin::Load(Path);
+  if (Plugin)
+    return true;
+  *OutMsg = LLVMPY_CreateString(llvm::toString(Plugin.takeError()).c_str());
+  return false;
 }
 }

@@ -32,11 +32,10 @@ TuneWorker:
 """
 
 import os
-from dataclasses import replace
 from datetime import datetime, timezone
 from multiprocessing import Event, Queue
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 from mneme import tracing
 from mneme.device import (
@@ -51,6 +50,7 @@ from mneme.llvm.buffer import MemBufferRef
 from mneme.llvm.module import ModuleRef, parse_assembly, parse_bitcode
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
+from mneme.pass_plugins import resolve_pass_plugins
 from mneme.profile import init_profiler
 from mneme.proteus import jit
 from mneme.recorded_execution import RecordedExecution, MemStateRef
@@ -123,7 +123,8 @@ class BaseExecutor:
         iterations: int = 3,
         device_id: int = 0,
         warmup: int = 2,
-        short_circuit: bool = False
+        short_circuit: bool = False,
+        pass_plugins: Sequence[str] = (),
     ):
         self.record_db = record_db
         self.device_id = device_id
@@ -158,6 +159,8 @@ class BaseExecutor:
             f"GPU Affinity of process was set to device:{self.device_id} out of {self.num_devices}"
         )
         jit.register_pass_plugin(MNEME_PASS_PLUGIN_LIB)
+        for library in resolve_pass_plugins(pass_plugins):
+            jit.register_pass_plugin(library)
         with tracing.span(
             "metadata.record",
             lambda: {
@@ -340,6 +343,7 @@ class BaseExecutor:
         result: ExperimentResult,
         config: ExperimentConfiguration,
         ir_module: ModuleRef,
+        purge_autoinit: bool,
     ):
         """
         Apply optimization passes to the IR module prior to code generation.
@@ -363,6 +367,8 @@ class BaseExecutor:
         ir_module : ModuleRef
             The intermediate representation to be optimized. The module is mutated
             in-place by the underlying JIT subsystem.
+        purge_autoinit : bool
+            Whether to run the ``purge-autoinit`` pass before ``config.passes``.
 
         Notes
         -----
@@ -372,6 +378,10 @@ class BaseExecutor:
         * This method does not return a value; the IR module is modified directly.
 
         """
+        # purge-autoinit runs as its own pipeline because prefixing it to
+        # config.passes would change how LLVM infers the nesting of a flat list.
+        if purge_autoinit:
+            jit.optimize(ir_module, self.device_arch, "purge-autoinit", config.codegen_opt)
         jit.optimize(ir_module, self.device_arch, config.passes, config.codegen_opt)
 
     @tracing.traced("ir.codegen")
@@ -528,7 +538,8 @@ class BaseExecutor:
             The module may be transformed during preprocessing and optimization.
         track : bool
             Whether to collect profiling information and resource-usage statistics
-            during the build process.
+            during the build process. A tracked build also runs ``purge-autoinit``
+            before the optimization pipeline.
 
         Returns
         -------
@@ -542,7 +553,7 @@ class BaseExecutor:
         * Tracking is optional but recommended when performance analysis is needed.
         """
         self._preprocess_ir(result, config, ir_module, profile=track)
-        self._optimize(result, config, ir_module, profile=track)
+        self._optimize(result, config, ir_module, purge_autoinit=track, profile=track)
         mem_buffer = self._codegen(result, config, ir_module, profile=track)
         if track:
             result.obj_size = mem_buffer.get_size()
@@ -654,7 +665,7 @@ class BaseExecutor:
            match, allowing the system to validate kernel determinism and correctness.
 
         2. **IR sanitization**
-           The tracked build prepends the ``purge-autoinit`` pass to the optimization
+           The tracked build runs the ``purge-autoinit`` pass before the optimization
            pipeline, removing automatically inserted Clang initialization code. Only
            IR regions explicitly marked by Clang are removed to avoid disturbing user
            code.
@@ -713,15 +724,14 @@ class BaseExecutor:
             )
             return ver_mod
 
-        # NOTE: 2-3. Build and run with tracking on. The tracked build prepends the
+        # NOTE: 2-3. Build and run with tracking on. The tracked build first runs the
         # purge-autoinit pass (registered via Proteus' JIT pass plugin API) to strip
         # the Clang-inserted auto-init memsets; verification above ran without it.
         with tracing.span("execution.tracked"):
             with tracing.span("ir.clone"):
                 ir_module = ir_module.clone()
 
-            tracked_config = replace(config, passes=f"purge-autoinit,{config.passes}")
-            mem_buffer = self._build(result, tracked_config, ir_module, True)
+            mem_buffer = self._build(result, config, ir_module, True)
             self._run(
                 result, config, mem_buffer, self.prologue, self.epilogue,
                 False, True, self._iterations + self._warmup,
@@ -817,7 +827,12 @@ class TuneWorker(BaseExecutor):
         """
         result = ExperimentResult()
         result.start_time = datetime.now(timezone.utc).isoformat()
-        generated_ir = super()._execute(result, config, ir_module)
+        try:
+            generated_ir = super()._execute(result, config, ir_module)
+        except jit.InvalidPassPipelineError as error:
+            result.failed = True
+            result.error = str(error)
+            generated_ir = ir_module
         result.end_time = datetime.now(timezone.utc).isoformat()
         result.gpu_id = self.device_id
         return result, generated_ir
@@ -835,6 +850,7 @@ class TuneWorker(BaseExecutor):
         state: Event,
         warmup: int = 2,
         short_circuit: bool = False,
+        pass_plugins: Sequence[str] = (),
     ):
         """
         Worker process entry point: initialize resources and serve requests from a queue.
@@ -881,6 +897,8 @@ class TuneWorker(BaseExecutor):
             Number of warmup iterations to execute before measured iterations.
         short_circuit : bool
             Whether to skip timing runs when verification fails.
+        pass_plugins : Sequence[str]
+            Pass plugin libraries the worker loads into the JIT.
         results_db_dir : str
             Directory where per-worker logs and output artifacts are written.
         state : multiprocessing.Event
@@ -911,6 +929,7 @@ class TuneWorker(BaseExecutor):
             iterations=iterations,
             warmup=warmup,
             short_circuit=short_circuit,
+            pass_plugins=pass_plugins,
         )
         # Open GPU memory, setup prologue epilogue and create a single
         # LLVM IR file to start working on optimizations

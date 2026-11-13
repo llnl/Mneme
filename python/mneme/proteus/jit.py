@@ -91,6 +91,20 @@ ffi.lib.ProteusPY_getCodegenMethod.argtypes = []
 ffi.lib.ProteusPY_getCodegenMethod.restype = c_char_p
 
 ffi.lib.ProteusPY_registerJITPassPlugin.argtypes = [c_char_p]
+ffi.lib.ProteusPY_loadPassPlugin.argtypes = [c_char_p, POINTER(c_char_p)]
+ffi.lib.ProteusPY_loadPassPlugin.restype = c_bool
+ffi.lib.ProteusPY_isValidPassPipeline.argtypes = [
+    ffi.LLVMModuleRef,
+    c_char_p,
+    c_char_p,
+    c_uint,
+    POINTER(c_char_p),
+]
+ffi.lib.ProteusPY_isValidPassPipeline.restype = c_bool
+
+
+class InvalidPassPipelineError(ValueError):
+    """Raised when LLVM cannot parse an optimization pass pipeline."""
 
 
 def register_pass_plugin(path: str):
@@ -108,6 +122,23 @@ def register_pass_plugin(path: str):
         Filesystem path to the plugin shared library.
     """
     ffi.lib.ProteusPY_registerJITPassPlugin(_encode_string(path))
+
+
+def check_pass_plugin(path: str):
+    """
+    Check that LLVM can load the pass plugin shared library at ``path``.
+
+    Loading fails, for example, when the file is not an LLVM pass plugin or
+    the plugin was built against a different LLVM version than Proteus.
+
+    Raises
+    ------
+    ValueError
+        If LLVM cannot load the plugin.
+    """
+    with ffi.OutputString() as message:
+        if not ffi.lib.ProteusPY_loadPassPlugin(_encode_string(path), message):
+            raise ValueError(f"Cannot load pass plugin '{path}': {message}")
 
 
 def pruneIR(mod: ModuleRef):
@@ -132,6 +163,59 @@ def pruneIR(mod: ModuleRef):
     if not isinstance(mod, ModuleRef):
         raise TypeError(f"Expecting type of ModuleRef instead got {type(mod)}")
     ffi.lib.ProteusPY_pruneIR(mod)
+
+
+def _check_optimize_args(mod: ModuleRef, codegen_opt_level: int):
+    if not isinstance(mod, ModuleRef):
+        raise TypeError(f"Expecting type of ModuleRef instead got {type(mod)}")
+
+    if not (codegen_opt_level >= 0 and codegen_opt_level <= 3):
+        raise ValueError(
+            f"Expected the codegen_opt_level to be between 0-3 instead got {codegen_opt_level}"
+        )
+
+
+def check_pass_pipeline(
+    mod: ModuleRef, device_arch: str, opt_level: str, codegen_opt_level: int
+):
+    """
+    Check that LLVM can parse the pipeline :func:`optimize` would run.
+
+    The check parses the pipeline with the registered pass plugins and the
+    target of ``mod`` without running it, so it catches unknown or misnested
+    pass names but not errors that passes report while running.
+
+    Parameters
+    ----------
+    mod : ModuleRef
+        LLVM module whose target triple selects the target passes.
+    device_arch : str
+        Target device architecture string (e.g., ``"gfx942"``).
+    opt_level : str
+        LLVM optimization pipeline selector, as accepted by :func:`optimize`.
+    codegen_opt_level : int
+        Backend optimization level in ``[0, 3]``.
+
+    Raises
+    ------
+    InvalidPassPipelineError
+        If LLVM cannot parse the pipeline.
+    """
+    _check_optimize_args(mod, codegen_opt_level)
+    if len(opt_level) == 0:
+        return
+
+    with ffi.OutputString() as message:
+        if not ffi.lib.ProteusPY_isValidPassPipeline(
+            mod,
+            _encode_string(device_arch),
+            _encode_string(opt_level),
+            int(codegen_opt_level),
+            message,
+        ):
+            raise InvalidPassPipelineError(
+                f"Invalid LLVM pass pipeline '{opt_level}': {message}"
+            )
 
 
 def optimize(mod: ModuleRef, device_arch: str, opt_level: str, codegen_opt_level: int):
@@ -160,14 +244,10 @@ def optimize(mod: ModuleRef, device_arch: str, opt_level: str, codegen_opt_level
         If ``mod`` is not a :class:`~mneme.llvm.module.ModuleRef`.
     ValueError
         If ``codegen_opt_level`` is outside ``[0, 3]``.
+    InvalidPassPipelineError
+        If LLVM cannot parse the pipeline.
     """
-    if not isinstance(mod, ModuleRef):
-        raise TypeError(f"Expecting type of ModuleRef instead got {type(mod)}")
-
-    if not (codegen_opt_level >= 0 and codegen_opt_level <= 3):
-        raise ValueError(
-            f"Expected the codegen_opt_level to be between 0-3 instead got {codegen_opt_level}"
-        )
+    check_pass_pipeline(mod, device_arch, opt_level, codegen_opt_level)
     if len(opt_level) == 0:
         return
 

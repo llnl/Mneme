@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from mneme.recorded_execution import (
+    LaunchTimes,
     MemStateRef,
     RecordedExecution,
     SnapshotType,
@@ -439,7 +440,7 @@ def test_to_json_relativizes_in_dir_files_only(tmp_path, layout):
         assert written["instances"]["H"]["Epilogue"] == str(epi_path)
 
 
-def _write_counted_record(tmp_path, **fields):
+def _write_counted_record(tmp_path, instance_fields=None, **fields):
     mod_path = tmp_path / "modA.ll"
     pro_path = tmp_path / "file.pro"
     epi_path = tmp_path / "file.epi"
@@ -462,6 +463,7 @@ def _write_counted_record(tmp_path, **fields):
                 "Occurrences": 3,
                 "Prologue": pro_path.name,
                 "Epilogue": epi_path.name,
+                **(instance_fields or {}),
             }
         },
         **fields,
@@ -494,3 +496,73 @@ def test_recorded_execution_loads_record_without_launch_counts(tmp_path):
     assert r["H"].occ == 3
     d = r.to_dict()
     assert "TotalLaunches" not in d
+
+
+def test_recorded_execution_loads_kernel_timing(tmp_path):
+    time_ns = {"Sum": 60, "Min": 10, "Max": 30}
+    json_path = _write_counted_record(
+        tmp_path,
+        instance_fields={
+            "TimedLaunches": 3,
+            "TimeNs": time_ns,
+            "RecordedLaunchTimeNs": 30,
+        },
+        TotalLaunches=7,
+        TotalTimeNs=100,
+        TimingSource="profiler",
+    )
+
+    r = RecordedExecution.from_json(str(json_path))
+
+    assert r.total_time_ns == 100
+    assert r.timing_source == "profiler"
+    assert r["H"].timed_launches == 3
+    assert r["H"].time_ns == LaunchTimes(sum=60, min=10, max=30)
+    assert r["H"].recorded_launch_time_ns == 30
+
+    out_path = tmp_path / "out.json"
+    r.to_json(str(out_path))
+    written = json.loads(out_path.read_text())
+    assert written["TotalTimeNs"] == 100
+    assert written["TimingSource"] == "profiler"
+    assert written["instances"]["H"]["TimedLaunches"] == 3
+    assert written["instances"]["H"]["TimeNs"] == time_ns
+    assert written["instances"]["H"]["RecordedLaunchTimeNs"] == 30
+
+
+def test_recorded_execution_loads_record_without_kernel_timing(tmp_path):
+    r = RecordedExecution.from_json(
+        str(_write_counted_record(tmp_path, TotalLaunches=7))
+    )
+
+    assert r.total_time_ns is None
+    assert r.timing_source is None
+    assert r["H"].timed_launches is None
+    assert r["H"].time_ns is None
+    assert r["H"].recorded_launch_time_ns is None
+    d = r.to_dict()
+    assert "TotalTimeNs" not in d
+    assert "TimingSource" not in d
+    for key in ("TimedLaunches", "TimeNs", "RecordedLaunchTimeNs"):
+        assert key not in d["instances"]["H"]
+
+
+def test_recorded_execution_loads_instance_without_timed_launches(tmp_path):
+    json_path = _write_counted_record(
+        tmp_path,
+        instance_fields={"TimedLaunches": 0},
+        TotalLaunches=7,
+        TotalTimeNs=0,
+        TimingSource="profiler",
+    )
+
+    r = RecordedExecution.from_json(str(json_path))
+
+    assert r.total_time_ns == 0
+    assert r["H"].timed_launches == 0
+    assert r["H"].time_ns is None
+    assert r["H"].recorded_launch_time_ns is None
+    written = r.to_dict()["instances"]["H"]
+    assert written["TimedLaunches"] == 0
+    assert "TimeNs" not in written
+    assert "RecordedLaunchTimeNs" not in written

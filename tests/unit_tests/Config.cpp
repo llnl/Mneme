@@ -31,6 +31,7 @@ void clearMnemeEnv() {
   unsetenv("MNEME_EPILOGUE_TYPE");
   unsetenv("MNEME_COPY_SOURCE");
   unsetenv("MNEME_CHUNK_SIZE");
+  unsetenv("MNEME_KERNEL_TIMING");
   unsetenv("MNEME_RECORD_RANKS");
   unsetenv("FLUX_TASK_RANK");
   unsetenv("OMPI_COMM_WORLD_RANK");
@@ -73,6 +74,8 @@ int main() {
     expect(!Conf.CopySource, "MNEME_COPY_SOURCE should default to false");
     expect(Conf.ChunkSize == 4ULL << 30,
            "MNEME_CHUNK_SIZE should default to 4 GiB");
+    expect(Conf.KernelTiming == KernelTimingType::Off,
+           "MNEME_KERNEL_TIMING should default to off");
   }
 
   auto TempDir = makeTempDir();
@@ -82,6 +85,7 @@ int main() {
   setenv("MNEME_EPILOGUE_TYPE", "diff", 1);
   setenv("MNEME_COPY_SOURCE", "1", 1);
   setenv("MNEME_CHUNK_SIZE", "8388608", 1);
+  setenv("MNEME_KERNEL_TIMING", "profiler", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.getDataDirectory() == std::filesystem::absolute(TempDir),
@@ -95,6 +99,8 @@ int main() {
     expect(Conf.CopySource, "MNEME_COPY_SOURCE should map 1 to true");
     expect(Conf.ChunkSize == 8ULL << 20,
            "MNEME_CHUNK_SIZE should use the configured value");
+    expect(Conf.KernelTiming == KernelTimingType::Profiler,
+           "MNEME_KERNEL_TIMING should map profiler");
   }
 
   for (auto [Value, Expected] :
@@ -124,28 +130,37 @@ int main() {
 
   setenv("MNEME_LOG_LEVEL", "verbose", 1);
   setenv("MNEME_COPY_SOURCE", "0", 1);
+  setenv("MNEME_KERNEL_TIMING", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.MnemeLogLevel == LogLevel::Info,
            "invalid MNEME_LOG_LEVEL should fall back to info");
     expect(!Conf.CopySource, "MNEME_COPY_SOURCE should map 0 to false");
+    expect(Conf.KernelTiming == KernelTimingType::Profiler,
+           "MNEME_KERNEL_TIMING should map 1 to profiler");
   }
 
   setenv("MNEME_EPILOGUE_TYPE", "bytes", 1);
   setenv("MNEME_COPY_SOURCE", "maybe", 1);
+  setenv("MNEME_KERNEL_TIMING", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.EpilogueType == EpilogueSnapshotType::Bytes,
            "MNEME_EPILOGUE_TYPE should map bytes");
     expect(!Conf.CopySource,
            "invalid MNEME_COPY_SOURCE should fall back to false");
+    expect(Conf.KernelTiming == KernelTimingType::Off,
+           "MNEME_KERNEL_TIMING should map 0 to off");
   }
 
   setenv("MNEME_EPILOGUE_TYPE", "best", 1);
+  setenv("MNEME_KERNEL_TIMING", "off", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(Conf.EpilogueType == EpilogueSnapshotType::Best,
            "MNEME_EPILOGUE_TYPE should map best");
+    expect(Conf.KernelTiming == KernelTimingType::Off,
+           "MNEME_KERNEL_TIMING should map off");
   }
 
   setenv("MNEME_EPILOGUE_TYPE", "delta", 1);
@@ -160,12 +175,26 @@ int main() {
     expect(Threw, "invalid MNEME_EPILOGUE_TYPE should throw");
   }
 
+  unsetenv("MNEME_EPILOGUE_TYPE");
+  for (const char *Invalid : {"events", ""}) {
+    setenv("MNEME_KERNEL_TIMING", Invalid, 1);
+    bool Threw = false;
+    try {
+      auto Conf = Config::createFromEnvironment();
+      (void)Conf;
+    } catch (const std::runtime_error &) {
+      Threw = true;
+    }
+    expect(Threw, std::string("invalid MNEME_KERNEL_TIMING '") + Invalid +
+                      "' should throw");
+  }
+
   clearMnemeEnv();
 
   // MNEME_RECORD_RANKS: default policy, no rank env -> single-process records.
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Single-process run (no rank env) should record by default");
   }
 
@@ -173,7 +202,7 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Default policy should record on rank 0");
   }
 
@@ -181,7 +210,7 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(!Conf.isRecordingEnabledForCurrentRank(),
+    expect(!Conf.getRecordingRankPolicy().isEnabled(),
            "Default policy should exclude rank 1");
   }
 
@@ -190,7 +219,7 @@ int main() {
   setenv("MNEME_RECORD_RANKS", "all", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Explicit 'all' should record on every rank");
   }
 
@@ -199,14 +228,14 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Rank 1 should record when listed in MNEME_RECORD_RANKS=0,1,3");
   }
   setenv("OMPI_COMM_WORLD_RANK", "2", 1);
   {
     auto Conf = Config::createFromEnvironment();
     expect(
-        !Conf.isRecordingEnabledForCurrentRank(),
+        !Conf.getRecordingRankPolicy().isEnabled(),
         "Rank 2 should not record when not listed in MNEME_RECORD_RANKS=0,1,3");
   }
 
@@ -215,7 +244,7 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Rank 0 should record when MNEME_RECORD_RANKS=0");
   }
 
@@ -224,7 +253,7 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(!Conf.isRecordingEnabledForCurrentRank(),
+    expect(!Conf.getRecordingRankPolicy().isEnabled(),
            "Empty MNEME_RECORD_RANKS should use default rank policy");
   }
 
@@ -234,7 +263,7 @@ int main() {
   setenv("SLURM_PROCID", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(!Conf.isRecordingEnabledForCurrentRank(),
+    expect(!Conf.getRecordingRankPolicy().isEnabled(),
            "OMPI_COMM_WORLD_RANK=2 should win over SLURM_PROCID=0 (rank 2 "
            "excluded)");
   }
@@ -263,14 +292,14 @@ int main() {
   setenv("OMPI_COMM_WORLD_RANK", "0", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(Conf.isRecordingEnabledForCurrentRank(),
+    expect(Conf.getRecordingRankPolicy().isEnabled(),
            "Malformed MNEME_RECORD_RANKS should fall back to default policy "
            "(rank 0 records)");
   }
   setenv("OMPI_COMM_WORLD_RANK", "1", 1);
   {
     auto Conf = Config::createFromEnvironment();
-    expect(!Conf.isRecordingEnabledForCurrentRank(),
+    expect(!Conf.getRecordingRankPolicy().isEnabled(),
            "Malformed MNEME_RECORD_RANKS should fall back to default policy "
            "(non-zero rank excluded)");
   }

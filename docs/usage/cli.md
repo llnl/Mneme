@@ -122,10 +122,14 @@ To override the default, pass `--record-ranks`:
     Launches that are skipped, not selected, or exceed the limit are still counted in the kernel's database, under `TotalLaunches` and the `Occurrences` of each recorded launch configuration.
 
 !!! note
+    Set the environment variable `MNEME_KERNEL_TIMING=profiler` to also record the GPU duration of the counted launches.
+    See [Artifacts → Kernel timing](artifacts.md#kernel-timing).
+
+!!! note
     Mneme no longer reserves a fixed virtual address space. It maps device memory on demand, in chunks at addresses it chooses. The `-vass` option is deprecated: it is still accepted, but ignored with a warning. Use `--chunk-size` instead.
 
 !!! note
-    Mneme packs allocations smaller than the chunk size into shared device mappings, since creating a mapping is slow. Larger allocations each get their own mapping. Set the chunk size with `--chunk-size` or the `MNEME_CHUNK_SIZE` environment variable, as bytes or with a suffix such as `64MB` or `4GB`. Suffixes `K`, `M`, `G` and `T` are powers of 2 and may be followed by `B` or `iB`, so `64M`, `64MB` and `64MiB` are all 64 MiB. It must be a multiple of 2 MiB, and the default is `4GB`. On CUDA, chunks are rounded up to a multiple of 32 MiB. If the device lacks memory for a full chunk, Mneme maps a smaller one.
+    Mneme packs allocations no larger than the chunk size into shared device mappings, since creating a mapping is slow. Larger allocations each get their own mapping. Set the chunk size with `--chunk-size` or the `MNEME_CHUNK_SIZE` environment variable, as bytes or with a suffix such as `64MB` or `4GB`. Suffixes `K`, `M`, `G` and `T` are powers of 2 and may be followed by `B` or `iB`, so `64M`, `64MB` and `64MiB` are all 64 MiB. It must be a multiple of 2 MiB, and the default is `4GB`. On CUDA, chunks are rounded up to a multiple of 32 MiB. If the device lacks memory for a full chunk, Mneme maps a smaller one.
 
 !!! note
     `--record-ranks` is equivalent to setting the environment variable

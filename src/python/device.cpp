@@ -4,10 +4,29 @@
 #include <llvm/Support/CBindingWrapping.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <mneme/MnemePython.hpp>
+#include <unordered_map>
 
 using namespace mneme;
 using namespace mneme::python;
 using namespace llvm;
+
+namespace {
+DeviceVendorTraits::DeviceStream_t getReplayStream(int DeviceId) {
+  static std::unordered_map<int, DeviceVendorTraits::DeviceStream_t> Streams;
+
+  auto It = Streams.find(DeviceId);
+  if (It != Streams.end())
+    return It->second;
+
+  DeviceVendorTraits::DeviceStream_t Stream;
+  auto EC = DeviceVendorTraits::DeviceErrorCheck(
+      DeviceVendorTraits::DeviceStreamCreate(&Stream));
+  if (EC)
+    LOG_FATAL("Error when creating a stream for replay\n" + EC.value());
+  Streams.emplace(DeviceId, Stream);
+  return Stream;
+}
+} // namespace
 
 extern "C" {
 API_EXPORT(void *) MnemePY_getDeviceObject(LLVMMemoryBufferRef Buffer) {
@@ -120,14 +139,10 @@ MnemePy_profile(void *WrappedModule, void *Func, dim3 Grid, dim3 Block,
 
   LOG_INFO("Executing replay run on device {}", DeviceId);
 
-  DeviceVendorTraits::DeviceStream_t ReplayStream;
+  auto ReplayStream = getReplayStream(DeviceId);
   auto DevFunc = reinterpret_cast<DeviceVendorTraits::DeviceFunction_t>(Func);
   auto PrologueState = unwrap(Prologue);
   auto EpilogueState = unwrap(Epilogue);
-  EC = DeviceVendorTraits::DeviceErrorCheck(
-      DeviceVendorTraits::DeviceStreamCreate(&ReplayStream));
-  if (EC)
-    LOG_FATAL("Error when creating a stream for replay\n" + EC.value());
 
   {
     trace::Scope Trace("state.globals");
