@@ -262,7 +262,7 @@ public:
     auto Status = Blob.setAnnotation({0, Blob.getSize()}, md);
     if (Status != AnnotationStatus::Ok)
       LOG_FATAL("annotation {} ptr={} size={} builtin={} tag={}",
-                describe(Status), ptr, Blob.getSize(),
+                describeAnnotationStatus(Status), ptr, Blob.getSize(),
                 static_cast<unsigned>(md.builtin), md.tag.value_or("no_tag"));
 
     LOG_DEBUG("exact-match hit ptr={} size={} actual_size={} builtin={} "
@@ -308,8 +308,8 @@ public:
     if (Status != AnnotationStatus::Ok)
       LOG_FATAL("region annotation {} ptr={} base_ptr={} offset={} bytes={} "
                 "blob_size={} builtin={} elem_size={} tag={}",
-                describe(Status), ptr, BasePtr, Owner->Offset, bytes,
-                Blob.getSize(), static_cast<unsigned>(md.builtin),
+                describeAnnotationStatus(Status), ptr, BasePtr, Owner->Offset,
+                bytes, Blob.getSize(), static_cast<unsigned>(md.builtin),
                 builtinByteWidth(md.builtin), md.tag.value_or("no_tag"));
 
     LOG_DEBUG(
