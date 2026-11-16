@@ -1,109 +1,71 @@
 # Verification
 
-Mneme verifies replay correctness by comparing the device memory state
-after kernel execution (the replay epilogue) against the recorded
-epilogue snapshot.  By default this comparison is an exact byte-wise
-check.
+After a replay, Mneme compares the device memory the kernel left behind
+with the recorded epilogue snapshot.
+By default the comparison is byte-exact,
+which fails on harmless floating-point rounding differences
+after a recompilation or a launch-parameter change.
 
-**Annotations** let you override this default on a per-buffer basis by
-attaching typed comparison metadata — data type, error threshold, norm,
-and an optional human-readable tag — to any device pointer *before* a
-kernel is recorded.  The metadata is persisted inside the recorded
-snapshot and used automatically during every subsequent replay.
-
----
-
-## Why annotations?
-
-Many GPU kernels produce floating-point results where bit-exact
-reproduction is neither expected nor required.  Without annotations,
-any recompilation or launch-parameter change that introduces
-floating-point rounding differences will cause verification to fail,
-even when the result is numerically acceptable.
-
-Annotations solve this by letting you declare, at record time, what
-"correct enough" means for each buffer.
+**Annotations** say what "correct enough" means for a buffer:
+its data type, an error threshold, and how errors are aggregated.
+You attach them at record time,
+and every later replay of that recording uses them.
 
 ---
 
-## The `mneme::annotate` API
+## Annotating a buffer
 
-The annotation API is declared in `mneme/MnemeAnnotation.hpp`, which is
-installed automatically when you build with Mneme.
-
-### Include and link
+Include `mneme/MnemeAnnotation.hpp`.
+Targets created with `add_mneme(my_target)` link the annotation runtime
+(`mnemert`) automatically.
 
 ```cpp
 #include "mneme/MnemeAnnotation.hpp"
-```
 
-If your CMake target was created with `add_mneme(my_target)`, the
-annotation runtime library (`mnemert`) is linked automatically and no
-extra `target_link_libraries` call is required.
+double *d_out = nullptr;
+cudaMalloc(&d_out, N * sizeof(double));
 
-### Basic usage
-
-```cpp
-double *d_output = nullptr;
-cudaMalloc(&d_output, N * sizeof(double));
-
-// Annotate *before* the kernel launch that will be recorded.
-mneme::annotate(d_output, mneme::Metadata{
-    .builtin        = mneme::BuiltinDType::F64,
+mneme::annotate(d_out, mneme::Metadata{
     .threshold      = 1e-6,
     .threshold_kind = mneme::ThresholdKind::Relative,
     .norm           = mneme::Norm::Linf,
     .tag            = std::string("output_vector"),
 });
 
-my_kernel<<<grid, block>>>(d_output, ...);
+my_kernel<<<grid, block>>>(d_out, ...);
 ```
 
-The typed convenience overload deduces `builtin` from the pointer type:
+Annotate before the kernel launch the annotation should affect.
+For a typed pointer such as `double *`, `builtin` is set from the pointer type;
+for a `void *`, set `builtin` yourself.
+
+To use different tolerances for different launches of the same kernel,
+annotate again between them:
 
 ```cpp
-mneme::annotate<double>(d_output, mneme::Metadata{
-    .threshold      = 1e-6,
-    .threshold_kind = mneme::ThresholdKind::Relative,
-    .norm           = mneme::Norm::Linf,
-});
-```
-
-### Updating annotations between launches
-
-You can call `annotate` on the same pointer more than once.  Each kernel
-launch captures the annotation state that was active when recording
-began, so different dynamic instances of the same kernel can carry
-different verification policies:
-
-```cpp
-mneme::annotate(d_out, mneme::Metadata{
-    .builtin        = mneme::BuiltinDType::F64,
-    .threshold      = 0.01,
-    .threshold_kind = mneme::ThresholdKind::Relative,
-    .norm           = mneme::Norm::Linf,
-    .tag            = std::string("out_loose"),
-});
+mneme::annotate(d_out, mneme::Metadata{.threshold = 0.01,
+                                       .threshold_kind = mneme::ThresholdKind::Relative,
+                                       .norm = mneme::Norm::Linf});
 vecAdd<<<4, 128>>>(d_in, d_out, N);
 
-// Tighten the tolerance for the next invocation.
-mneme::annotate(d_out, mneme::Metadata{
-    .builtin        = mneme::BuiltinDType::F64,
-    .threshold      = 0.005,
-    .threshold_kind = mneme::ThresholdKind::Relative,
-    .norm           = mneme::Norm::Linf,
-    .tag            = std::string("out_tight"),
-});
+mneme::annotate(d_out, mneme::Metadata{.threshold = 0.005,
+                                       .threshold_kind = mneme::ThresholdKind::Relative,
+                                       .norm = mneme::Norm::Linf});
 vecAdd<<<8, 64>>>(d_in, d_out, N);
 ```
+
+Record and replay as usual.
+The replay result reports `"verified": true`
+when every buffer passes its comparison.
+Buffers without annotations are compared byte for byte.
 
 ---
 
 ## Metadata fields
 
-### `BuiltinDType`
+### `builtin`
 
-Tells Mneme how to interpret the raw bytes in the buffer.
+The element type of the buffer.
 
 | Value  | C++ type     |
 | ------ | ------------ |
@@ -119,218 +81,58 @@ Tells Mneme how to interpret the raw bytes in the buffer.
 | `F32`  | `float`      |
 | `F64`  | `double`     |
 
-When you use the typed overload `mneme::annotate<T>(ptr, md)`, the
-`builtin` field is set automatically from the pointer type.
+### `threshold` and `threshold_kind`
 
-### `threshold`
+`threshold` is the largest acceptable error, a non-negative `double`.
+`threshold_kind` sets how the error between the replayed value *r*
+and the recorded value *e* is computed:
 
-A non-negative `double` that defines the maximum acceptable error.
-Its exact meaning depends on `threshold_kind` and `norm` (see below).
-
-### `ThresholdKind`
-
-Controls how the per-element error between the replayed value *r* and
-the recorded value *e* is computed.
-
-| Value      | Formula                                      |
-| ---------- | -------------------------------------------- |
-| `Absolute` | $\lvert r - e \rvert$                        |
+| Value      | Error                                         |
+| ---------- | --------------------------------------------- |
+| `Absolute` | $\lvert r - e \rvert$                         |
 | `Relative` | $\frac{\lvert r - e \rvert}{\lvert e \rvert}$ |
 
-### `Norm`
+### `norm`
 
-Determines how per-element errors are aggregated across the buffer.
+How the per-element errors are combined before comparing with `threshold`:
 
-| Value  | Semantics |
-| ------ | --------- |
-| `None` | **Per-element mode.** Each element is individually compared against `threshold`. Verification fails if *any* element exceeds the threshold. |
+| Value  | Passes when |
+| ------ | ----------- |
+| `None` | every element's error is at most `threshold` |
 | `L1`   | $\sum_i \text{err}(i) \leq \text{threshold}$ |
 | `L2`   | $\sqrt{\sum_i \text{err}(i)^2} \leq \text{threshold}$ |
 | `Linf` | $\max_i \text{err}(i) \leq \text{threshold}$ |
 
-When `norm` is `L1`, `L2`, or `Linf`, the aggregated value is compared
-against `threshold` to determine pass/fail.
+For `F16`, `F32` and `F64`, two NaNs match,
+and two infinities match when their signs agree;
+any other NaN or infinity fails the comparison.
 
-For typed floating-point comparisons (`F16`, `F32`, and `F64`), two NaNs
-match, and infinities match only when their signs agree. NaNs and 
-infinities that don't match are invalid.
+### `tag`
 
-### `tag` (optional)
-
-A free-form string stored alongside the buffer snapshot.  Tags are
-useful for identifying buffers in diagnostic output and multi-buffer
-kernels.  They are not interpreted by Mneme.
+An optional label for identifying the buffer. Mneme does not interpret it.
 
 ---
 
-## How verification works at replay time
+## Annotating part of an allocation
 
-1. Mneme restores the recorded **prologue** device memory state.
-2. The kernel is recompiled and executed.
-3. For every recorded memory blob, Mneme dispatches a GPU comparison
-   kernel that applies the `BuiltinDType`, `ThresholdKind`, and `Norm`
-   stored in the blob's annotation metadata.
-4. If *all* blobs pass, the replay result reports `"verified": true`.
-
-Buffers that were **not** annotated fall back to the default byte-wise
-comparison (equivalent to `threshold = 0`, `Norm::None`).
-
----
-
-## Complete example
-
-The following program annotates two device buffers with different
-tolerances and records two kernel launches, each capturing a distinct
-annotation state.
+To annotate an interior pointer into a larger allocation,
+or to give the fields of one allocation different tolerances,
+pass the size of the region in bytes:
 
 ```cpp
-#include <cstdlib>
-#include <iostream>
-#include "mneme/MnemeAnnotation.hpp"
+double *d_field = base + offset;
 
-// Use DeviceTraits or plain CUDA/HIP runtime calls.
-#ifdef __ENABLE_CUDA__
-#include <cuda_runtime.h>
-#define gpuMalloc   cudaMalloc
-#define gpuMemset   cudaMemset
-#define gpuFree     cudaFree
-#define gpuSync     cudaDeviceSynchronize
-#elif defined(__ENABLE_HIP__)
-#include <hip/hip_runtime.h>
-#define gpuMalloc   hipMalloc
-#define gpuMemset   hipMemset
-#define gpuFree     hipFree
-#define gpuSync     hipDeviceSynchronize
-#endif
-
-template <typename T>
-__global__ void vecAdd(T *in, T *out, size_t n) {
-  auto tid = threadIdx.x + blockIdx.x * blockDim.x;
-  if (tid < n)
-    out[tid] += in[tid] + tid;
-}
-
-int main(int argc, const char *argv[]) {
-  size_t N = std::atoi(argv[1]);
-  double *in = nullptr, *out = nullptr;
-
-  gpuMalloc((void **)&in,  N * sizeof(double));
-  gpuMalloc((void **)&out, N * sizeof(double));
-  gpuMemset(in,  0, N * sizeof(double));
-  gpuMemset(out, 0, N * sizeof(double));
-
-  // Annotate both pointers before the first recorded launch.
-  mneme::annotate(in, mneme::Metadata{
-      .builtin        = mneme::BuiltinDType::F64,
-      .threshold      = 0.125,
-      .threshold_kind = mneme::ThresholdKind::Absolute,
-      .norm           = mneme::Norm::L2,
-      .tag            = std::string("in_vec"),
-  });
-
-  mneme::annotate(out, mneme::Metadata{
-      .builtin        = mneme::BuiltinDType::F64,
-      .threshold      = 0.01,
-      .threshold_kind = mneme::ThresholdKind::Relative,
-      .norm           = mneme::Norm::Linf,
-      .tag            = std::string("out_loose"),
-  });
-
-  vecAdd<<<4, 128>>>(in, out, N);
-  gpuSync();
-
-  // Update the annotation for the next launch.
-  mneme::annotate(out, mneme::Metadata{
-      .builtin        = mneme::BuiltinDType::F64,
-      .threshold      = 0.005,
-      .threshold_kind = mneme::ThresholdKind::Relative,
-      .norm           = mneme::Norm::Linf,
-      .tag            = std::string("out_tight"),
-  });
-
-  vecAdd<<<8, 64>>>(in, out, N);
-  gpuSync();
-
-  gpuFree(in);
-  gpuFree(out);
-  return 0;
-}
-```
-
-Record, replay, and verify as usual:
-
-```bash
-mneme record  -rdb db/ -- ./vecAddAnnotations 1024
-mneme replay  -rdb db/<static-hash>.json -rid <dynamic-hash> "default<O3>"
-```
-
-The replay JSON result will contain `"verified": true` when the
-replayed epilogue satisfies every annotated buffer's tolerance.
-
----
-
-## Region annotations
-
-Use the region overload when the pointer to annotate is an alias or
-interior pointer into a larger allocation, or when one allocation
-contains multiple logical fields with different verification rules.
-
-```cpp
-double* d_alias = base + offset;
-std::size_t alias_bytes = count * sizeof(double);
-
-mneme::annotate(d_alias, alias_bytes, mneme::Metadata{
+mneme::annotate(d_field, count * sizeof(double), mneme::Metadata{
     .builtin        = mneme::BuiltinDType::F64,
     .threshold      = 1e-12,
     .threshold_kind = mneme::ThresholdKind::Relative,
     .norm           = mneme::Norm::L2,
-    .tag            = std::string("alias_region"),
 });
 ```
 
-- `mneme::annotate(ptr, nbytes, md)` applies metadata only to the byte range
-  `[ptr, ptr + nbytes)`.
-- The annotations of an allocation tile it:
-  every byte belongs to exactly one piece.
-  Bytes that the application never annotated
-  belong to a default piece with the byte-wise policy.
-- A later annotation overwrites earlier ones on the bytes it covers;
-  the bytes of an earlier annotation outside the new range keep their metadata.
-  A region inside a whole-allocation annotation therefore splits it
-  into the part before the region, the region, and the part after it.
-- `mneme::annotate(ptr, md)` on the base pointer covers the whole allocation,
-  so it replaces every region annotated before it.
-- Each piece is compared separately with its own metadata,
-  so two neighbouring regions with the same metadata keep separate norms.
-
-Constraints, each of which aborts the recording when violated:
-- `[ptr, ptr + nbytes)` must stay within the owning allocation.
-- The region's offset and `nbytes` must be multiples of the element size
-  of its `BuiltinDType`.
-- The pieces a region cuts must stay aligned to their own element sizes:
-  a region cannot start or end inside an element of an earlier annotation.
-
-A whole-allocation annotation may cover an allocation
-whose size is not a multiple of the element size;
-comparison ignores the trailing partial element.
-An explicit region must cover whole elements, even at the end of the allocation.
-
-This is the intended API for alias pointers produced by frameworks such as
-MFEM on top of allocators such as Umpire.
-
----
-
-## Summary
-
-| Concept | Description |
-| ------- | ----------- |
-| `mneme::annotate(ptr, md)` | Attach verification metadata to a device pointer |
-| `mneme::annotate(ptr, nbytes, md)` | Attach verification metadata to a byte sub-region of an owning allocation |
-| `BuiltinDType` | Scalar type used to interpret buffer contents |
-| `ThresholdKind` | Absolute or relative error formula |
-| `Norm` | Per-element (`None`) or aggregate (`L1`, `L2`, `Linf`) comparison |
-| `tag` | Optional label for diagnostics |
-
-Annotations are recorded once and applied automatically on every replay.
-Buffers without annotations continue to use the default byte-wise
-comparison.
+- Where annotations overlap, the later one wins,
+  so annotate the whole allocation first and its regions after it.
+- Each region is checked on its own, with its own norm.
+- The region must lie inside the allocation and cover whole elements,
+  and it cannot start or end inside an element of an earlier annotation.
+  Recording aborts otherwise.
