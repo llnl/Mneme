@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -505,9 +506,14 @@ BaseSnapshotSource<VendorTypes>::load(const std::string &KernelName) const {
   return Reader->read(KernelName, BaseSnapshotSource<VendorTypes>());
 }
 
+// Recorded allocations by base address, ordered so that an interior pointer
+// resolves to the allocation that contains it.
+template <DeviceVendors VendorTypes>
+using BlobsByAddress = std::map<void *, MnemeMemoryBlob<VendorTypes>>;
+
 template <DeviceVendors VendorTypes> struct SnapshotInput {
   const proteus::runtime::GlobalMetadataMap &GlobalVars;
-  llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory;
+  BlobsByAddress<VendorTypes> &DeviceMemory;
   llvm::ArrayRef<size_t> KernelArgSizes;
   void **Args;
   typename DeviceTraits<VendorTypes>::DeviceStream_t Stream;

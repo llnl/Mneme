@@ -14,7 +14,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <map>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -35,8 +34,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   RecorderRuntimeFunctions<VendorTypes> Runtime;
   std::unique_ptr<LaunchTimer<VendorTypes>> Timer;
   RecordDatabase DB;
-  llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
-  std::map<std::uintptr_t, void *> AllocationIndex;
+  BlobsByAddress<VendorTypes> AllocatedBlobs;
   // Allocations served by the vendor runtime (pinned, pitched, stream-ordered,
   // managed where Mneme cannot place it, ...). They are not captured, but the
   // application may release them with the device free, which must then be
@@ -95,7 +93,6 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     MnemeMemoryBlob<VendorTypes> Blob(ActualSize, nullptr, Size);
     Blob.mapInto(Ptr);
     AllocatedBlobs.insert({Ptr, std::move(Blob)});
-    AllocationIndex[reinterpret_cast<std::uintptr_t>(Ptr)] = Ptr;
     if (Managed)
       ManagedBlobs.insert({Ptr, *Managed});
   }
@@ -105,7 +102,6 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     auto It = AllocatedBlobs.find(Ptr);
     auto ret = It->second.release();
     AllocatedBlobs.erase(It);
-    AllocationIndex.erase(reinterpret_cast<std::uintptr_t>(Ptr));
     ManagedBlobs.erase(Ptr);
     return ret;
   }
@@ -131,26 +127,21 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return 1;
   }
 
-  typename llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>>::iterator
+  typename BlobsByAddress<VendorTypes>::iterator
   findOwningBlob(const void *ptr) {
     if (!ptr)
       return AllocatedBlobs.end();
 
-    auto Addr = reinterpret_cast<std::uintptr_t>(ptr);
-    auto It = AllocationIndex.upper_bound(Addr);
-    if (It == AllocationIndex.begin())
+    auto It = AllocatedBlobs.upper_bound(const_cast<void *>(ptr));
+    if (It == AllocatedBlobs.begin())
       return AllocatedBlobs.end();
 
     --It;
-    auto BlobIt = AllocatedBlobs.find(It->second);
-    if (BlobIt == AllocatedBlobs.end())
+    auto Addr = reinterpret_cast<std::uintptr_t>(ptr);
+    auto Base = reinterpret_cast<std::uintptr_t>(It->first);
+    if (Addr - Base >= It->second.getSize())
       return AllocatedBlobs.end();
-
-    auto Base = reinterpret_cast<std::uintptr_t>(BlobIt->first);
-    auto Size = BlobIt->second.getSize();
-    if (Addr < Base || (Addr - Base) >= Size)
-      return AllocatedBlobs.end();
-    return BlobIt;
+    return It;
   }
 
   // The caller must first wait for work that may still use the memory.
@@ -469,7 +460,7 @@ public:
     if (ManagedBlobs.contains(ptr))
       return releaseManagedBlob(ptr, MnemeDeviceRT::getDeviceFreeFnName(),
                                 [&] { return Runtime.origFreeDevice(ptr); });
-    if (!AllocatedBlobs.contains(ptr)) {
+    if (!AllocatedBlobs.count(ptr)) {
       if (PassthroughAllocs.erase(ptr)) {
         LOG_DEBUG("Forwarding free of vendor runtime allocation PTR:{}", ptr);
         return Runtime.origFreeDevice(ptr);
@@ -493,7 +484,7 @@ public:
       return releaseManagedBlob(ptr, MnemeDeviceRT::getAsyncFreeFnName(), [&] {
         return Runtime.origFreeAsync(ptr, stream);
       });
-    if (AllocatedBlobs.contains(ptr)) {
+    if (AllocatedBlobs.count(ptr)) {
       // Mneme releases its memory right away, so first wait for the work
       // queued on the stream that may still use it. The sync fails during
       // stream capture; keep the memory then.
@@ -595,7 +586,7 @@ public:
     LOG_DEBUG("RecordingBackend destructor: releasing {} blobs",
               AllocatedBlobs.size());
 
-    // Release all unreleased blobs before the DenseMap destructs
+    // Release all unreleased blobs before the map destructs
     for (auto &Entry : AllocatedBlobs) {
       auto &Blob = Entry.second;
       if (Blob.getBlobAddr() != nullptr) {

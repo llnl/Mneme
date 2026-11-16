@@ -7,7 +7,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallVector.h>
 #include <memory>
 #include <optional>
@@ -119,7 +118,7 @@ int main(int argc, char **argv) {
   // Create a raw_svector_ostream using the buffer
   proteus::runtime::GlobalMetadataMap GVars;
   GVars.try_emplace("Test", GV);
-  llvm::DenseMap<void *, MnemeMemoryBlobDevice> DeviceMemMap;
+  BlobsByAddress<Vendor> DeviceMemMap;
   DeviceMemMap.try_emplace((void *)BlobData.first, std::move(Blob));
   std::filesystem::path SnapshotFN("./test.mneme");
 
@@ -159,7 +158,7 @@ int main(int argc, char **argv) {
   auto ValidateDeviceMem = [&]() {
     for (auto &RKV : ReadDeviceMemMap) {
       auto &RBlob = RKV.second;
-      if (!DeviceMemMap.contains(RKV.first)) {
+      if (!DeviceMemMap.count(RKV.first)) {
         std::cerr << "Address does not exist in Device Map " << std::hex
                   << RKV.first << std::dec << "\n";
         return 1;
