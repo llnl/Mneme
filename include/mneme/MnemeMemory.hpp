@@ -102,7 +102,7 @@ enum class AnnotationStatus {
   EndsInsideElement,
 };
 
-inline const char *describe(AnnotationStatus Status) {
+inline const char *describeAnnotationStatus(AnnotationStatus Status) {
   switch (Status) {
   case AnnotationStatus::Ok:
     return "is valid";
