@@ -258,13 +258,6 @@ public:
       LOG_FATAL("annotation {} ptr={} size={} builtin={} tag={}",
                 describeAnnotationStatus(Status), ptr, Blob.getSize(),
                 static_cast<unsigned>(md.builtin), md.tag.value_or("no_tag"));
-
-    LOG_DEBUG("exact-match hit ptr={} size={} actual_size={} builtin={} "
-              "threshold={} threshold_kind={} norm={} tag={}",
-              ptr, Blob.getSize(), Blob.getActualSize(),
-              static_cast<unsigned>(md.builtin), md.threshold,
-              static_cast<unsigned>(md.threshold_kind),
-              static_cast<unsigned>(md.norm), md.tag.value_or("no_tag"));
     return true;
   }
 
@@ -276,14 +269,6 @@ public:
                 "recorded allocation",
                 ptr, bytes, md.tag.value_or("no_tag"));
 
-    // Comparison skips a partial element at the end of a blob.
-    auto Width = builtinByteWidth(md.builtin);
-    if (Width != 0 && bytes % Width != 0)
-      LOG_FATAL("region annotation does not cover a whole number of its "
-                "elements ptr={} bytes={} builtin={} elem_size={} tag={}",
-                ptr, bytes, static_cast<unsigned>(md.builtin), Width,
-                md.tag.value_or("no_tag"));
-
     auto &[BasePtr, Blob] = *Owner->It;
     auto Status = Blob.setAnnotation({Owner->Offset, bytes}, md);
     if (Status != AnnotationStatus::Ok)
@@ -292,48 +277,29 @@ public:
                 describeAnnotationStatus(Status), ptr, BasePtr, Owner->Offset,
                 bytes, Blob.getSize(), static_cast<unsigned>(md.builtin),
                 builtinByteWidth(md.builtin), md.tag.value_or("no_tag"));
-
-    LOG_DEBUG(
-        "region annotation registered ptr={} base_ptr={} offset={} bytes={} "
-        "builtin={} threshold={} threshold_kind={} norm={} tag={}",
-        ptr, BasePtr, Owner->Offset, bytes, static_cast<unsigned>(md.builtin),
-        md.threshold, static_cast<unsigned>(md.threshold_kind),
-        static_cast<unsigned>(md.norm), md.tag.value_or("no_tag"));
     return true;
   }
 
   bool getMetadataForPointer(const void *ptr, Metadata &md) const override {
-    if (!ptr) {
-      LOG_WARN("getMetadataForPointer called with null pointer");
+    if (!ptr)
       return false;
-    }
 
     auto It = AllocatedBlobs.find(const_cast<void *>(ptr));
-    if (It == AllocatedBlobs.end()) {
-      LOG_DEBUG("getMetadataForPointer exact-match miss ptr={}", ptr);
+    if (It == AllocatedBlobs.end())
       return false;
-    }
 
     md = It->second.annotationAt(0).MD;
-    LOG_DEBUG("getMetadataForPointer hit ptr={} tag={}", ptr,
-              md.tag.value_or("no_tag"));
     return true;
   }
 
   bool eraseMetadataForPointer(const void *ptr) override {
-    if (!ptr) {
-      LOG_WARN("eraseMetadataForPointer called with null pointer");
+    if (!ptr)
       return false;
-    }
 
     auto It = AllocatedBlobs.find(const_cast<void *>(ptr));
-    if (It == AllocatedBlobs.end()) {
-      LOG_DEBUG("eraseMetadataForPointer exact-match miss ptr={}", ptr);
+    if (It == AllocatedBlobs.end())
       return false;
-    }
 
-    LOG_DEBUG("eraseMetadataForPointer hit ptr={} tag={}", ptr,
-              It->second.annotationAt(0).MD.tag.value_or("no_tag"));
     It->second.resetAnnotations();
     return true;
   }

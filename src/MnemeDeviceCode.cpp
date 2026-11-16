@@ -246,9 +246,11 @@ CompareResult compareDeviceBlobs(const char *Blob1, const char *Blob2,
   std::size_t ElementSize = builtinByteWidth(Md.builtin);
   if (ElementSize == 0)
     LOG_FATAL("Unsupported BuiltinDType in Mneme comparison dispatch");
+  if (NumBytes % ElementSize != 0)
+    LOG_FATAL("Cannot compare {} bytes as whole {}-byte elements", NumBytes,
+              ElementSize);
   uint64_t NumElements = NumBytes / ElementSize;
-  // Bytes short of one element are not compared, and a launch with no blocks
-  // is an error.
+  // A launch with no blocks is an error.
   if (NumElements == 0)
     return Init;
 

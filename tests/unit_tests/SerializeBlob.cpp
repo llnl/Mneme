@@ -105,9 +105,12 @@ bool checkAlignment() {
                                "regions that split an F64 element");
 
   MnemeMemoryBlobDevice Odd(12, nullptr, 12);
-  Ok = Ok && Odd.setAnnotation({0, 12}, F64) == AnnotationStatus::Ok &&
-       expectAnnotations(Odd, {{{0, 12}, F64}},
-                         "an F64 annotation on a 12-byte blob");
+  if (Odd.setAnnotation({0, 12}, F64) != AnnotationStatus::EndsInsideElement) {
+    std::cerr << "Accepted an F64 annotation on a 12-byte blob\n";
+    Ok = false;
+  }
+  Ok = Ok && expectAnnotations(Odd, {{{0, 12}, {}}},
+                               "an F64 annotation on a 12-byte blob");
   return Ok;
 }
 
