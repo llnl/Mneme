@@ -245,18 +245,12 @@ public:
            Config::get().CopySource, Config::get().KernelTiming) {}
 
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
-    if (!ptr) {
-      LOG_WARN("annotate called with null pointer");
-      return false;
-    }
-
     auto It = AllocatedBlobs.find(const_cast<void *>(ptr));
-    if (It == AllocatedBlobs.end()) {
-      LOG_WARN("annotation dropped after exact-match miss ptr={} tag={} "
-               "allocated_blobs={}",
-               ptr, md.tag.value_or("no_tag"), AllocatedBlobs.size());
-      return false;
-    }
+    if (It == AllocatedBlobs.end())
+      LOG_FATAL("annotation ptr={} tag={} is not the start of a recorded "
+                "allocation; annotate a pointer inside one with its size in "
+                "bytes",
+                ptr, md.tag.value_or("no_tag"));
 
     auto &Blob = It->second;
     auto Status = Blob.setAnnotation({0, Blob.getSize()}, md);
@@ -276,24 +270,11 @@ public:
 
   bool setMetadataForRegion(const void *ptr, size_t bytes,
                             Metadata md) override {
-    if (!ptr) {
-      LOG_WARN("region annotate called with null pointer");
-      return false;
-    }
-
-    if (bytes == 0) {
-      LOG_WARN("region annotate called with zero bytes ptr={} tag={}", ptr,
-               md.tag.value_or("no_tag"));
-      return false;
-    }
-
     auto Owner = findOwningBlob(ptr);
-    if (!Owner) {
-      LOG_WARN("region annotation could not resolve owning allocation ptr={} "
-               "bytes={} tag={} allocated_blobs={}",
-               ptr, bytes, md.tag.value_or("no_tag"), AllocatedBlobs.size());
-      return false;
-    }
+    if (!Owner)
+      LOG_FATAL("region annotation ptr={} bytes={} tag={} is not inside a "
+                "recorded allocation",
+                ptr, bytes, md.tag.value_or("no_tag"));
 
     // Comparison skips a partial element at the end of a blob.
     auto Width = builtinByteWidth(md.builtin);

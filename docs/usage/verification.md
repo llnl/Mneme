@@ -36,6 +36,8 @@ my_kernel<<<grid, block>>>(d_out, ...);
 ```
 
 Annotate before the kernel launch the annotation should affect.
+The pointer must be the start of a device allocation;
+recording aborts otherwise.
 For a typed pointer such as `double *`, `builtin` is set from the pointer type;
 for a `void *`, set `builtin` yourself.
 
