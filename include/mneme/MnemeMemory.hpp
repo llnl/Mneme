@@ -236,9 +236,6 @@ public:
 protected:
   static bool compareRange(const char *Actual, const char *Expected,
                            uint64_t NumBytes, const Metadata &Md) {
-    if (NumBytes == 0)
-      return true;
-
     auto Compare = compareDeviceBlobs(Actual, Expected, NumBytes, Md);
 
     // Comparator semantics:
@@ -265,25 +262,21 @@ protected:
   int DeviceID = 0;
   MemoryAllocationHandle_t Handle{};
 
-  // The last subregion may end inside an element because a blob's size need
-  // not be a multiple of its element size.
   static bool
   areValidSubregions(const std::vector<MemoryAnnotation> &Subregions,
                      uint64_t Size) {
     if (Subregions.empty())
       return false;
     uint64_t End = 0;
-    for (size_t I = 0; I < Subregions.size(); ++I) {
-      const auto &Range = Subregions[I].Range;
+    for (const auto &Subregion : Subregions) {
+      const auto &Range = Subregion.Range;
       if (Range.Offset != End || Range.Extent > Size - Range.Offset)
         return false;
       // An empty blob keeps one empty subregion so that annotationAt() works.
       if (Range.Extent == 0 && !(Size == 0 && Subregions.size() == 1))
         return false;
-      if (builtinByteWidth(Subregions[I].MD.builtin) == 0)
-        return false;
-      if (I > 0 && !isElementBoundaryOfBoth(Range.Offset, Subregions[I - 1].MD,
-                                            Subregions[I].MD))
+      if (!isElementBoundary(Range.Offset, Subregion.MD) ||
+          !isElementBoundary(Range.endOffset(), Subregion.MD))
         return false;
       End = Range.endOffset();
     }
@@ -301,8 +294,6 @@ protected:
     return Width != 0 && Offset % Width == 0;
   }
 
-  // Range may end inside an element at the end of the blob, so that a
-  // whole-blob annotation fits a blob of any size.
   AnnotationStatus checkAnnotation(ByteSpan Range, const Metadata &Md) const {
     uint64_t Begin = Range.Offset;
     uint64_t End = Range.endOffset();
@@ -314,7 +305,7 @@ protected:
       return AnnotationStatus::UnknownElementType;
     if (!isElementBoundaryOfBoth(Begin, annotationAt(Begin).MD, Md))
       return AnnotationStatus::StartsInsideElement;
-    if (End != Size && !isElementBoundaryOfBoth(End, Md, annotationAt(End).MD))
+    if (!isElementBoundaryOfBoth(End, Md, annotationAt(End).MD))
       return AnnotationStatus::EndsInsideElement;
     return AnnotationStatus::Ok;
   }
@@ -360,9 +351,7 @@ public:
     return AnnotationStatus::Ok;
   }
 
-  void resetAnnotations(Metadata Md = {}) {
-    Annotations = {{{0, Size}, std::move(Md)}};
-  }
+  void resetAnnotations() { Annotations = {{{0, Size}, Metadata{}}}; }
 
   bool replaceAnnotations(std::vector<MemoryAnnotation> Subregions) {
     if (!areValidSubregions(Subregions, Size))
@@ -376,6 +365,13 @@ public:
   void readAnnotations(const char *&Buffer) {
     if (!replaceAnnotations(readAnnotationsFromBuffer(Buffer)))
       LOG_FATAL("Invalid annotation set serialized for blob");
+  }
+
+  void readWholeBlobMetadata(const char *&Buffer) {
+    auto Status = setAnnotation({0, Size}, metadata::fromBuffer(Buffer));
+    if (Status != AnnotationStatus::Ok)
+      LOG_FATAL("Invalid metadata serialized for blob: annotation {}",
+                describeAnnotationStatus(Status));
   }
 
   // Past the end of the blob, this is the last subregion.
@@ -472,7 +468,7 @@ public:
   readWithMetadata(const char *&Buffer) {
     auto Entry = readHeaderAndData(Buffer);
     auto &Blob = Entry.second;
-    Blob.resetAnnotations(metadata::fromBuffer(Buffer));
+    Blob.readWholeBlobMetadata(Buffer);
     return Entry;
   }
 
@@ -556,8 +552,7 @@ public:
       LOG_WARN("Sizes Differ {} vs {}", getSize(), other.getSize());
       return false;
     }
-    if (!hasSameAnnotations(other))
-      return false;
+    requireSameAnnotations(other);
     return matchesWithinTolerance(other.getBlobAddr(), getBlobAddr());
   }
 
@@ -568,8 +563,7 @@ public:
       LOG_WARN("Sizes Differ {} vs {}", getSize(), Replayed.getSize());
       return false;
     }
-    if (!hasSameAnnotations(Replayed))
-      return false;
+    requireSameAnnotations(Replayed);
     return matchesWithinTolerance(Replayed.getBlobAddr(), getDeviceData());
   }
 
@@ -578,12 +572,11 @@ public:
   }
 
 private:
-  bool hasSameAnnotations(const MnemeMemoryBlob<VendorTypes> &Other) const {
-    if (Annotations != Other.Annotations) {
-      LOG_WARN("Annotations differ for blob {}", Other.getBlobAddr());
-      return false;
-    }
-    return true;
+  void requireSameAnnotations(const MnemeMemoryBlob<VendorTypes> &Other) const {
+    if (Annotations != Other.Annotations)
+      LOG_FATAL("Blob {} has different annotations from the blob it is "
+                "compared with",
+                Other.getBlobAddr());
   }
 
   bool matchesWithinTolerance(const void *Actual, const void *Expected) const {
