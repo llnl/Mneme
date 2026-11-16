@@ -7,6 +7,7 @@
 #include <iterator>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Support/raw_ostream.h>
+#include <map>
 #include <memory>
 #include <sys/types.h>
 #include <utility>
@@ -543,5 +544,10 @@ private:
     return true;
   }
 };
+
+// Device allocations by base address, ordered so that an interior pointer
+// resolves to the allocation that contains it.
+template <DeviceVendors VendorTypes>
+using BlobsByAddress = std::map<void *, MnemeMemoryBlob<VendorTypes>>;
 
 } // namespace mneme
