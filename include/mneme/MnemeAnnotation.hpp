@@ -169,11 +169,4 @@ inline void annotate(T *ptr, Metadata md = {}) {
   annotate(static_cast<const void *>(ptr), std::move(md));
 }
 
-template <class T,
-          std::enable_if_t<!std::is_void_v<std::remove_cv_t<T>>, int> = 0>
-inline void annotate(T *ptr, std::size_t bytes, Metadata md) {
-  md.builtin = builtin_dtype_of<std::remove_cv_t<T>>::value;
-  annotate(static_cast<const void *>(ptr), bytes, std::move(md));
-}
-
 } // namespace mneme
