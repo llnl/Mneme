@@ -16,6 +16,9 @@ class NullRecorder final : public RecorderBackend<VendorTypes> {
 
 public:
   bool setMetadataForPointer(const void *, Metadata) override { return false; }
+  bool setMetadataForRegion(const void *, size_t, Metadata) override {
+    return false;
+  }
   bool getMetadataForPointer(const void *, Metadata &) const override {
     return false;
   }

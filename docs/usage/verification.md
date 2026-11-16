@@ -269,11 +269,46 @@ replayed epilogue satisfies every annotated buffer's tolerance.
 
 ---
 
+## Region annotations
+
+Use the region overload when the pointer to annotate is an alias or
+interior pointer into a larger allocation, or when one allocation
+contains multiple logical fields with different verification rules.
+
+```cpp
+double* d_alias = base + offset;
+std::size_t alias_bytes = count * sizeof(double);
+
+mneme::annotate(d_alias, alias_bytes, mneme::Metadata{
+    .builtin        = mneme::BuiltinDType::F64,
+    .threshold      = 1e-12,
+    .threshold_kind = mneme::ThresholdKind::Relative,
+    .norm           = mneme::Norm::L2,
+    .tag            = std::string("alias_region"),
+});
+```
+
+- `mneme::annotate(ptr, nbytes, md)` applies metadata only to the byte range
+  `[ptr, ptr + nbytes)`.
+- The full-range annotation acts as the default policy for uncovered bytes.
+- Narrower region annotations override that default on covered bytes.
+
+Constraints:
+- Overlapping region annotations on the same blob are rejected.
+- `nbytes` must stay within the owning allocation.
+- `nbytes` must be compatible with the selected `BuiltinDType` element size.
+
+This is the intended API for alias pointers produced by frameworks such as
+MFEM on top of allocators such as Umpire.
+
+---
+
 ## Summary
 
 | Concept | Description |
 | ------- | ----------- |
 | `mneme::annotate(ptr, md)` | Attach verification metadata to a device pointer |
+| `mneme::annotate(ptr, nbytes, md)` | Attach verification metadata to a byte sub-region of an owning allocation |
 | `BuiltinDType` | Scalar type used to interpret buffer contents |
 | `ThresholdKind` | Absolute or relative error formula |
 | `Norm` | Per-element (`None`) or aggregate (`L1`, `L2`, `Linf`) comparison |

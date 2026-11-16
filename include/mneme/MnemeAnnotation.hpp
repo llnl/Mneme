@@ -2,7 +2,8 @@
 //===----------------------------------------------------------------------===//
 // mneme_annotate.h - User-facing annotation API for Mneme
 //
-// This header declares mneme::annotate(ptr, Metadata{...}) and related types.
+// This header declares mneme::annotate(ptr, Metadata{...}) and sub-region
+// annotation overloads such as mneme::annotate(ptr, nbytes, Metadata{...}).
 // It is intentionally *interface-only*: no lambdas / comparators yet.
 //
 // Example:
@@ -18,8 +19,13 @@
 // You can also use the typed helper:
 //   mneme::annotate<double>(p, mneme::Metadata{ .threshold = 0.1 });
 //
+// Or annotate a sub-region explicitly:
+//   mneme::annotate(p, 128 * sizeof(double),
+//                   mneme::Metadata{ .threshold = 0.1 });
+//
 //===----------------------------------------------------------------------===//
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -72,6 +78,16 @@ struct Metadata {
   std::optional<std::string> tag = std::nullopt;
 };
 
+inline bool operator==(const Metadata &LHS, const Metadata &RHS) {
+  return LHS.builtin == RHS.builtin && LHS.threshold == RHS.threshold &&
+         LHS.threshold_kind == RHS.threshold_kind && LHS.norm == RHS.norm &&
+         LHS.tag == RHS.tag;
+}
+
+inline bool operator!=(const Metadata &LHS, const Metadata &RHS) {
+  return !(LHS == RHS);
+}
+
 // --------- Builtin dtype mapping helpers (optional sugar) ------------------
 
 template <class T> struct builtin_dtype_of {
@@ -115,17 +131,26 @@ template <> struct builtin_dtype_of<std::uint64_t> {
 // Primary user API: annotate a pointer with metadata.
 void annotate(const void *ptr, Metadata md);
 
-// Convenience overload for non-const pointers.
-void annotate(void *ptr, Metadata md);
+// Annotate a sub-region beginning at ptr and spanning bytes bytes.
+void annotate(const void *ptr, std::size_t bytes, Metadata md);
 
 // Typed helper: sets builtin dtype automatically when T maps to a known
 // BuiltinDType. If T is unknown, this will leave builtin=Unknown (still useful
 // if you set dtype=Custom later).
-template <class T> inline void annotate(T *ptr, Metadata md = {}) {
+template <class T,
+          std::enable_if_t<!std::is_void_v<std::remove_cv_t<T>>, int> = 0>
+inline void annotate(T *ptr, Metadata md = {}) {
   // If the user didn't specify dtype explicitly, keep default Builtin.
   // If they *did* specify Custom, we don't override anything here.
   md.builtin = builtin_dtype_of<std::remove_cv_t<T>>::value;
   annotate(static_cast<const void *>(ptr), std::move(md));
+}
+
+template <class T,
+          std::enable_if_t<!std::is_void_v<std::remove_cv_t<T>>, int> = 0>
+inline void annotate(T *ptr, std::size_t bytes, Metadata md) {
+  md.builtin = builtin_dtype_of<std::remove_cv_t<T>>::value;
+  annotate(static_cast<const void *>(ptr), bytes, std::move(md));
 }
 
 } // namespace mneme
