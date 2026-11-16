@@ -276,17 +276,6 @@ llvm::MutableArrayRef<uint8_t> hostBytes(MnemeMemoryBlob<VendorTypes> &Blob) {
   return llvm::MutableArrayRef<uint8_t>(Blob.getHostData(), Blob.getSize());
 }
 
-// An annotation count followed by that many (offset, extent, metadata)
-// annotations, which replace the blob's annotations.
-template <DeviceVendors VendorTypes>
-void readDiffBlobAnnotations(const char *&Buffer,
-                             MnemeMemoryBlob<VendorTypes> &Blob) {
-  size_t NumAnnotations = util::extractScalar<size_t>(Buffer);
-  auto Annotations = readAnnotationsFromBuffer(Buffer, NumAnnotations);
-  if (!Blob.replaceAnnotations(std::move(Annotations)))
-    LOG_FATAL("Mneme diff blob annotation set is invalid");
-}
-
 inline void expectPayloadEnd(const char *Buffer, const llvm::MemoryBuffer &File,
                              const std::string &Filename) {
   if (Buffer != File.getBufferEnd())
@@ -410,7 +399,7 @@ public:
     for (size_t I = 0; I < TotalMemBlobs; ++I) {
       auto &Blob =
           snapshot_detail::readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
-      snapshot_detail::readDiffBlobAnnotations(CurrentPtr, Blob);
+      Blob.readAnnotations(CurrentPtr);
       snapshot_detail::applyDiffRanges(CurrentPtr,
                                        snapshot_detail::hostBytes(Blob));
     }
@@ -628,11 +617,8 @@ public:
     }
 
     Size += sizeof(size_t);
-    for (const auto &[Ptr, Blob] : In.DeviceMemory) {
-      Size += BlobHeader::serializedSize();
-      Size += Blob.getSize();
-      Size += annotationsSerializedSize(Blob.getAnnotations());
-    }
+    for (const auto &[Ptr, Blob] : In.DeviceMemory)
+      Size += Blob.serializedSize();
 
     Size += sizeof(size_t);
     for (size_t ArgSize : In.KernelArgSizes) {

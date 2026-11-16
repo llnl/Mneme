@@ -501,8 +501,8 @@ static void run_partial_element_tail_case() {
   Metadata F32;
   F32.builtin = BuiltinDType::F32;
   for (auto *Blob : {&A, &B}) {
-    if (!Blob->setAnnotation({0, NumBytes}, F64) ||
-        !Blob->setAnnotation({0, 8}, F32)) {
+    if (Blob->setAnnotation({0, NumBytes}, F64) != AnnotationStatus::Ok ||
+        Blob->setAnnotation({0, 8}, F32) != AnnotationStatus::Ok) {
       std::cerr << "Could not annotate the 12-byte blob\n";
       std::exit(1);
     }

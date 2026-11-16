@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
   Md.threshold = 0.5;
   Md.threshold_kind = ThresholdKind::Relative;
   Md.tag = std::string("Test");
-  if (!Blob.setAnnotation({0, Blob.getSize()}, Md))
+  if (Blob.setAnnotation({0, Blob.getSize()}, Md) != AnnotationStatus::Ok)
     LOG_FATAL("Could not set whole-blob annotation");
 
   mneme::Metadata RegionMd;
@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
   RegionMd.threshold = 0.0;
   RegionMd.threshold_kind = ThresholdKind::Absolute;
   RegionMd.tag = std::string("Region");
-  if (!Blob.setAnnotation({16, 32}, RegionMd))
+  if (Blob.setAnnotation({16, 32}, RegionMd) != AnnotationStatus::Ok)
     LOG_FATAL("Could not set region annotation");
   const std::vector<MemoryAnnotation> ExpectedAnnotations{
       {{0, 16}, Md}, {{16, 32}, RegionMd}, {{48, 80}, Md}};
@@ -381,9 +381,8 @@ int main(int argc, char **argv) {
     return 0;
   }();
 
-  // Replay loads annotations from snapshots first, then maps or allocates
-  // memory for the blobs. This regression check makes sure those setup paths
-  // do not clobber deserialized annotations back to the default single piece.
+  // Replay reads a blob's annotations before it maps or allocates the blob's
+  // memory, so mapping and allocating must keep them.
   auto ValidateAnnotationPreservationAcrossReplaySetup = [&]() {
     auto PrologueIt = ReadDeviceMemMap.find((void *)BlobData.first);
     if (PrologueIt == ReadDeviceMemMap.end()) {

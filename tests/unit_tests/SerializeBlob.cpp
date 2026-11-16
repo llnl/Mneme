@@ -54,18 +54,18 @@ bool checkOverwrites() {
   auto First = typed(BuiltinDType::F32, "first");
   auto Second = typed(BuiltinDType::F32, "second");
 
-  bool Ok = Blob.setAnnotation({32, 32}, First) &&
+  bool Ok = Blob.setAnnotation({32, 32}, First) == AnnotationStatus::Ok &&
             expectAnnotations(
                 Blob, {{{0, 32}, {}}, {{32, 32}, First}, {{64, 64}, {}}},
                 "a region inside the default piece");
-  Ok = Ok && Blob.setAnnotation({48, 32}, Second) &&
+  Ok = Ok && Blob.setAnnotation({48, 32}, Second) == AnnotationStatus::Ok &&
        expectAnnotations(Blob,
                          {{{0, 32}, {}},
                           {{32, 16}, First},
                           {{48, 32}, Second},
                           {{80, 48}, {}}},
                          "an overlapping second region");
-  Ok = Ok && Blob.setAnnotation({80, 16}, Second) &&
+  Ok = Ok && Blob.setAnnotation({80, 16}, Second) == AnnotationStatus::Ok &&
        expectAnnotations(Blob,
                          {{{0, 32}, {}},
                           {{32, 16}, First},
@@ -73,13 +73,14 @@ bool checkOverwrites() {
                           {{80, 16}, Second},
                           {{96, 32}, {}}},
                          "an adjacent region with equal metadata");
-  Ok = Ok && Blob.setAnnotation({0, 128}, Whole) &&
+  Ok = Ok && Blob.setAnnotation({0, 128}, Whole) == AnnotationStatus::Ok &&
        expectAnnotations(Blob, {{{0, 128}, Whole}}, "a whole-blob annotation");
   return Ok;
 }
 
 // Every piece starts on an element boundary and every piece but the last ends
-// on one; a rejected annotation leaves the blob unchanged.
+// on one, and an explicit region covers whole elements; a rejected annotation
+// names the rule it breaks and leaves the blob unchanged.
 bool checkAlignment() {
   MnemeMemoryBlobDevice Blob(128, nullptr, 128);
   auto F32 = typed(BuiltinDType::F32, "f32");
@@ -87,22 +88,29 @@ bool checkAlignment() {
   auto U8 = typed(BuiltinDType::U8, "u8");
 
   bool Ok = true;
-  if (Blob.setAnnotation({2, 8}, F32) || Blob.setAnnotation({0, 6}, F32)) {
-    std::cerr << "Accepted an annotation not aligned to its element size\n";
+  if (Blob.setAnnotation({2, 8}, F32) != AnnotationStatus::MisalignedStart ||
+      Blob.setAnnotation({0, 6}, F32) != AnnotationStatus::PartialElement) {
+    std::cerr << "Did not reject a misaligned annotation for its rule\n";
     Ok = false;
   }
   Ok = Ok && expectAnnotations(Blob, {{{0, 128}, {}}}, "misaligned regions");
 
-  Ok = Ok && Blob.setAnnotation({0, 128}, F64);
-  if (Blob.setAnnotation({4, 4}, U8)) {
-    std::cerr << "Accepted a region that leaves an F64 piece misaligned\n";
+  Ok = Ok && Blob.setAnnotation({0, 128}, F64) == AnnotationStatus::Ok;
+  if (Blob.setAnnotation({4, 4}, U8) !=
+      AnnotationStatus::SplitsElementAtStart) {
+    std::cerr << "Did not reject a region that splits an F64 element\n";
     Ok = false;
   }
   Ok = Ok && expectAnnotations(Blob, {{{0, 128}, F64}},
                                "a region that cuts an F64 piece at offset 4");
 
   MnemeMemoryBlobDevice Odd(12, nullptr, 12);
-  Ok = Ok && Odd.setAnnotation({0, 12}, F64) &&
+  if (Odd.setRegionAnnotation({0, 12}, F64) !=
+      AnnotationStatus::PartialElement) {
+    std::cerr << "Accepted a region that ends in a partial element\n";
+    Ok = false;
+  }
+  Ok = Ok && Odd.setAnnotation({0, 12}, F64) == AnnotationStatus::Ok &&
        expectAnnotations(Odd, {{{0, 12}, F64}},
                          "an F64 annotation on a 12-byte blob");
   return Ok;
