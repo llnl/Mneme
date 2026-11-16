@@ -48,10 +48,10 @@ int main(int argc, char **argv) {
 
   // Create a raw_svector_ostream using the buffer
   llvm::raw_svector_ostream Stream(Buffer);
-  Stream << Blob;
+  Blob.writeWithAnnotations(Stream);
 
   auto Buff = const_cast<const char *>(Buffer.data());
-  auto entry = MnemeMemoryBlobDevice::fromBuffer(Buff);
+  auto entry = MnemeMemoryBlobDevice::readWithAnnotations(Buff);
   auto Addr = entry.first;
   auto SBlob = std::move(entry.second);
 

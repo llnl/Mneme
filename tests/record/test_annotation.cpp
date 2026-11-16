@@ -28,10 +28,13 @@ __global__ void annotation_kernel(float *data, int n) {
 
 int main() {
   const int N = 64;
+  const int AliasOffset = 16;
+  const int AliasLen = 24;
 
   float *d_ptr = nullptr;
   MnemeDeviceRT::DeviceMalloc(reinterpret_cast<void **>(&d_ptr),
                               N * sizeof(float));
+  float *d_alias = d_ptr + AliasOffset;
 
   // Annotate the device pointer before the kernel launch so the preload can
   // attach metadata to the recorded snapshot.
@@ -43,7 +46,16 @@ int main() {
                              .tag = std::string("test_ptr"),
                          });
 
-  annotation_kernel<<<1, N>>>(d_ptr, N);
+  mneme::annotate(d_alias, AliasLen * sizeof(float),
+                  mneme::Metadata{
+                      .builtin = mneme::BuiltinDType::F32,
+                      .threshold = 0.002,
+                      .threshold_kind = mneme::ThresholdKind::Relative,
+                      .norm = mneme::Norm::L2,
+                      .tag = std::string("test_region"),
+                  });
+
+  annotation_kernel<<<1, AliasLen>>>(d_alias, AliasLen);
 
   auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceSynchronize());
   if (EC) {
@@ -63,4 +75,5 @@ int main() {
 // CHECK-RR: NumModules: 1
 // CHECK-RR: NumInstances: 1
 // CHECK-RR: BlobAnnotation: threshold=0.001 threshold_kind=1 builtin=9 norm=3 tag=test_ptr
+// CHECK-RR: RegionAnnotation: offset=64 extent=96 threshold=0.002 threshold_kind=1 builtin=9 norm=2 tag=test_region
 // clang-format on

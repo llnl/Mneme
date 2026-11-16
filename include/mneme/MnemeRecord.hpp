@@ -52,6 +52,10 @@ public:
     return Backend->setMetadataForPointer(ptr, std::move(md));
   }
 
+  bool setMetadataForRegion(const void *ptr, size_t bytes, Metadata md) {
+    return Backend->setMetadataForRegion(ptr, bytes, std::move(md));
+  }
+
   bool getMetadataForPointer(const void *ptr, Metadata &md) const {
     return Backend->getMetadataForPointer(ptr, md);
   }

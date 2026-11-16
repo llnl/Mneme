@@ -162,6 +162,12 @@ bool mneme_set_metadata_for_ptr(const void *ptr, mneme::Metadata md) {
   return mneme.setMetadataForPointer(ptr, std::move(md));
 }
 
+bool mneme_set_metadata_for_region(const void *ptr, size_t bytes,
+                                   mneme::Metadata md) {
+  auto &mneme = MnemeRecorderCUDAPreload::instance();
+  return mneme.setMetadataForRegion(ptr, bytes, std::move(md));
+}
+
 bool mneme_get_metadata_for_ptr(const void *ptr, mneme::Metadata *md) {
   if (!md)
     return false;

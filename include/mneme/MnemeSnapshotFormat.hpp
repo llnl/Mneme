@@ -277,6 +277,23 @@ llvm::MutableArrayRef<uint8_t> hostBytes(MnemeMemoryBlob<VendorTypes> &Blob) {
   return llvm::MutableArrayRef<uint8_t>(Blob.getHostData(), Blob.getSize());
 }
 
+// An annotation count followed by that many (offset, extent, metadata)
+// annotations, which replace the blob's annotations.
+template <DeviceVendors VendorTypes>
+void readDiffBlobAnnotations(const char *&Buffer,
+                             MnemeMemoryBlob<VendorTypes> &Blob) {
+  size_t NumAnnotations = util::extractScalar<size_t>(Buffer);
+  auto Annotations = readAnnotationsFromBuffer(Buffer, NumAnnotations);
+  if (!Blob.replaceAnnotations(std::move(Annotations)))
+    LOG_FATAL("Mneme diff blob annotation set is invalid");
+}
+
+inline void expectPayloadEnd(const char *Buffer, const llvm::MemoryBuffer &File,
+                             const std::string &Filename) {
+  if (Buffer != File.getBufferEnd())
+    LOG_FATAL("Unexpected trailing bytes in Mneme snapshot " + Filename);
+}
+
 } // namespace snapshot_detail
 
 template <DeviceVendors VendorTypes>
@@ -299,8 +316,37 @@ public:
     size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
     for (size_t I = 0; I < TotalMemBlobs; ++I)
       Snap.DeviceMemory.insert(
-          MnemeMemoryBlob<VendorTypes>::fromBuffer(CurrentPtr));
+          MnemeMemoryBlob<VendorTypes>::readWithMetadata(CurrentPtr));
     snapshot_detail::readArgs(CurrentPtr, *Snap.KInfo);
+    return Snap;
+  }
+};
+
+// Each blob record carries an annotation list instead of a single metadata.
+template <DeviceVendors VendorTypes>
+class BytesReaderV1 : public SnapshotReader<VendorTypes> {
+public:
+  using SnapshotReader<VendorTypes>::SnapshotReader;
+
+  static constexpr SnapshotHeader Layout{SnapshotKind::Bytes, 1};
+
+  bool requiresBaseSnapshot() const override { return false; }
+
+  Snapshot<VendorTypes>
+  read(const std::string &KernelName,
+       const BaseSnapshotSource<VendorTypes> &) const override {
+    Snapshot<VendorTypes> Snap;
+    Snap.KInfo = std::make_shared<KernelInfo>(KernelName);
+    const char *CurrentPtr = this->payload();
+
+    snapshot_detail::readGlobals(CurrentPtr, Snap.GlobalVars);
+    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
+    for (size_t I = 0; I < TotalMemBlobs; ++I)
+      Snap.DeviceMemory.insert(
+          MnemeMemoryBlob<VendorTypes>::readWithAnnotations(CurrentPtr));
+    snapshot_detail::readArgs(CurrentPtr, *Snap.KInfo);
+    snapshot_detail::expectPayloadEnd(CurrentPtr, *this->Buffer,
+                                      this->Filename);
     return Snap;
   }
 };
@@ -331,10 +377,47 @@ public:
     for (size_t I = 0; I < TotalMemBlobs; ++I) {
       auto &Blob =
           snapshot_detail::readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
-      Blob.setMetadata(metadata::fromBuffer(CurrentPtr));
+      Blob.registerAnnotation({0, Blob.getSize()},
+                              metadata::fromBuffer(CurrentPtr));
       snapshot_detail::applyDiffRanges(CurrentPtr,
                                        snapshot_detail::hostBytes(Blob));
     }
+    return Snap;
+  }
+};
+
+// Each blob record carries an annotation list where version 1 carried a single
+// metadata.
+template <DeviceVendors VendorTypes>
+class DiffReaderV2 : public SnapshotReader<VendorTypes> {
+public:
+  using SnapshotReader<VendorTypes>::SnapshotReader;
+
+  static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 2};
+
+  bool requiresBaseSnapshot() const override { return true; }
+
+  Snapshot<VendorTypes>
+  read(const std::string &KernelName,
+       const BaseSnapshotSource<VendorTypes> &Base) const override {
+    Snapshot<VendorTypes> Snap =
+        snapshot_detail::loadDiffBase(Base, KernelName, this->Filename);
+    const char *CurrentPtr = this->payload();
+
+    snapshot_detail::applyGlobalDiffs(CurrentPtr, Snap.GlobalVars,
+                                      this->Filename);
+    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
+    snapshot_detail::expectCount(TotalMemBlobs, Snap.DeviceMemory.size(),
+                                 this->Filename, "memory blob");
+    for (size_t I = 0; I < TotalMemBlobs; ++I) {
+      auto &Blob =
+          snapshot_detail::readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
+      snapshot_detail::readDiffBlobAnnotations(CurrentPtr, Blob);
+      snapshot_detail::applyDiffRanges(CurrentPtr,
+                                       snapshot_detail::hostBytes(Blob));
+    }
+    snapshot_detail::expectPayloadEnd(CurrentPtr, *this->Buffer,
+                                      this->Filename);
     return Snap;
   }
 };
@@ -386,7 +469,9 @@ private:
   static const Entry *table(size_t &Count) {
     static const Entry Table[] = {
         entry<BytesReaderV0<VendorTypes>>(),
+        entry<BytesReaderV1<VendorTypes>>(),
         entry<DiffReaderV1<VendorTypes>>(),
+        entry<DiffReaderV2<VendorTypes>>(),
     };
     Count = sizeof(Table) / sizeof(Table[0]);
     return Table;
@@ -548,7 +633,7 @@ public:
     for (const auto &[Ptr, Blob] : In.DeviceMemory) {
       Size += BlobHeader::serializedSize();
       Size += Blob.getSize();
-      Size += metadata::serializedSize(Blob.getMetadata());
+      Size += annotationsSerializedSize(Blob.getAnnotations());
     }
 
     Size += sizeof(size_t);
@@ -561,7 +646,7 @@ public:
 
 protected:
   SnapshotHeader header() const override {
-    return BytesReaderV0<VendorTypes>::Layout;
+    return BytesReaderV1<VendorTypes>::Layout;
   }
 
   void writePayload(llvm::raw_ostream &OutBC,
@@ -597,7 +682,7 @@ protected:
 
     // Write the Device Memory
     for (auto &[Ptr, Blob] : DeviceMemory)
-      OutBC << Blob;
+      Blob.writeWithAnnotations(OutBC);
     // Lastly write the arguments
     size_t NumArgs = KernelArgSizes.size();
     LOG_DEBUG("Number of Kernel Arguments in snapshot:{} stored at position:{}",
@@ -630,7 +715,7 @@ public:
 
 protected:
   SnapshotHeader header() const override {
-    return DiffReaderV1<VendorTypes>::Layout;
+    return DiffReaderV2<VendorTypes>::Layout;
   }
 
   void writePayload(llvm::raw_ostream &OutBC,
@@ -663,8 +748,7 @@ protected:
     for (auto &[Ptr, Blob] : DeviceMemory) {
       BlobHeader{Blob.getActualSize(), Blob.getSize(), Blob.getBlobAddr()}
           .write(OutBC);
-      auto MD = Blob.getMetadata();
-      mneme::metadata::serialize(OutBC, MD);
+      writeAnnotationsToStream(OutBC, Blob.getAnnotations());
 
       writeCountAndWriteChangedRanges(OutBC, Blob, UpdateBaseData);
     }
