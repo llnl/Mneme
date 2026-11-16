@@ -106,21 +106,23 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return ret;
   }
 
-  typename BlobsByAddress<VendorTypes>::iterator
-  findOwningBlob(const void *ptr) {
-    if (!ptr)
-      return AllocatedBlobs.end();
+  struct OwningBlob {
+    typename BlobsByAddress<VendorTypes>::iterator It;
+    uint64_t Offset;
+  };
 
+  // The blob that holds the byte at ptr, and ptr's offset in it.
+  std::optional<OwningBlob> findOwningBlob(const void *ptr) {
     auto It = AllocatedBlobs.upper_bound(const_cast<void *>(ptr));
     if (It == AllocatedBlobs.begin())
-      return AllocatedBlobs.end();
+      return std::nullopt;
 
     --It;
-    auto Addr = reinterpret_cast<std::uintptr_t>(ptr);
-    auto Base = reinterpret_cast<std::uintptr_t>(It->first);
-    if (Addr - Base >= It->second.getSize())
-      return AllocatedBlobs.end();
-    return It;
+    uint64_t Offset = reinterpret_cast<std::uintptr_t>(ptr) -
+                      reinterpret_cast<std::uintptr_t>(It->first);
+    if (Offset >= It->second.getSize())
+      return std::nullopt;
+    return OwningBlob{It, Offset};
   }
 
   // The caller must first wait for work that may still use the memory.
@@ -244,89 +246,68 @@ public:
 
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
     if (!ptr) {
-      LOG_WARN("setMetadataForPointer called with null pointer");
+      LOG_WARN("annotate called with null pointer");
       return false;
     }
 
     auto It = AllocatedBlobs.find(const_cast<void *>(ptr));
     if (It == AllocatedBlobs.end()) {
-      LOG_DEBUG("exact-match miss ptr={} tag={} allocated_blobs={}", ptr,
-                md.tag.value_or("no_tag"), AllocatedBlobs.size());
       LOG_WARN("annotation dropped after exact-match miss ptr={} tag={} "
                "allocated_blobs={}",
                ptr, md.tag.value_or("no_tag"), AllocatedBlobs.size());
       return false;
     }
 
-    LOG_INFO("exact-match hit ptr={} size={} actual_size={} builtin={} "
-             "threshold={} threshold_kind={} norm={} tag={}",
-             ptr, It->second.getSize(), It->second.getActualSize(),
-             static_cast<unsigned>(md.builtin), md.threshold,
-             static_cast<unsigned>(md.threshold_kind),
-             static_cast<unsigned>(md.norm), md.tag.value_or("no_tag"));
-    return It->second.setAnnotation({0, It->second.getSize()}, std::move(md));
+    auto &Blob = It->second;
+    auto Status = Blob.setAnnotation({0, Blob.getSize()}, md);
+    if (Status != AnnotationStatus::Ok)
+      LOG_FATAL("annotation {} ptr={} size={} builtin={} tag={}",
+                describe(Status), ptr, Blob.getSize(),
+                static_cast<unsigned>(md.builtin), md.tag.value_or("no_tag"));
+
+    LOG_DEBUG("exact-match hit ptr={} size={} actual_size={} builtin={} "
+              "threshold={} threshold_kind={} norm={} tag={}",
+              ptr, Blob.getSize(), Blob.getActualSize(),
+              static_cast<unsigned>(md.builtin), md.threshold,
+              static_cast<unsigned>(md.threshold_kind),
+              static_cast<unsigned>(md.norm), md.tag.value_or("no_tag"));
+    return true;
   }
 
   bool setMetadataForRegion(const void *ptr, size_t bytes,
                             Metadata md) override {
     if (!ptr) {
-      LOG_WARN("setMetadataForRegion called with null pointer");
+      LOG_WARN("region annotate called with null pointer");
       return false;
     }
 
     if (bytes == 0) {
-      LOG_WARN("setMetadataForRegion called with zero bytes ptr={} tag={}", ptr,
+      LOG_WARN("region annotate called with zero bytes ptr={} tag={}", ptr,
                md.tag.value_or("no_tag"));
       return false;
     }
 
-    auto It = findOwningBlob(ptr);
-    if (It == AllocatedBlobs.end()) {
+    auto Owner = findOwningBlob(ptr);
+    if (!Owner) {
       LOG_WARN("region annotation could not resolve owning allocation ptr={} "
                "bytes={} tag={} allocated_blobs={}",
                ptr, bytes, md.tag.value_or("no_tag"), AllocatedBlobs.size());
       return false;
     }
 
-    auto &Blob = It->second;
-    auto Base = reinterpret_cast<std::uintptr_t>(It->first);
-    auto Addr = reinterpret_cast<std::uintptr_t>(ptr);
-    auto Offset = static_cast<uint64_t>(Addr - Base);
-    auto BlobSize = Blob.getSize();
-    if (bytes > BlobSize - Offset)
-      LOG_FATAL("region annotation exceeds owning allocation ptr={} "
-                "base_ptr={} offset={} bytes={} blob_size={} tag={}",
-                ptr, It->first, Offset, bytes, BlobSize,
-                md.tag.value_or("no_tag"));
+    auto &[BasePtr, Blob] = *Owner->It;
+    auto Status = Blob.setRegionAnnotation({Owner->Offset, bytes}, md);
+    if (Status != AnnotationStatus::Ok)
+      LOG_FATAL("region annotation {} ptr={} base_ptr={} offset={} bytes={} "
+                "blob_size={} builtin={} elem_size={} tag={}",
+                describe(Status), ptr, BasePtr, Owner->Offset, bytes,
+                Blob.getSize(), static_cast<unsigned>(md.builtin),
+                builtinByteWidth(md.builtin), md.tag.value_or("no_tag"));
 
-    // The blob lets its last piece end in a partial element so that a
-    // whole-blob annotation fits any size, but an explicit region must cover
-    // whole elements or comparison would skip its trailing bytes.
-    auto ElemSize = builtinByteWidth(md.builtin);
-    if (ElemSize == 0 || bytes % ElemSize != 0)
-      LOG_FATAL("region annotation bytes are not a multiple of its element "
-                "size ptr={} base_ptr={} offset={} bytes={} elem_size={} "
-                "tag={}",
-                ptr, It->first, Offset, bytes, ElemSize,
-                md.tag.value_or("no_tag"));
-
-    // Cuts at the region's start and end must also fall on element
-    // boundaries of the annotations they split.
-    auto ElemSizeAtStart =
-        builtinByteWidth(Blob.annotationAt(Offset).MD.builtin);
-    auto ElemSizeAtEnd =
-        builtinByteWidth(Blob.annotationAt(Offset + bytes).MD.builtin);
-    if (!Blob.setAnnotation({Offset, bytes}, md))
-      LOG_FATAL("region annotation is not aligned to element sizes ptr={} "
-                "base_ptr={} offset={} bytes={} blob_size={} elem_size={} "
-                "elem_size_at_offset={} elem_size_at_end={} tag={}",
-                ptr, It->first, Offset, bytes, BlobSize, ElemSize,
-                ElemSizeAtStart, ElemSizeAtEnd, md.tag.value_or("no_tag"));
-
-    LOG_INFO(
+    LOG_DEBUG(
         "region annotation registered ptr={} base_ptr={} offset={} bytes={} "
         "builtin={} threshold={} threshold_kind={} norm={} tag={}",
-        ptr, It->first, Offset, bytes, static_cast<unsigned>(md.builtin),
+        ptr, BasePtr, Owner->Offset, bytes, static_cast<unsigned>(md.builtin),
         md.threshold, static_cast<unsigned>(md.threshold_kind),
         static_cast<unsigned>(md.norm), md.tag.value_or("no_tag"));
     return true;
@@ -341,9 +322,6 @@ public:
     auto It = AllocatedBlobs.find(const_cast<void *>(ptr));
     if (It == AllocatedBlobs.end()) {
       LOG_DEBUG("getMetadataForPointer exact-match miss ptr={}", ptr);
-      LOG_DEBUG(
-          "getMetadataForPointer returning false after exact-match miss ptr={}",
-          ptr);
       return false;
     }
 
@@ -362,18 +340,11 @@ public:
     auto It = AllocatedBlobs.find(const_cast<void *>(ptr));
     if (It == AllocatedBlobs.end()) {
       LOG_DEBUG("eraseMetadataForPointer exact-match miss ptr={}", ptr);
-      LOG_DEBUG("eraseMetadataForPointer returning false after exact-match "
-                "miss ptr={}",
-                ptr);
       return false;
     }
 
-    Metadata ExistingMd;
-    if (!getMetadataForPointer(ptr, ExistingMd))
-      return false;
-
-    LOG_INFO("eraseMetadataForPointer hit ptr={} tag={}", ptr,
-             ExistingMd.tag.value_or("no_tag"));
+    LOG_DEBUG("eraseMetadataForPointer hit ptr={} tag={}", ptr,
+              It->second.annotationAt(0).MD.tag.value_or("no_tag"));
     It->second.resetAnnotations();
     return true;
   }

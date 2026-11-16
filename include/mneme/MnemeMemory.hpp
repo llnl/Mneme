@@ -54,8 +54,10 @@ inline bool operator!=(const MemoryAnnotation &LHS,
   return !(LHS == RHS);
 }
 
+// Reads what writeAnnotationsToStream() writes.
 inline std::vector<MemoryAnnotation>
-readAnnotationsFromBuffer(const char *&Buffer, size_t NumAnnotations) {
+readAnnotationsFromBuffer(const char *&Buffer) {
+  size_t NumAnnotations = util::extractScalar<size_t>(Buffer);
   std::vector<MemoryAnnotation> LoadedAnnotations;
   LoadedAnnotations.reserve(NumAnnotations);
   for (size_t I = 0; I < NumAnnotations; ++I) {
@@ -88,6 +90,40 @@ annotationsSerializedSize(const std::vector<MemoryAnnotation> &Annotations) {
     Size += sizeof(Annotation.Range.Offset) + sizeof(Annotation.Range.Extent) +
             metadata::serializedSize(Annotation.MD);
   return Size;
+}
+
+// Whether a blob gave a range the metadata, or else the rule the range breaks.
+enum class AnnotationStatus {
+  Ok,
+  OutOfBounds,
+  Empty,
+  UnknownElementType,
+  MisalignedStart,
+  PartialElement,
+  SplitsElementAtStart,
+  SplitsElementAtEnd,
+};
+
+inline const char *describe(AnnotationStatus Status) {
+  switch (Status) {
+  case AnnotationStatus::Ok:
+    return "is valid";
+  case AnnotationStatus::OutOfBounds:
+    return "extends past the end of its allocation";
+  case AnnotationStatus::Empty:
+    return "is empty";
+  case AnnotationStatus::UnknownElementType:
+    return "has a builtin type with no element size";
+  case AnnotationStatus::MisalignedStart:
+    return "does not start on an element boundary of its type";
+  case AnnotationStatus::PartialElement:
+    return "does not cover a whole number of its elements";
+  case AnnotationStatus::SplitsElementAtStart:
+    return "starts inside an element of the annotation it splits";
+  case AnnotationStatus::SplitsElementAtEnd:
+    return "ends inside an element of the annotation it splits";
+  }
+  return "has an unknown annotation status";
 }
 
 enum class MemoryLocation { Host, Device };
@@ -249,37 +285,46 @@ protected:
         return false;
       if (Range.Extent == 0 && !(Size == 0 && Pieces.size() == 1))
         return false;
-      uint64_t Width = builtinByteWidth(Pieces[I].MD.builtin);
-      if (Width == 0 || Range.Offset % Width != 0)
+      if (!isElementBoundary(Range.Offset, Pieces[I].MD))
         return false;
-      if (!IsLast && Range.Extent % Width != 0)
+      if (!IsLast && !isElementBoundary(Range.endOffset(), Pieces[I].MD))
         return false;
       End = Range.endOffset();
     }
     return End == Size;
   }
 
-  // Reads | ActualSize | Size | DevAddr | Data |, the start of a blob record.
-  static std::pair<void *, MnemeMemoryBlob<VendorTypes>>
-  readHeaderAndData(const char *&Buffer) {
-    BlobHeader Header = BlobHeader::read(Buffer);
-    auto Blob = MnemeMemoryBlob<VendorTypes>(Header.ActualSize, 0, Header.Size);
-    std::memcpy(Blob.getHostData(), Buffer, Header.Size);
-    Buffer += Header.Size;
-    LOG_DEBUG("Read memory blob at address {} SIZE: {} ActualSize:{}",
-              Header.DevAddr, Header.Size, Header.ActualSize);
-    return std::make_pair(Header.DevAddr, std::move(Blob));
+  // An unknown builtin type has no element boundaries, so no piece can use it.
+  static bool isElementBoundary(uint64_t Offset, const Metadata &Md) {
+    uint64_t Width = builtinByteWidth(Md.builtin);
+    return Width != 0 && Offset % Width == 0;
   }
 
-public:
-  // Gives the bytes in Range the metadata Md, cutting the pieces Range
-  // overlaps so that their bytes outside Range keep their metadata. Fails,
-  // leaving the annotations unchanged, if the result would not tile the blob:
-  // Range is empty in a non-empty blob or extends past the blob, or the new
-  // piece or a cut remainder would not be aligned to its element size.
-  bool setAnnotation(ByteSpan Range, Metadata Md) {
+  // Gives the bytes in Range the metadata Md if the pieces still tile the blob
+  // afterwards, and otherwise returns the rule Range breaks. Because the
+  // pieces tile the blob beforehand, only Range and the two cuts it makes need
+  // checking. WholeElements also requires Range to cover whole elements when
+  // it ends the blob, where a piece may otherwise end in a partial element.
+  AnnotationStatus insertPiece(ByteSpan Range, Metadata Md,
+                               bool WholeElements) {
     if (Range.Offset > Size || Range.Extent > Size - Range.Offset)
-      return false;
+      return AnnotationStatus::OutOfBounds;
+    if (Range.Extent == 0 && Size != 0)
+      return AnnotationStatus::Empty;
+    if (builtinByteWidth(Md.builtin) == 0)
+      return AnnotationStatus::UnknownElementType;
+    if (!isElementBoundary(Range.Offset, Md))
+      return AnnotationStatus::MisalignedStart;
+    bool EndsBlob = Range.endOffset() == Size;
+    if ((WholeElements || !EndsBlob) && !isElementBoundary(Range.Extent, Md))
+      return AnnotationStatus::PartialElement;
+    // Every piece starts on an element boundary, so a cut through a piece is
+    // aligned when its offset is.
+    if (!isElementBoundary(Range.Offset, annotationAt(Range.Offset).MD))
+      return AnnotationStatus::SplitsElementAtStart;
+    if (!EndsBlob && !isElementBoundary(Range.endOffset(),
+                                        annotationAt(Range.endOffset()).MD))
+      return AnnotationStatus::SplitsElementAtEnd;
 
     std::vector<MemoryAnnotation> Pieces;
     Pieces.reserve(Annotations.size() + 2);
@@ -297,11 +342,37 @@ public:
       uint64_t Start = std::max(Piece.Range.Offset, Range.endOffset());
       Pieces.push_back({{Start, Piece.Range.endOffset() - Start}, Piece.MD});
     }
-
-    if (!isTiling(Pieces, Size))
-      return false;
     Annotations = std::move(Pieces);
-    return true;
+    return AnnotationStatus::Ok;
+  }
+
+  // Reads | ActualSize | Size | DevAddr | Data |, the start of a blob record.
+  static std::pair<void *, MnemeMemoryBlob<VendorTypes>>
+  readHeaderAndData(const char *&Buffer) {
+    BlobHeader Header = BlobHeader::read(Buffer);
+    auto Blob = MnemeMemoryBlob<VendorTypes>(Header.ActualSize, 0, Header.Size);
+    std::memcpy(Blob.getHostData(), Buffer, Header.Size);
+    Buffer += Header.Size;
+    LOG_DEBUG("Read memory blob at address {} SIZE: {} ActualSize:{}",
+              Header.DevAddr, Header.Size, Header.ActualSize);
+    return std::make_pair(Header.DevAddr, std::move(Blob));
+  }
+
+public:
+  // Gives the bytes in Range the metadata Md, cutting the pieces Range
+  // overlaps so that their bytes outside Range keep their metadata. Range may
+  // end in a partial element at the end of the blob, so that a whole-blob
+  // annotation fits a blob of any size. On failure the annotations are
+  // unchanged.
+  AnnotationStatus setAnnotation(ByteSpan Range, Metadata Md) {
+    return insertPiece(Range, std::move(Md), /*WholeElements=*/false);
+  }
+
+  // Like setAnnotation(), for a region the application named: it must cover
+  // whole elements even at the end of the blob, or comparison would skip its
+  // trailing bytes.
+  AnnotationStatus setRegionAnnotation(ByteSpan Range, Metadata Md) {
+    return insertPiece(Range, std::move(Md), /*WholeElements=*/true);
   }
 
   // Replaces every piece with one piece that covers the blob.
@@ -316,6 +387,13 @@ public:
       return false;
     Annotations = std::move(Pieces);
     return true;
+  }
+
+  // Replaces the annotations with the list writeAnnotationsToStream() wrote at
+  // Buffer.
+  void readAnnotations(const char *&Buffer) {
+    if (!replaceAnnotations(readAnnotationsFromBuffer(Buffer)))
+      LOG_FATAL("Invalid annotation set serialized for blob");
   }
 
   // The piece that holds the byte at ByteOffset, or the last piece if
@@ -423,10 +501,7 @@ public:
   static std::pair<void *, MnemeMemoryBlob<VendorTypes>>
   readWithAnnotations(const char *&Buffer) {
     auto Entry = readHeaderAndData(Buffer);
-    size_t NumAnnotations = util::extractScalar<size_t>(Buffer);
-    auto LoadedAnnotations = readAnnotationsFromBuffer(Buffer, NumAnnotations);
-    if (!Entry.second.replaceAnnotations(std::move(LoadedAnnotations)))
-      LOG_FATAL("Invalid annotation set serialized for blob");
+    Entry.second.readAnnotations(Buffer);
     return Entry;
   }
 
@@ -449,6 +524,12 @@ public:
                 EC.value() + "\n");
     OS << llvm::StringRef(reinterpret_cast<const char *>(getHostData()), Size);
     writeAnnotationsToStream(OS, Annotations);
+  }
+
+  // The number of bytes writeWithAnnotations() writes.
+  size_t serializedSize() const {
+    return BlobHeader::serializedSize() + Size +
+           annotationsSerializedSize(Annotations);
   }
 
   void *ptr() { return reinterpret_cast<void *>(BlobAddr); }
