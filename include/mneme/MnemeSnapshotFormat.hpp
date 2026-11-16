@@ -378,8 +378,7 @@ public:
     for (size_t I = 0; I < TotalMemBlobs; ++I) {
       auto &Blob =
           snapshot_detail::readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
-      Blob.registerAnnotation({0, Blob.getSize()},
-                              metadata::fromBuffer(CurrentPtr));
+      Blob.resetAnnotations(metadata::fromBuffer(CurrentPtr));
       snapshot_detail::applyDiffRanges(CurrentPtr,
                                        snapshot_detail::hostBytes(Blob));
     }

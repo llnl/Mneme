@@ -74,6 +74,7 @@ int main() {
 // CHECK-RR: DemangledName: annotation_kernel(float*, int)
 // CHECK-RR: NumModules: 1
 // CHECK-RR: NumInstances: 1
-// CHECK-RR: BlobAnnotation: threshold=0.001 threshold_kind=1 builtin=9 norm=3 tag=test_ptr
-// CHECK-RR: RegionAnnotation: offset=64 extent=96 threshold=0.002 threshold_kind=1 builtin=9 norm=2 tag=test_region
+// CHECK-RR: {{^}}Annotation: offset=0 extent=64 threshold=0.001 threshold_kind=1 builtin=9 norm=3 tag=test_ptr
+// CHECK-RR-NEXT: {{^}}Annotation: offset=64 extent=96 threshold=0.002 threshold_kind=1 builtin=9 norm=2 tag=test_region
+// CHECK-RR-NEXT: {{^}}Annotation: offset=160 extent=96 threshold=0.001 threshold_kind=1 builtin=9 norm=3 tag=test_ptr
 // clang-format on

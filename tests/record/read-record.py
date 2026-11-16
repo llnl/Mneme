@@ -95,7 +95,7 @@ def _parse_prologue_metadata(filename):
                 tag = data[off:off + tag_len].decode("utf-8", errors="replace")
                 skip(tag_len)
             results.append(
-                dict(offset=offset, extent=extent, blob_size=size,
+                dict(offset=offset, extent=extent,
                      builtin=builtin, threshold=threshold,
                      threshold_kind=threshold_kind, norm=norm, tag=tag)
             )
@@ -199,19 +199,12 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
                     ]
                     if md["tag"] is not None:
                         parts.append(f"tag={md['tag']}")
-                    if md["offset"] == 0 and md["extent"] == md["blob_size"]:
-                        print("BlobAnnotation:", " ".join(parts))
-                    else:
-                        print(
-                            "RegionAnnotation:",
-                            " ".join(
-                                [
-                                    f"offset={md['offset']}",
-                                    f"extent={md['extent']}",
-                                    *parts,
-                                ]
-                            ),
-                        )
+                    print(
+                        "Annotation:",
+                        f"offset={md['offset']}",
+                        f"extent={md['extent']}",
+                        " ".join(parts),
+                    )
         except Exception as e:
             print(f"Warning: could not parse prologue metadata: {e}",
                   file=sys.stderr)

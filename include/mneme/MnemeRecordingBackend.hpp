@@ -106,27 +106,6 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     return ret;
   }
 
-  static std::size_t builtinByteWidth(BuiltinDType builtin) {
-    switch (builtin) {
-    case BuiltinDType::U8:
-    case BuiltinDType::I8:
-      return 1;
-    case BuiltinDType::U16:
-    case BuiltinDType::I16:
-    case BuiltinDType::F16:
-      return 2;
-    case BuiltinDType::U32:
-    case BuiltinDType::I32:
-    case BuiltinDType::F32:
-      return 4;
-    case BuiltinDType::U64:
-    case BuiltinDType::I64:
-    case BuiltinDType::F64:
-      return 8;
-    }
-    return 1;
-  }
-
   typename BlobsByAddress<VendorTypes>::iterator
   findOwningBlob(const void *ptr) {
     if (!ptr)
@@ -285,8 +264,7 @@ public:
              static_cast<unsigned>(md.builtin), md.threshold,
              static_cast<unsigned>(md.threshold_kind),
              static_cast<unsigned>(md.norm), md.tag.value_or("no_tag"));
-    return It->second.registerAnnotation({0, It->second.getSize()},
-                                         std::move(md));
+    return It->second.setAnnotation({0, It->second.getSize()}, std::move(md));
   }
 
   bool setMetadataForRegion(const void *ptr, size_t bytes,
@@ -310,33 +288,40 @@ public:
       return false;
     }
 
+    auto &Blob = It->second;
     auto Base = reinterpret_cast<std::uintptr_t>(It->first);
     auto Addr = reinterpret_cast<std::uintptr_t>(ptr);
     auto Offset = static_cast<uint64_t>(Addr - Base);
-    auto BlobSize = It->second.getSize();
-    if (bytes > BlobSize || Offset > BlobSize - bytes) {
-      LOG_WARN("region annotation exceeds owning allocation ptr={} base_ptr={} "
-               "offset={} bytes={} blob_size={} tag={}",
-               ptr, It->first, Offset, bytes, BlobSize,
-               md.tag.value_or("no_tag"));
-      return false;
-    }
+    auto BlobSize = Blob.getSize();
+    if (bytes > BlobSize - Offset)
+      LOG_FATAL("region annotation exceeds owning allocation ptr={} "
+                "base_ptr={} offset={} bytes={} blob_size={} tag={}",
+                ptr, It->first, Offset, bytes, BlobSize,
+                md.tag.value_or("no_tag"));
 
+    // The blob lets its last piece end in a partial element so that a
+    // whole-blob annotation fits any size, but an explicit region must cover
+    // whole elements or comparison would skip its trailing bytes.
     auto ElemSize = builtinByteWidth(md.builtin);
-    if ((bytes % ElemSize) != 0) {
-      LOG_WARN("region annotation byte extent is not aligned to builtin type "
-               "ptr={} bytes={} builtin={} elem_size={} tag={}",
-               ptr, bytes, static_cast<unsigned>(md.builtin), ElemSize,
-               md.tag.value_or("no_tag"));
-      return false;
-    }
+    if (ElemSize == 0 || bytes % ElemSize != 0)
+      LOG_FATAL("region annotation bytes are not a multiple of its element "
+                "size ptr={} base_ptr={} offset={} bytes={} elem_size={} "
+                "tag={}",
+                ptr, It->first, Offset, bytes, ElemSize,
+                md.tag.value_or("no_tag"));
 
-    if (!It->second.registerAnnotation({Offset, bytes}, md)) {
-      LOG_WARN("region annotation rejected due to overlap ptr={} base_ptr={} "
-               "offset={} bytes={} tag={}",
-               ptr, It->first, Offset, bytes, md.tag.value_or("no_tag"));
-      return false;
-    }
+    // Cuts at the region's start and end must also fall on element
+    // boundaries of the annotations they split.
+    auto ElemSizeAtStart =
+        builtinByteWidth(Blob.annotationAt(Offset).MD.builtin);
+    auto ElemSizeAtEnd =
+        builtinByteWidth(Blob.annotationAt(Offset + bytes).MD.builtin);
+    if (!Blob.setAnnotation({Offset, bytes}, md))
+      LOG_FATAL("region annotation is not aligned to element sizes ptr={} "
+                "base_ptr={} offset={} bytes={} blob_size={} elem_size={} "
+                "elem_size_at_offset={} elem_size_at_end={} tag={}",
+                ptr, It->first, Offset, bytes, BlobSize, ElemSize,
+                ElemSizeAtStart, ElemSizeAtEnd, md.tag.value_or("no_tag"));
 
     LOG_INFO(
         "region annotation registered ptr={} base_ptr={} offset={} bytes={} "
@@ -362,11 +347,7 @@ public:
       return false;
     }
 
-    auto *WholeBlob = It->second.getWholeBlobAnnotation();
-    if (!WholeBlob)
-      return false;
-
-    md = WholeBlob->MD;
+    md = It->second.annotationAt(0).MD;
     LOG_DEBUG("getMetadataForPointer hit ptr={} tag={}", ptr,
               md.tag.value_or("no_tag"));
     return true;
@@ -393,7 +374,8 @@ public:
 
     LOG_INFO("eraseMetadataForPointer hit ptr={} tag={}", ptr,
              ExistingMd.tag.value_or("no_tag"));
-    return It->second.registerAnnotation({0, It->second.getSize()}, Metadata{});
+    It->second.resetAnnotations();
+    return true;
   }
 
   DeviceError_t rtMalloc(void **ptr, size_t size) override {

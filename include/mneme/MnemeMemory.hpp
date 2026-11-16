@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Support/raw_ostream.h>
 #include <memory>
@@ -26,26 +27,6 @@ struct ByteSpan {
   uint64_t Extent = 0;
 
   uint64_t endOffset() const { return Offset + Extent; }
-
-  bool contains(uint64_t ByteOffset) const {
-    return Offset <= ByteOffset && ByteOffset < endOffset();
-  }
-
-  bool hasSameRange(uint64_t OtherOffset, uint64_t OtherExtent) const {
-    return Offset == OtherOffset && Extent == OtherExtent;
-  }
-
-  bool hasSameRange(const ByteSpan &Other) const {
-    return hasSameRange(Other.Offset, Other.Extent);
-  }
-
-  bool overlaps(uint64_t OtherOffset, uint64_t OtherExtent) const {
-    return Offset < OtherOffset + OtherExtent && OtherOffset < endOffset();
-  }
-
-  bool overlaps(const ByteSpan &Other) const {
-    return overlaps(Other.Offset, Other.Extent);
-  }
 };
 
 inline bool operator==(const ByteSpan &LHS, const ByteSpan &RHS) {
@@ -249,46 +230,32 @@ protected:
   int DeviceID = 0;
   MemoryAllocationHandle_t Handle{};
 
-  bool isValidAnnotationRange(const ByteSpan &Range) const {
-    if (Range.Offset > Size)
+  // Pieces tile a blob of Size bytes when they are sorted, contiguous, and
+  // cover [0, Size) with non-empty extents, or are the single piece {0, 0} of
+  // an empty blob. Each piece must start on an element boundary of its own
+  // builtin type and, except for the last, end on one. The last piece may end
+  // in a partial element because a blob's size need not be a multiple of its
+  // element size; comparison ignores those trailing bytes.
+  static bool isTiling(const std::vector<MemoryAnnotation> &Pieces,
+                       uint64_t Size) {
+    if (Pieces.empty())
       return false;
-    if (Range.Extent == 0)
-      return Size == 0 && Range.Offset == 0;
-    return Range.Extent <= Size - Range.Offset;
-  }
-
-  bool isWholeBlobRange(const ByteSpan &Range) const {
-    return Range.Offset == 0 && Range.Extent == Size;
-  }
-
-  static bool annotationSortLess(const MemoryAnnotation &LHS,
-                                 const MemoryAnnotation &RHS) {
-    if (LHS.Range.Offset != RHS.Range.Offset)
-      return LHS.Range.Offset < RHS.Range.Offset;
-    return LHS.Range.Extent < RHS.Range.Extent;
-  }
-
-  void resetDefaultAnnotation() { Annotations = {{{0, Size}, {}}}; }
-
-  const MemoryAnnotation *findWholeBlobAnnotation() const {
-    for (const auto &Annotation : Annotations) {
-      if (isWholeBlobRange(Annotation.Range))
-        return &Annotation;
+    uint64_t End = 0;
+    for (size_t I = 0; I < Pieces.size(); ++I) {
+      const auto &Range = Pieces[I].Range;
+      bool IsLast = I + 1 == Pieces.size();
+      if (Range.Offset != End || Range.Extent > Size - Range.Offset)
+        return false;
+      if (Range.Extent == 0 && !(Size == 0 && Pieces.size() == 1))
+        return false;
+      uint64_t Width = builtinByteWidth(Pieces[I].MD.builtin);
+      if (Width == 0 || Range.Offset % Width != 0)
+        return false;
+      if (!IsLast && Range.Extent % Width != 0)
+        return false;
+      End = Range.endOffset();
     }
-    return nullptr;
-  }
-
-  static std::vector<MemoryAnnotation>
-  regionAnnotations(const std::vector<MemoryAnnotation> &Annotations,
-                    uint64_t BlobSize) {
-    std::vector<MemoryAnnotation> Regions;
-    Regions.reserve(Annotations.size());
-    for (const auto &Annotation : Annotations) {
-      if (Annotation.Range.Offset == 0 && Annotation.Range.Extent == BlobSize)
-        continue;
-      Regions.push_back(Annotation);
-    }
-    return Regions;
+    return End == Size;
   }
 
   // Reads | ActualSize | Size | DevAddr | Data |, the start of a blob record.
@@ -304,38 +271,72 @@ protected:
   }
 
 public:
-  bool registerAnnotation(ByteSpan Range, Metadata Md) {
-    if (!isValidAnnotationRange(Range))
+  // Gives the bytes in Range the metadata Md, cutting the pieces Range
+  // overlaps so that their bytes outside Range keep their metadata. Fails,
+  // leaving the annotations unchanged, if the result would not tile the blob:
+  // Range is empty in a non-empty blob or extends past the blob, or the new
+  // piece or a cut remainder would not be aligned to its element size.
+  bool setAnnotation(ByteSpan Range, Metadata Md) {
+    if (Range.Offset > Size || Range.Extent > Size - Range.Offset)
       return false;
 
-    for (auto &Annotation : Annotations) {
-      if (Annotation.Range.hasSameRange(Range)) {
-        Annotation.MD = std::move(Md);
-        return true;
-      }
-
-      if (!Annotation.Range.overlaps(Range))
+    std::vector<MemoryAnnotation> Pieces;
+    Pieces.reserve(Annotations.size() + 2);
+    for (const auto &Piece : Annotations) {
+      if (Piece.Range.Offset >= Range.Offset)
+        break;
+      uint64_t End = std::min(Piece.Range.endOffset(), Range.Offset);
+      Pieces.push_back(
+          {{Piece.Range.Offset, End - Piece.Range.Offset}, Piece.MD});
+    }
+    Pieces.push_back({Range, std::move(Md)});
+    for (const auto &Piece : Annotations) {
+      if (Piece.Range.endOffset() <= Range.endOffset())
         continue;
-
-      // The full-range annotation is the blob's default policy, so narrower
-      // region annotations may overlap it. Overlaps between two region
-      // annotations remain invalid.
-      if (isWholeBlobRange(Annotation.Range) || isWholeBlobRange(Range))
-        continue;
-
-      return false;
+      uint64_t Start = std::max(Piece.Range.Offset, Range.endOffset());
+      Pieces.push_back({{Start, Piece.Range.endOffset() - Start}, Piece.MD});
     }
 
-    Annotations.push_back({Range, std::move(Md)});
-    std::sort(Annotations.begin(), Annotations.end(), annotationSortLess);
+    if (!isTiling(Pieces, Size))
+      return false;
+    Annotations = std::move(Pieces);
     return true;
+  }
+
+  // Replaces every piece with one piece that covers the blob.
+  void resetAnnotations(Metadata Md = {}) {
+    Annotations = {{{0, Size}, std::move(Md)}};
+  }
+
+  // Installs Pieces, typically after deserializing a snapshot. Fails, leaving
+  // the annotations unchanged, if Pieces does not tile the blob.
+  bool replaceAnnotations(std::vector<MemoryAnnotation> Pieces) {
+    if (!isTiling(Pieces, Size))
+      return false;
+    Annotations = std::move(Pieces);
+    return true;
+  }
+
+  // The piece that holds the byte at ByteOffset, or the last piece if
+  // ByteOffset is past the end of the blob.
+  const MemoryAnnotation &annotationAt(uint64_t ByteOffset) const {
+    auto It =
+        std::upper_bound(Annotations.begin(), Annotations.end(), ByteOffset,
+                         [](uint64_t Byte, const MemoryAnnotation &Piece) {
+                           return Byte < Piece.Range.Offset;
+                         });
+    return *std::prev(It);
+  }
+
+  const std::vector<MemoryAnnotation> &getAnnotations() const {
+    return Annotations;
   }
 
   MnemeMemoryBlob(uint64_t ActualSize = 0, void *BlobAddr = nullptr,
                   uint64_t Size = 0)
       : ActualSize(ActualSize), BlobAddr(BlobAddr), Size(Size), Data(Size),
         IsMapped(false) {
-    resetDefaultAnnotation();
+    resetAnnotations();
   }
 
   // Maps MapSize bytes of new device memory at exactly MapVA, owned by this
@@ -369,8 +370,6 @@ public:
     this->ActualSize = Size;
     this->Size = Size;
     this->IsMapped = false;
-    // Preserve any annotations already loaded from a snapshot. Fresh blobs get
-    // their default whole-blob annotation from the constructor.
     return ret;
   }
 
@@ -413,7 +412,7 @@ public:
   readWithMetadata(const char *&Buffer) {
     auto Entry = readHeaderAndData(Buffer);
     auto &Blob = Entry.second;
-    Blob.registerAnnotation({0, Blob.getSize()}, metadata::fromBuffer(Buffer));
+    Blob.resetAnnotations(metadata::fromBuffer(Buffer));
     return Entry;
   }
 
@@ -489,54 +488,6 @@ public:
   uint8_t *getHostData() const { return Data.hostData(); }
   void *getDeviceData() const { return Data.deviceData(); }
 
-  bool replaceAnnotations(std::vector<MemoryAnnotation> CandidateAnnotations) {
-    if (CandidateAnnotations.empty())
-      return false;
-
-    // Install a complete blob annotation set, typically after deserializing a
-    // snapshot. The set must contain exactly one full-range default annotation.
-    size_t WholeBlobCount = 0;
-    for (const auto &Annotation : CandidateAnnotations) {
-      if (!isValidAnnotationRange(Annotation.Range))
-        return false;
-      if (isWholeBlobRange(Annotation.Range))
-        ++WholeBlobCount;
-    }
-    if (WholeBlobCount != 1)
-      return false;
-
-    std::sort(CandidateAnnotations.begin(), CandidateAnnotations.end(),
-              annotationSortLess);
-    for (size_t I = 1; I < CandidateAnnotations.size(); ++I) {
-      if (CandidateAnnotations[I - 1].Range.hasSameRange(
-              CandidateAnnotations[I].Range))
-        continue;
-      if (CandidateAnnotations[I - 1].Range.overlaps(
-              CandidateAnnotations[I].Range) &&
-          !isWholeBlobRange(CandidateAnnotations[I - 1].Range) &&
-          !isWholeBlobRange(CandidateAnnotations[I].Range)) {
-        return false;
-      }
-    }
-
-    Annotations = std::move(CandidateAnnotations);
-    return true;
-  }
-
-  const std::vector<MemoryAnnotation> &getAnnotations() const {
-    return Annotations;
-  }
-
-  const MemoryAnnotation *getWholeBlobAnnotation() const {
-    return findWholeBlobAnnotation();
-  }
-
-  std::vector<MemoryAnnotation> getRegionAnnotations() const {
-    // Region annotations are the narrower ranges, excluding the
-    // full-range default annotation for the blob.
-    return regionAnnotations(Annotations, Size);
-  }
-
   bool operator==(const MnemeMemoryBlob<VendorTypes> &other) const {
     if (getSize() != other.getSize()) {
       LOG_WARN("Sizes Differ {} vs {}", getSize(), other.getSize());
@@ -565,93 +516,31 @@ public:
 
 private:
   bool hasSameAnnotations(const MnemeMemoryBlob<VendorTypes> &Other) const {
-    auto *WholeBlob = getWholeBlobAnnotation();
-    auto *OtherWholeBlob = Other.getWholeBlobAnnotation();
-    if (!WholeBlob || !OtherWholeBlob || WholeBlob->MD != OtherWholeBlob->MD) {
-      LOG_WARN("Whole-blob metadata differs for blob {}", Other.getBlobAddr());
+    if (Annotations != Other.Annotations) {
+      LOG_WARN("Annotations differ for blob {}", Other.getBlobAddr());
       return false;
-    }
-
-    auto Regions = getRegionAnnotations();
-    auto OtherRegions = Other.getRegionAnnotations();
-    if (Regions.size() != OtherRegions.size()) {
-      LOG_WARN("Region metadata count differs for blob {}",
-               Other.getBlobAddr());
-      return false;
-    }
-
-    for (size_t I = 0; I < Regions.size(); ++I) {
-      if (Regions[I] != OtherRegions[I]) {
-        LOG_WARN("Region metadata differs for blob {} at region index {}",
-                 Other.getBlobAddr(), I);
-        return false;
-      }
     }
     return true;
   }
 
-  // Compares each region annotation's bytes with its own metadata and every
-  // byte no region covers with the whole-blob metadata. Requires a whole-blob
-  // annotation, which hasSameAnnotations() checks.
+  // Compares the bytes of each piece with that piece's metadata.
   bool matchesWithinTolerance(const void *Actual, const void *Expected) const {
     const auto *ActualBytes = static_cast<const char *>(Actual);
     const auto *ExpectedBytes = static_cast<const char *>(Expected);
-    const auto &WholeMD = getWholeBlobAnnotation()->MD;
-    auto Regions = getRegionAnnotations();
-
-    if (Regions.empty()) {
-      LOG_DEBUG(
-          "Comparing blob {} full range [0, {}) with whole-blob metadata "
-          "builtin={} threshold={} threshold_kind={} norm={} tag={}",
-          Actual, getSize(), static_cast<unsigned>(WholeMD.builtin),
-          WholeMD.threshold, static_cast<unsigned>(WholeMD.threshold_kind),
-          static_cast<unsigned>(WholeMD.norm), WholeMD.tag.value_or("no_tag"));
-      return compareRange(ActualBytes, ExpectedBytes, getSize(), WholeMD);
-    }
-
-    uint64_t CurrentOffset = 0;
-    for (const auto &Region : Regions) {
-      if (Region.Range.Offset > CurrentOffset) {
-        LOG_DEBUG("Comparing blob {} gap [{}, {}) with whole-blob metadata "
-                  "builtin={} threshold={} threshold_kind={} norm={} tag={}",
-                  Actual, CurrentOffset, Region.Range.Offset,
-                  static_cast<unsigned>(WholeMD.builtin), WholeMD.threshold,
-                  static_cast<unsigned>(WholeMD.threshold_kind),
-                  static_cast<unsigned>(WholeMD.norm),
-                  WholeMD.tag.value_or("no_tag"));
-      }
-      if (!compareRange(ActualBytes + CurrentOffset,
-                        ExpectedBytes + CurrentOffset,
-                        Region.Range.Offset - CurrentOffset, WholeMD))
+    for (const auto &Piece : Annotations) {
+      const auto &Range = Piece.Range;
+      const auto &Md = Piece.MD;
+      LOG_DEBUG("Comparing blob {} bytes [{}, {}) with builtin={} threshold={} "
+                "threshold_kind={} norm={} tag={}",
+                Actual, Range.Offset, Range.endOffset(),
+                static_cast<unsigned>(Md.builtin), Md.threshold,
+                static_cast<unsigned>(Md.threshold_kind),
+                static_cast<unsigned>(Md.norm), Md.tag.value_or("no_tag"));
+      if (!compareRange(ActualBytes + Range.Offset,
+                        ExpectedBytes + Range.Offset, Range.Extent, Md))
         return false;
-
-      LOG_DEBUG("Comparing blob {} region [{}, {}) with region metadata "
-                "builtin={} threshold={} threshold_kind={} norm={} tag={}",
-                Actual, Region.Range.Offset, Region.Range.endOffset(),
-                static_cast<unsigned>(Region.MD.builtin), Region.MD.threshold,
-                static_cast<unsigned>(Region.MD.threshold_kind),
-                static_cast<unsigned>(Region.MD.norm),
-                Region.MD.tag.value_or("no_tag"));
-      if (!compareRange(ActualBytes + Region.Range.Offset,
-                        ExpectedBytes + Region.Range.Offset,
-                        Region.Range.Extent, Region.MD))
-        return false;
-
-      CurrentOffset = Region.Range.endOffset();
     }
-
-    if (CurrentOffset < getSize()) {
-      LOG_DEBUG("Comparing blob {} tail [{}, {}) with whole-blob metadata "
-                "builtin={} threshold={} threshold_kind={} norm={} tag={}",
-                Actual, CurrentOffset, getSize(),
-                static_cast<unsigned>(WholeMD.builtin), WholeMD.threshold,
-                static_cast<unsigned>(WholeMD.threshold_kind),
-                static_cast<unsigned>(WholeMD.norm),
-                WholeMD.tag.value_or("no_tag"));
-    }
-    return compareRange(ActualBytes + CurrentOffset,
-                        ExpectedBytes + CurrentOffset,
-                        getSize() - CurrentOffset, WholeMD);
+    return true;
   }
 };
 

@@ -242,6 +242,16 @@ CompareResult compareDeviceBlobs(const char *Blob1, const char *Blob2,
   Init.MaxErr = 0.0;
   Init.Agg = 0.0;
 
+  static_assert(builtinByteWidth(BuiltinDType::F16) == sizeof(__half));
+  std::size_t ElementSize = builtinByteWidth(Md.builtin);
+  if (ElementSize == 0)
+    LOG_FATAL("Unsupported BuiltinDType in Mneme comparison dispatch");
+  uint64_t NumElements = NumBytes / ElementSize;
+  // Bytes short of one element are not compared, and a launch with no blocks
+  // is an error.
+  if (NumElements == 0)
+    return Init;
+
   CompareResult *Res;
   auto EC =
       DeviceVendorTraits::DeviceErrorCheck(DeviceVendorTraits::DeviceMalloc(
@@ -253,37 +263,6 @@ CompareResult compareDeviceBlobs(const char *Blob1, const char *Blob2,
       Res, &Init, sizeof(Init), DeviceVendorTraits::MemcpyHostToDeviceKind()));
   if (EC)
     LOG_FATAL("Error in initializing CompareResult " + EC.value());
-
-  auto NumElements = [](BuiltinDType DType, size_t NumBytes) {
-    switch (DType) {
-    case BuiltinDType::U8:
-      return NumBytes / sizeof(uint8_t);
-    case BuiltinDType::I8:
-      return NumBytes / sizeof(int8_t);
-    case BuiltinDType::U16:
-      return NumBytes / sizeof(uint16_t);
-    case BuiltinDType::I16:
-      return NumBytes / sizeof(int16_t);
-    case BuiltinDType::U32:
-      return NumBytes / sizeof(uint32_t);
-    case BuiltinDType::I32:
-      return NumBytes / sizeof(int32_t);
-    case BuiltinDType::U64:
-      return NumBytes / sizeof(uint64_t);
-    case BuiltinDType::I64:
-      return NumBytes / sizeof(int64_t);
-    case BuiltinDType::F16:
-      return NumBytes / sizeof(__half);
-    case BuiltinDType::F32:
-      return NumBytes / sizeof(float);
-    case BuiltinDType::F64:
-      return NumBytes / sizeof(double);
-    default:
-      LOG_FATAL("Unsupported BuiltinDType in Mneme comparison dispatch");
-    }
-    LOG_FATAL("Unsupported BuiltinDType in Mneme comparison dispatch");
-    return 0UL;
-  }(Md.builtin, NumBytes);
 
   uint64_t NumBlocks = std::min(
       (NumElements + NUM_THREADS_PER_BLOCK - 1) / NUM_THREADS_PER_BLOCK,
