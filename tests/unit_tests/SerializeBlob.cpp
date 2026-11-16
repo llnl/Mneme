@@ -39,15 +39,16 @@ bool expectAnnotations(const MnemeMemoryBlobDevice &Blob,
   if (Blob.getAnnotations() == Expected)
     return true;
   std::cerr << "Unexpected annotations after " << Step << ":";
-  for (const auto &Piece : Blob.getAnnotations())
-    std::cerr << " [" << Piece.Range.Offset << ", " << Piece.Range.endOffset()
-              << ") " << Piece.MD.tag.value_or("no_tag");
+  for (const auto &Subregion : Blob.getAnnotations())
+    std::cerr << " [" << Subregion.Range.Offset << ", "
+              << Subregion.Range.endOffset() << ") "
+              << Subregion.MD.tag.value_or("no_tag");
   std::cerr << "\n";
   return false;
 }
 
-// Later annotations overwrite earlier ones on the bytes they cover, and pieces
-// with equal metadata stay separate.
+// Later annotations overwrite earlier ones on the bytes they cover, and
+// subregions with equal metadata stay separate.
 bool checkOverwrites() {
   MnemeMemoryBlobDevice Blob(128, nullptr, 128);
   auto Whole = typed(BuiltinDType::F64, "whole");
@@ -57,7 +58,7 @@ bool checkOverwrites() {
   bool Ok = Blob.setAnnotation({32, 32}, First) == AnnotationStatus::Ok &&
             expectAnnotations(
                 Blob, {{{0, 32}, {}}, {{32, 32}, First}, {{64, 64}, {}}},
-                "a region inside the default piece");
+                "a region inside the default subregion");
   Ok = Ok && Blob.setAnnotation({48, 32}, Second) == AnnotationStatus::Ok &&
        expectAnnotations(Blob,
                          {{{0, 32}, {}},
@@ -78,9 +79,7 @@ bool checkOverwrites() {
   return Ok;
 }
 
-// Every piece starts on an element boundary and every piece but the last ends
-// on one, and an explicit region covers whole elements; a rejected annotation
-// names the rule it breaks and leaves the blob unchanged.
+// A rejected annotation leaves the blob unchanged.
 bool checkAlignment() {
   MnemeMemoryBlobDevice Blob(128, nullptr, 128);
   auto F32 = typed(BuiltinDType::F32, "f32");
@@ -88,36 +87,32 @@ bool checkAlignment() {
   auto U8 = typed(BuiltinDType::U8, "u8");
 
   bool Ok = true;
-  if (Blob.setAnnotation({2, 8}, F32) != AnnotationStatus::MisalignedStart ||
-      Blob.setAnnotation({0, 6}, F32) != AnnotationStatus::PartialElement) {
+  if (Blob.setAnnotation({2, 8}, F32) !=
+          AnnotationStatus::StartsInsideElement ||
+      Blob.setAnnotation({0, 6}, F32) != AnnotationStatus::EndsInsideElement) {
     std::cerr << "Did not reject a misaligned annotation for its rule\n";
     Ok = false;
   }
   Ok = Ok && expectAnnotations(Blob, {{{0, 128}, {}}}, "misaligned regions");
 
   Ok = Ok && Blob.setAnnotation({0, 128}, F64) == AnnotationStatus::Ok;
-  if (Blob.setAnnotation({4, 4}, U8) !=
-      AnnotationStatus::SplitsElementAtStart) {
+  if (Blob.setAnnotation({4, 4}, U8) != AnnotationStatus::StartsInsideElement ||
+      Blob.setAnnotation({8, 4}, U8) != AnnotationStatus::EndsInsideElement) {
     std::cerr << "Did not reject a region that splits an F64 element\n";
     Ok = false;
   }
   Ok = Ok && expectAnnotations(Blob, {{{0, 128}, F64}},
-                               "a region that cuts an F64 piece at offset 4");
+                               "regions that split an F64 element");
 
   MnemeMemoryBlobDevice Odd(12, nullptr, 12);
-  if (Odd.setRegionAnnotation({0, 12}, F64) !=
-      AnnotationStatus::PartialElement) {
-    std::cerr << "Accepted a region that ends in a partial element\n";
-    Ok = false;
-  }
   Ok = Ok && Odd.setAnnotation({0, 12}, F64) == AnnotationStatus::Ok &&
        expectAnnotations(Odd, {{{0, 12}, F64}},
                          "an F64 annotation on a 12-byte blob");
   return Ok;
 }
 
-// A loaded annotation list must tile the blob.
-bool checkLoadedTiling() {
+// A loaded annotation list must divide the blob into valid subregions.
+bool checkLoadedSubregions() {
   MnemeMemoryBlobDevice Blob(128, nullptr, 128);
   auto Md = typed(BuiltinDType::F32, "loaded");
   const std::vector<std::vector<MemoryAnnotation>> Invalid{
@@ -126,15 +121,15 @@ bool checkLoadedTiling() {
       {{{0, 64}, Md}, {{64, 32}, Md}},
   };
   bool Ok = true;
-  for (const auto &Pieces : Invalid) {
-    if (Blob.replaceAnnotations(Pieces)) {
-      std::cerr << "Loaded an annotation list that does not tile the blob\n";
+  for (const auto &Subregions : Invalid) {
+    if (Blob.replaceAnnotations(Subregions)) {
+      std::cerr << "Loaded an invalid annotation list\n";
       Ok = false;
     }
   }
   const std::vector<MemoryAnnotation> Valid{{{0, 64}, Md}, {{64, 64}, {}}};
   return Ok && Blob.replaceAnnotations(Valid) &&
-         expectAnnotations(Blob, Valid, "loading a tiling");
+         expectAnnotations(Blob, Valid, "loading valid subregions");
 }
 
 int main(int argc, char **argv) {
@@ -191,7 +186,7 @@ int main(int argc, char **argv) {
       std::cerr << "Memory differs between GV and GVR\n";
       return -1;
     }
-    if (!checkOverwrites() || !checkAlignment() || !checkLoadedTiling())
+    if (!checkOverwrites() || !checkAlignment() || !checkLoadedSubregions())
       return -1;
     return 0;
   }();
