@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -11,7 +10,6 @@
 #include <vector>
 
 #include <llvm/ADT/ArrayRef.h>
-#include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Support/MemoryBuffer.h>
@@ -67,7 +65,7 @@ struct ReplayGlobalVar {
 template <DeviceVendors VendorTypes> struct Snapshot {
   std::shared_ptr<KernelInfo> KInfo;
   std::unordered_map<std::string, ReplayGlobalVar> GlobalVars;
-  llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> DeviceMemory;
+  BlobsByAddress<VendorTypes> DeviceMemory;
 };
 
 inline std::pair<std::string, ReplayGlobalVar>
@@ -259,9 +257,9 @@ applyGlobalDiffs(const char *&Buffer,
 
 // Reads a diff blob header and returns the base blob it refers to.
 template <DeviceVendors VendorTypes>
-MnemeMemoryBlob<VendorTypes> &readDiffBlobHeader(
-    const char *&Buffer,
-    llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory) {
+MnemeMemoryBlob<VendorTypes> &
+readDiffBlobHeader(const char *&Buffer,
+                   BlobsByAddress<VendorTypes> &DeviceMemory) {
   BlobHeader BH = BlobHeader::read(Buffer);
   auto It = DeviceMemory.find(BH.DevAddr);
   if (It == DeviceMemory.end())
@@ -504,11 +502,6 @@ BaseSnapshotSource<VendorTypes>::load(const std::string &KernelName) const {
 
   return Reader->read(KernelName, BaseSnapshotSource<VendorTypes>());
 }
-
-// Recorded allocations by base address, ordered so that an interior pointer
-// resolves to the allocation that contains it.
-template <DeviceVendors VendorTypes>
-using BlobsByAddress = std::map<void *, MnemeMemoryBlob<VendorTypes>>;
 
 template <DeviceVendors VendorTypes> struct SnapshotInput {
   const proteus::runtime::GlobalMetadataMap &GlobalVars;
