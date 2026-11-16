@@ -174,5 +174,5 @@ Where annotations overlap, the later one wins,
 so annotate the whole allocation first and its sub-regions after it.
 A sub-region must cover whole elements.
 
-For the full API reference, supported data types, threshold semantics,
-and a complete example, see **[Usage → Verification](verification.md)**.
+For the supported data types and threshold semantics,
+see **[Usage → Verification](verification.md)**.
