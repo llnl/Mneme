@@ -406,12 +406,12 @@ public:
 
   // Returns the epilogue capture to run after the launch completes.
   template <DeviceVendors VendorTypes>
-  std::optional<std::function<void()>> takeSnapshot(
-      std::filesystem::path &MnemeDir, const void *Kernel,
-      const LaunchHandle &Launch,
-      llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
-      void **Args, typename DeviceTraits<VendorTypes>::DeviceStream_t Stream,
-      EpilogueSnapshotType EpilogueType) {
+  std::optional<std::function<void()>>
+  takeSnapshot(std::filesystem::path &MnemeDir, const void *Kernel,
+               const LaunchHandle &Launch,
+               BlobsByAddress<VendorTypes> &DeviceMemory, void **Args,
+               typename DeviceTraits<VendorTypes>::DeviceStream_t Stream,
+               EpilogueSnapshotType EpilogueType) {
     if (!Launch.DynamicHash)
       return std::nullopt;
     uint64_t DynamicHash = *Launch.DynamicHash;
@@ -584,10 +584,10 @@ public:
   }
 
   template <DeviceVendors VendorTypes>
-  std::optional<std::function<void()>> takeSnapshot(
-      const void *Kernel, const LaunchHandle &Launch,
-      llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &DeviceMemory,
-      void **Args, typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
+  std::optional<std::function<void()>>
+  takeSnapshot(const void *Kernel, const LaunchHandle &Launch,
+               BlobsByAddress<VendorTypes> &DeviceMemory, void **Args,
+               typename DeviceTraits<VendorTypes>::DeviceStream_t Stream) {
     return KernelRecords.find(Launch.StaticHash)
         ->second.takeSnapshot<VendorTypes>(MnemeDirectory, Kernel, Launch,
                                            DeviceMemory, Args, Stream,
