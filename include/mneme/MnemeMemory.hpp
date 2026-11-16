@@ -98,10 +98,8 @@ enum class AnnotationStatus {
   OutOfBounds,
   Empty,
   UnknownElementType,
-  MisalignedStart,
-  PartialElement,
-  SplitsElementAtStart,
-  SplitsElementAtEnd,
+  StartsInsideElement,
+  EndsInsideElement,
 };
 
 inline const char *describe(AnnotationStatus Status) {
@@ -114,14 +112,12 @@ inline const char *describe(AnnotationStatus Status) {
     return "is empty";
   case AnnotationStatus::UnknownElementType:
     return "has a builtin type with no element size";
-  case AnnotationStatus::MisalignedStart:
-    return "does not start on an element boundary of its type";
-  case AnnotationStatus::PartialElement:
-    return "does not cover a whole number of its elements";
-  case AnnotationStatus::SplitsElementAtStart:
-    return "starts inside an element of the annotation it splits";
-  case AnnotationStatus::SplitsElementAtEnd:
-    return "ends inside an element of the annotation it splits";
+  case AnnotationStatus::StartsInsideElement:
+    return "starts inside an element of its type or of the annotation it "
+           "overlaps";
+  case AnnotationStatus::EndsInsideElement:
+    return "ends inside an element of its type or of the annotation it "
+           "overlaps";
   }
   return "has an unknown annotation status";
 }
@@ -254,6 +250,8 @@ protected:
     return std::isfinite(Compare.Agg) && Compare.Agg <= Md.threshold;
   }
 
+  // Sorted subregions that cover the blob. A later annotation overrides the
+  // bytes it covers, so it can split an earlier subregion in two.
   std::vector<MemoryAnnotation> Annotations;
   uint64_t ActualSize;
   void *BlobAddr;
@@ -267,82 +265,57 @@ protected:
   int DeviceID = 0;
   MemoryAllocationHandle_t Handle{};
 
-  // Pieces tile a blob of Size bytes when they are sorted, contiguous, and
-  // cover [0, Size) with non-empty extents, or are the single piece {0, 0} of
-  // an empty blob. Each piece must start on an element boundary of its own
-  // builtin type and, except for the last, end on one. The last piece may end
-  // in a partial element because a blob's size need not be a multiple of its
-  // element size; comparison ignores those trailing bytes.
-  static bool isTiling(const std::vector<MemoryAnnotation> &Pieces,
-                       uint64_t Size) {
-    if (Pieces.empty())
+  // The last subregion may end inside an element because a blob's size need
+  // not be a multiple of its element size.
+  static bool
+  areValidSubregions(const std::vector<MemoryAnnotation> &Subregions,
+                     uint64_t Size) {
+    if (Subregions.empty())
       return false;
     uint64_t End = 0;
-    for (size_t I = 0; I < Pieces.size(); ++I) {
-      const auto &Range = Pieces[I].Range;
-      bool IsLast = I + 1 == Pieces.size();
+    for (size_t I = 0; I < Subregions.size(); ++I) {
+      const auto &Range = Subregions[I].Range;
       if (Range.Offset != End || Range.Extent > Size - Range.Offset)
         return false;
-      if (Range.Extent == 0 && !(Size == 0 && Pieces.size() == 1))
+      // An empty blob keeps one empty subregion so that annotationAt() works.
+      if (Range.Extent == 0 && !(Size == 0 && Subregions.size() == 1))
         return false;
-      if (!isElementBoundary(Range.Offset, Pieces[I].MD))
+      if (builtinByteWidth(Subregions[I].MD.builtin) == 0)
         return false;
-      if (!IsLast && !isElementBoundary(Range.endOffset(), Pieces[I].MD))
+      if (I > 0 && !isElementBoundaryOfBoth(Range.Offset, Subregions[I - 1].MD,
+                                            Subregions[I].MD))
         return false;
       End = Range.endOffset();
     }
     return End == Size;
   }
 
-  // An unknown builtin type has no element boundaries, so no piece can use it.
+  static bool isElementBoundaryOfBoth(uint64_t Offset, const Metadata &Before,
+                                      const Metadata &After) {
+    return isElementBoundary(Offset, Before) &&
+           isElementBoundary(Offset, After);
+  }
+
   static bool isElementBoundary(uint64_t Offset, const Metadata &Md) {
     uint64_t Width = builtinByteWidth(Md.builtin);
     return Width != 0 && Offset % Width == 0;
   }
 
-  // Gives the bytes in Range the metadata Md if the pieces still tile the blob
-  // afterwards, and otherwise returns the rule Range breaks. Because the
-  // pieces tile the blob beforehand, only Range and the two cuts it makes need
-  // checking. WholeElements also requires Range to cover whole elements when
-  // it ends the blob, where a piece may otherwise end in a partial element.
-  AnnotationStatus insertPiece(ByteSpan Range, Metadata Md,
-                               bool WholeElements) {
-    if (Range.Offset > Size || Range.Extent > Size - Range.Offset)
+  // Range may end inside an element at the end of the blob, so that a
+  // whole-blob annotation fits a blob of any size.
+  AnnotationStatus checkAnnotation(ByteSpan Range, const Metadata &Md) const {
+    uint64_t Begin = Range.Offset;
+    uint64_t End = Range.endOffset();
+    if (Begin > Size || Range.Extent > Size - Begin)
       return AnnotationStatus::OutOfBounds;
     if (Range.Extent == 0 && Size != 0)
       return AnnotationStatus::Empty;
     if (builtinByteWidth(Md.builtin) == 0)
       return AnnotationStatus::UnknownElementType;
-    if (!isElementBoundary(Range.Offset, Md))
-      return AnnotationStatus::MisalignedStart;
-    bool EndsBlob = Range.endOffset() == Size;
-    if ((WholeElements || !EndsBlob) && !isElementBoundary(Range.Extent, Md))
-      return AnnotationStatus::PartialElement;
-    // Every piece starts on an element boundary, so a cut through a piece is
-    // aligned when its offset is.
-    if (!isElementBoundary(Range.Offset, annotationAt(Range.Offset).MD))
-      return AnnotationStatus::SplitsElementAtStart;
-    if (!EndsBlob && !isElementBoundary(Range.endOffset(),
-                                        annotationAt(Range.endOffset()).MD))
-      return AnnotationStatus::SplitsElementAtEnd;
-
-    std::vector<MemoryAnnotation> Pieces;
-    Pieces.reserve(Annotations.size() + 2);
-    for (const auto &Piece : Annotations) {
-      if (Piece.Range.Offset >= Range.Offset)
-        break;
-      uint64_t End = std::min(Piece.Range.endOffset(), Range.Offset);
-      Pieces.push_back(
-          {{Piece.Range.Offset, End - Piece.Range.Offset}, Piece.MD});
-    }
-    Pieces.push_back({Range, std::move(Md)});
-    for (const auto &Piece : Annotations) {
-      if (Piece.Range.endOffset() <= Range.endOffset())
-        continue;
-      uint64_t Start = std::max(Piece.Range.Offset, Range.endOffset());
-      Pieces.push_back({{Start, Piece.Range.endOffset() - Start}, Piece.MD});
-    }
-    Annotations = std::move(Pieces);
+    if (!isElementBoundaryOfBoth(Begin, annotationAt(Begin).MD, Md))
+      return AnnotationStatus::StartsInsideElement;
+    if (End != Size && !isElementBoundaryOfBoth(End, Md, annotationAt(End).MD))
+      return AnnotationStatus::EndsInsideElement;
     return AnnotationStatus::Ok;
   }
 
@@ -359,33 +332,42 @@ protected:
   }
 
 public:
-  // Gives the bytes in Range the metadata Md, cutting the pieces Range
-  // overlaps so that their bytes outside Range keep their metadata. Range may
-  // end in a partial element at the end of the blob, so that a whole-blob
-  // annotation fits a blob of any size. On failure the annotations are
-  // unchanged.
   AnnotationStatus setAnnotation(ByteSpan Range, Metadata Md) {
-    return insertPiece(Range, std::move(Md), /*WholeElements=*/false);
+    auto Status = checkAnnotation(Range, Md);
+    if (Status != AnnotationStatus::Ok)
+      return Status;
+
+    uint64_t Begin = Range.Offset;
+    uint64_t End = Range.endOffset();
+    std::vector<MemoryAnnotation> Subregions;
+    Subregions.reserve(Annotations.size() + 2);
+    for (const auto &Old : Annotations) {
+      if (Old.Range.Offset >= Begin)
+        break;
+      uint64_t OldEnd = std::min(Old.Range.endOffset(), Begin);
+      Subregions.push_back(
+          {{Old.Range.Offset, OldEnd - Old.Range.Offset}, Old.MD});
+    }
+    Subregions.push_back({Range, std::move(Md)});
+    for (const auto &Old : Annotations) {
+      if (Old.Range.endOffset() <= End)
+        continue;
+      uint64_t OldBegin = std::max(Old.Range.Offset, End);
+      Subregions.push_back(
+          {{OldBegin, Old.Range.endOffset() - OldBegin}, Old.MD});
+    }
+    Annotations = std::move(Subregions);
+    return AnnotationStatus::Ok;
   }
 
-  // Like setAnnotation(), for a region the application named: it must cover
-  // whole elements even at the end of the blob, or comparison would skip its
-  // trailing bytes.
-  AnnotationStatus setRegionAnnotation(ByteSpan Range, Metadata Md) {
-    return insertPiece(Range, std::move(Md), /*WholeElements=*/true);
-  }
-
-  // Replaces every piece with one piece that covers the blob.
   void resetAnnotations(Metadata Md = {}) {
     Annotations = {{{0, Size}, std::move(Md)}};
   }
 
-  // Installs Pieces, typically after deserializing a snapshot. Fails, leaving
-  // the annotations unchanged, if Pieces does not tile the blob.
-  bool replaceAnnotations(std::vector<MemoryAnnotation> Pieces) {
-    if (!isTiling(Pieces, Size))
+  bool replaceAnnotations(std::vector<MemoryAnnotation> Subregions) {
+    if (!areValidSubregions(Subregions, Size))
       return false;
-    Annotations = std::move(Pieces);
+    Annotations = std::move(Subregions);
     return true;
   }
 
@@ -396,13 +378,12 @@ public:
       LOG_FATAL("Invalid annotation set serialized for blob");
   }
 
-  // The piece that holds the byte at ByteOffset, or the last piece if
-  // ByteOffset is past the end of the blob.
+  // Past the end of the blob, this is the last subregion.
   const MemoryAnnotation &annotationAt(uint64_t ByteOffset) const {
     auto It =
         std::upper_bound(Annotations.begin(), Annotations.end(), ByteOffset,
-                         [](uint64_t Byte, const MemoryAnnotation &Piece) {
-                           return Byte < Piece.Range.Offset;
+                         [](uint64_t Byte, const MemoryAnnotation &Subregion) {
+                           return Byte < Subregion.Range.Offset;
                          });
     return *std::prev(It);
   }
@@ -605,13 +586,12 @@ private:
     return true;
   }
 
-  // Compares the bytes of each piece with that piece's metadata.
   bool matchesWithinTolerance(const void *Actual, const void *Expected) const {
     const auto *ActualBytes = static_cast<const char *>(Actual);
     const auto *ExpectedBytes = static_cast<const char *>(Expected);
-    for (const auto &Piece : Annotations) {
-      const auto &Range = Piece.Range;
-      const auto &Md = Piece.MD;
+    for (const auto &Subregion : Annotations) {
+      const auto &Range = Subregion.Range;
+      const auto &Md = Subregion.MD;
       LOG_DEBUG("Comparing blob {} bytes [{}, {}) with builtin={} threshold={} "
                 "threshold_kind={} norm={} tag={}",
                 Actual, Range.Offset, Range.endOffset(),

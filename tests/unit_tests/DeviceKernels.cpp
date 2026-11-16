@@ -475,8 +475,7 @@ static void run_large_u8_case() {
   MnemeDeviceRT::DeviceFree(dB);
 }
 
-// A cut can leave a last piece shorter than one element, whose bytes
-// comparison ignores.
+// Comparison ignores a last subregion shorter than one element.
 static void run_partial_element_tail_case() {
   constexpr uint64_t NumBytes = 12;
   uint8_t HostA[NumBytes] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};

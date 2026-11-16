@@ -295,8 +295,16 @@ public:
       return false;
     }
 
+    // Comparison skips a partial element at the end of a blob.
+    auto Width = builtinByteWidth(md.builtin);
+    if (Width != 0 && bytes % Width != 0)
+      LOG_FATAL("region annotation does not cover a whole number of its "
+                "elements ptr={} bytes={} builtin={} elem_size={} tag={}",
+                ptr, bytes, static_cast<unsigned>(md.builtin), Width,
+                md.tag.value_or("no_tag"));
+
     auto &[BasePtr, Blob] = *Owner->It;
-    auto Status = Blob.setRegionAnnotation({Owner->Offset, bytes}, md);
+    auto Status = Blob.setAnnotation({Owner->Offset, bytes}, md);
     if (Status != AnnotationStatus::Ok)
       LOG_FATAL("region annotation {} ptr={} base_ptr={} offset={} bytes={} "
                 "blob_size={} builtin={} elem_size={} tag={}",
