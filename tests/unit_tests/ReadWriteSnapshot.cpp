@@ -38,20 +38,6 @@ template <typename T> void initializeRandomBuffer(T *Buffer, size_t Size) {
   }
 }
 
-const Metadata &getWholeBlobMetadata(const MnemeMemoryBlobDevice &Blob) {
-  auto *Annotation = Blob.getWholeBlobAnnotation();
-  if (!Annotation)
-    LOG_FATAL("Blob is missing whole-blob annotation");
-  return Annotation->MD;
-}
-
-MemoryAnnotation getOnlyRegionAnnotation(const MnemeMemoryBlobDevice &Blob) {
-  auto Regions = Blob.getRegionAnnotations();
-  if (Regions.size() != 1)
-    LOG_FATAL("Expected exactly one region annotation, got {}", Regions.size());
-  return Regions.front();
-}
-
 int main(int argc, char **argv) {
   // We allocate some "fake" globals
   auto initializeDeviceData = [&] {
@@ -85,8 +71,8 @@ int main(int argc, char **argv) {
   Md.threshold = 0.5;
   Md.threshold_kind = ThresholdKind::Relative;
   Md.tag = std::string("Test");
-  if (!Blob.registerAnnotation({0, Blob.getSize()}, Md))
-    LOG_FATAL("Could not register whole-blob annotation");
+  if (!Blob.setAnnotation({0, Blob.getSize()}, Md))
+    LOG_FATAL("Could not set whole-blob annotation");
 
   mneme::Metadata RegionMd;
   RegionMd.builtin = BuiltinDType::U8;
@@ -94,8 +80,10 @@ int main(int argc, char **argv) {
   RegionMd.threshold = 0.0;
   RegionMd.threshold_kind = ThresholdKind::Absolute;
   RegionMd.tag = std::string("Region");
-  if (!Blob.registerAnnotation({16, 32}, RegionMd))
-    LOG_FATAL("Could not register region annotation");
+  if (!Blob.setAnnotation({16, 32}, RegionMd))
+    LOG_FATAL("Could not set region annotation");
+  const std::vector<MemoryAnnotation> ExpectedAnnotations{
+      {{0, 16}, Md}, {{16, 32}, RegionMd}, {{48, 80}, Md}};
 
   Blob.setHostData(std::unique_ptr<uint8_t[]>(new uint8_t[128]));
 
@@ -178,7 +166,7 @@ int main(int argc, char **argv) {
         return 1;
       }
 
-      const auto &RBlobMd = getWholeBlobMetadata(RBlob);
+      const auto &RBlobMd = RBlob.annotationAt(0).MD;
 
       if (RBlobMd.builtin != BuiltinDType::F64) {
         std::cerr << "Metadata builtin differs\n";
@@ -205,13 +193,8 @@ int main(int argc, char **argv) {
         return 1;
       }
 
-      const auto &RRegion = getOnlyRegionAnnotation(RBlob);
-      if (RRegion.Range.Offset != 16 || RRegion.Range.Extent != 32 ||
-          RRegion.MD.builtin != BuiltinDType::U8 ||
-          RRegion.MD.norm != Norm::None || RRegion.MD.threshold != 0.0 ||
-          RRegion.MD.threshold_kind != ThresholdKind::Absolute ||
-          RRegion.MD.tag.value() != "Region") {
-        std::cerr << "Region metadata differs\n";
+      if (RBlob.getAnnotations() != ExpectedAnnotations) {
+        std::cerr << "Annotations differ\n";
         return 1;
       }
 
@@ -325,7 +308,7 @@ int main(int argc, char **argv) {
       return 16;
     }
 
-    const auto &RBlobMd = getWholeBlobMetadata(RBlob);
+    const auto &RBlobMd = RBlob.annotationAt(0).MD;
     if (RBlobMd.builtin != BuiltinDType::F64 || RBlobMd.norm != Norm::L2 ||
         RBlobMd.threshold != 0.5 ||
         RBlobMd.threshold_kind != ThresholdKind::Relative ||
@@ -334,13 +317,8 @@ int main(int argc, char **argv) {
       return 16;
     }
 
-    const auto &RRegion = getOnlyRegionAnnotation(RBlob);
-    if (RRegion.Range.Offset != 16 || RRegion.Range.Extent != 32 ||
-        RRegion.MD.builtin != BuiltinDType::U8 ||
-        RRegion.MD.norm != Norm::None || RRegion.MD.threshold != 0.0 ||
-        RRegion.MD.threshold_kind != ThresholdKind::Absolute ||
-        RRegion.MD.tag.value() != "Region") {
-      std::cerr << "Diff region metadata differs\n";
+    if (RBlob.getAnnotations() != ExpectedAnnotations) {
+      std::cerr << "Diff annotations differ\n";
       return 16;
     }
 
@@ -405,8 +383,7 @@ int main(int argc, char **argv) {
 
   // Replay loads annotations from snapshots first, then maps or allocates
   // memory for the blobs. This regression check makes sure those setup paths
-  // do not clobber deserialized whole-blob or region annotations back to the
-  // default full-range state.
+  // do not clobber deserialized annotations back to the default single piece.
   auto ValidateAnnotationPreservationAcrossReplaySetup = [&]() {
     auto PrologueIt = ReadDeviceMemMap.find((void *)BlobData.first);
     if (PrologueIt == ReadDeviceMemMap.end()) {
@@ -415,12 +392,8 @@ int main(int argc, char **argv) {
     }
 
     auto &MappedBlob = PrologueIt->second;
-    auto WholeBeforeMap = getWholeBlobMetadata(MappedBlob);
-    auto RegionBeforeMap = getOnlyRegionAnnotation(MappedBlob);
     MappedBlob.mapInto((void *)BlobData.first);
-    const auto &WholeAfterMap = getWholeBlobMetadata(MappedBlob);
-    const auto &RegionAfterMap = getOnlyRegionAnnotation(MappedBlob);
-    if (WholeAfterMap != WholeBeforeMap || RegionAfterMap != RegionBeforeMap) {
+    if (MappedBlob.getAnnotations() != ExpectedAnnotations) {
       std::cerr << "Annotations changed across mapInto()\n";
       return 1024;
     }
@@ -433,18 +406,13 @@ int main(int argc, char **argv) {
     }
 
     auto &AllocatedBlob = DiffIt->second;
-    auto WholeBeforeAlloc = getWholeBlobMetadata(AllocatedBlob);
-    auto RegionBeforeAlloc = getOnlyRegionAnnotation(AllocatedBlob);
     EC = MnemeDeviceRT::DeviceErrorCheck(
         AllocatedBlob.allocate(AllocatedBlob.getSize()));
     if (EC) {
       std::cerr << "Could not allocate blob during preservation test\n";
       return 1024;
     }
-    const auto &WholeAfterAlloc = getWholeBlobMetadata(AllocatedBlob);
-    const auto &RegionAfterAlloc = getOnlyRegionAnnotation(AllocatedBlob);
-    if (WholeAfterAlloc != WholeBeforeAlloc ||
-        RegionAfterAlloc != RegionBeforeAlloc) {
+    if (AllocatedBlob.getAnnotations() != ExpectedAnnotations) {
       std::cerr << "Annotations changed across allocate()\n";
       return 1024;
     }

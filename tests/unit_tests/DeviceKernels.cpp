@@ -380,8 +380,8 @@ static void run_pair_case(BuiltinDType dtype, T a, T b, ThresholdKind tk,
   md.threshold_kind = tk;
   md.norm = norm;
   md.threshold = threshold;
-  A.registerAnnotation({0, A.getSize()}, md);
-  B.registerAnnotation({0, B.getSize()}, md);
+  A.setAnnotation({0, A.getSize()}, md);
+  B.setAnnotation({0, B.getSize()}, md);
 
   CompareResult r = compareDeviceBlobs(
       reinterpret_cast<const char *>(A.getBlobAddr()),
@@ -475,8 +475,51 @@ static void run_large_u8_case() {
   MnemeDeviceRT::DeviceFree(dB);
 }
 
+// A cut can leave a last piece shorter than one element, whose bytes
+// comparison ignores.
+static void run_partial_element_tail_case() {
+  constexpr uint64_t NumBytes = 12;
+  uint8_t HostA[NumBytes] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  uint8_t HostB[NumBytes] = {1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0};
+  auto check = [](auto status) {
+    auto EC = MnemeDeviceRT::DeviceErrorCheck(status);
+    if (EC)
+      LOG_FATAL("Partial element tail test failed: " + EC.value());
+  };
+
+  MnemeMemoryBlob<Vendor> A(NumBytes, nullptr, NumBytes);
+  MnemeMemoryBlob<Vendor> B(NumBytes, nullptr, NumBytes);
+  check(A.allocate(NumBytes));
+  check(B.allocate(NumBytes));
+  check(MnemeDeviceRT::DeviceCopy(A.getBlobAddr(), HostA, NumBytes,
+                                  MnemeDeviceRT::MemcpyHostToDeviceKind()));
+  check(MnemeDeviceRT::DeviceCopy(B.getBlobAddr(), HostB, NumBytes,
+                                  MnemeDeviceRT::MemcpyHostToDeviceKind()));
+
+  Metadata F64;
+  F64.builtin = BuiltinDType::F64;
+  Metadata F32;
+  F32.builtin = BuiltinDType::F32;
+  for (auto *Blob : {&A, &B}) {
+    if (!Blob->setAnnotation({0, NumBytes}, F64) ||
+        !Blob->setAnnotation({0, 8}, F32)) {
+      std::cerr << "Could not annotate the 12-byte blob\n";
+      std::exit(1);
+    }
+  }
+  if (A != B) {
+    std::cerr << "The partial element tail of a blob was compared\n";
+    std::exit(1);
+  }
+
+  check(A.release());
+  check(B.release());
+}
+
 int main() {
   std::cout << "Running Mneme compareDeviceBlobs thorough tests...\n";
+
+  run_partial_element_tail_case();
 
   run_large_u8_case();
 

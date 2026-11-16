@@ -290,13 +290,30 @@ mneme::annotate(d_alias, alias_bytes, mneme::Metadata{
 
 - `mneme::annotate(ptr, nbytes, md)` applies metadata only to the byte range
   `[ptr, ptr + nbytes)`.
-- The full-range annotation acts as the default policy for uncovered bytes.
-- Narrower region annotations override that default on covered bytes.
+- The annotations of an allocation tile it:
+  every byte belongs to exactly one piece.
+  Bytes that the application never annotated
+  belong to a default piece with the byte-wise policy.
+- A later annotation overwrites earlier ones on the bytes it covers;
+  the bytes of an earlier annotation outside the new range keep their metadata.
+  A region inside a whole-allocation annotation therefore splits it
+  into the part before the region, the region, and the part after it.
+- `mneme::annotate(ptr, md)` on the base pointer covers the whole allocation,
+  so it replaces every region annotated before it.
+- Each piece is compared separately with its own metadata,
+  so two neighbouring regions with the same metadata keep separate norms.
 
-Constraints:
-- Overlapping region annotations on the same blob are rejected.
-- `nbytes` must stay within the owning allocation.
-- `nbytes` must be compatible with the selected `BuiltinDType` element size.
+Constraints, each of which aborts the recording when violated:
+- `[ptr, ptr + nbytes)` must stay within the owning allocation.
+- The region's offset and `nbytes` must be multiples of the element size
+  of its `BuiltinDType`.
+- The pieces a region cuts must stay aligned to their own element sizes:
+  a region cannot start or end inside an element of an earlier annotation.
+
+A whole-allocation annotation may cover an allocation
+whose size is not a multiple of the element size;
+comparison ignores the trailing partial element.
+An explicit region must cover whole elements, even at the end of the allocation.
 
 This is the intended API for alias pointers produced by frameworks such as
 MFEM on top of allocators such as Umpire.

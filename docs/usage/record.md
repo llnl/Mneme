@@ -168,14 +168,18 @@ mneme::annotate(d_alias, alias_bytes, mneme::Metadata{
 ```
 
 Annotations must be applied **before** the kernel launch they should
-affect.  You can update the annotation on the same pointer between
-launches to record different tolerance policies for different dynamic
-instances of the same kernel.
+affect.  You can annotate again between launches to record different
+tolerance policies for different dynamic instances of the same kernel.
+Annotating the base pointer again replaces the region annotations of
+that allocation, so re-apply the regions afterwards to keep them.
 
 Use `mneme::annotate(ptr, md)` when `ptr` is the base of the whole
 allocation.  Use `mneme::annotate(ptr, nbytes, md)` when `ptr` is an
 interior pointer or when only a sub-region of the allocation should
 carry that metadata.
+A later annotation overwrites earlier ones on the bytes it covers,
+so annotate the whole allocation first and its regions after it.
+Region offsets and sizes must be multiples of the element size.
 
 For the full API reference, supported data types, threshold semantics,
 and a complete example, see **[Usage → Verification](verification.md)**.

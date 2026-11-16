@@ -2,6 +2,7 @@
 #include "mneme/MnemeMemory.hpp"
 #include <cstdint>
 #include <random>
+#include <vector>
 
 using namespace mneme;
 
@@ -23,6 +24,109 @@ void initializeRandomBuffer(uint8_t *Buffer, size_t Size) {
   for (int I = 0; I < Size; I++) {
     Buffer[I] = dis(gen);
   }
+}
+
+Metadata typed(BuiltinDType Type, const char *Tag) {
+  Metadata Md;
+  Md.builtin = Type;
+  Md.tag = std::string(Tag);
+  return Md;
+}
+
+bool expectAnnotations(const MnemeMemoryBlobDevice &Blob,
+                       const std::vector<MemoryAnnotation> &Expected,
+                       const char *Step) {
+  if (Blob.getAnnotations() == Expected)
+    return true;
+  std::cerr << "Unexpected annotations after " << Step << ":";
+  for (const auto &Piece : Blob.getAnnotations())
+    std::cerr << " [" << Piece.Range.Offset << ", " << Piece.Range.endOffset()
+              << ") " << Piece.MD.tag.value_or("no_tag");
+  std::cerr << "\n";
+  return false;
+}
+
+// Later annotations overwrite earlier ones on the bytes they cover, and pieces
+// with equal metadata stay separate.
+bool checkOverwrites() {
+  MnemeMemoryBlobDevice Blob(128, nullptr, 128);
+  auto Whole = typed(BuiltinDType::F64, "whole");
+  auto First = typed(BuiltinDType::F32, "first");
+  auto Second = typed(BuiltinDType::F32, "second");
+
+  bool Ok = Blob.setAnnotation({32, 32}, First) &&
+            expectAnnotations(
+                Blob, {{{0, 32}, {}}, {{32, 32}, First}, {{64, 64}, {}}},
+                "a region inside the default piece");
+  Ok = Ok && Blob.setAnnotation({48, 32}, Second) &&
+       expectAnnotations(Blob,
+                         {{{0, 32}, {}},
+                          {{32, 16}, First},
+                          {{48, 32}, Second},
+                          {{80, 48}, {}}},
+                         "an overlapping second region");
+  Ok = Ok && Blob.setAnnotation({80, 16}, Second) &&
+       expectAnnotations(Blob,
+                         {{{0, 32}, {}},
+                          {{32, 16}, First},
+                          {{48, 32}, Second},
+                          {{80, 16}, Second},
+                          {{96, 32}, {}}},
+                         "an adjacent region with equal metadata");
+  Ok = Ok && Blob.setAnnotation({0, 128}, Whole) &&
+       expectAnnotations(Blob, {{{0, 128}, Whole}}, "a whole-blob annotation");
+  return Ok;
+}
+
+// Every piece starts on an element boundary and every piece but the last ends
+// on one; a rejected annotation leaves the blob unchanged.
+bool checkAlignment() {
+  MnemeMemoryBlobDevice Blob(128, nullptr, 128);
+  auto F32 = typed(BuiltinDType::F32, "f32");
+  auto F64 = typed(BuiltinDType::F64, "f64");
+  auto U8 = typed(BuiltinDType::U8, "u8");
+
+  bool Ok = true;
+  if (Blob.setAnnotation({2, 8}, F32) || Blob.setAnnotation({0, 6}, F32)) {
+    std::cerr << "Accepted an annotation not aligned to its element size\n";
+    Ok = false;
+  }
+  Ok = Ok && expectAnnotations(Blob, {{{0, 128}, {}}}, "misaligned regions");
+
+  Ok = Ok && Blob.setAnnotation({0, 128}, F64);
+  if (Blob.setAnnotation({4, 4}, U8)) {
+    std::cerr << "Accepted a region that leaves an F64 piece misaligned\n";
+    Ok = false;
+  }
+  Ok = Ok && expectAnnotations(Blob, {{{0, 128}, F64}},
+                               "a region that cuts an F64 piece at offset 4");
+
+  MnemeMemoryBlobDevice Odd(12, nullptr, 12);
+  Ok = Ok && Odd.setAnnotation({0, 12}, F64) &&
+       expectAnnotations(Odd, {{{0, 12}, F64}},
+                         "an F64 annotation on a 12-byte blob");
+  return Ok;
+}
+
+// A loaded annotation list must tile the blob.
+bool checkLoadedTiling() {
+  MnemeMemoryBlobDevice Blob(128, nullptr, 128);
+  auto Md = typed(BuiltinDType::F32, "loaded");
+  const std::vector<std::vector<MemoryAnnotation>> Invalid{
+      {{{0, 32}, Md}, {{40, 88}, Md}},
+      {{{0, 64}, Md}, {{32, 96}, Md}},
+      {{{0, 64}, Md}, {{64, 32}, Md}},
+  };
+  bool Ok = true;
+  for (const auto &Pieces : Invalid) {
+    if (Blob.replaceAnnotations(Pieces)) {
+      std::cerr << "Loaded an annotation list that does not tile the blob\n";
+      Ok = false;
+    }
+  }
+  const std::vector<MemoryAnnotation> Valid{{{0, 64}, Md}, {{64, 64}, {}}};
+  return Ok && Blob.replaceAnnotations(Valid) &&
+         expectAnnotations(Blob, Valid, "loading a tiling");
 }
 
 int main(int argc, char **argv) {
@@ -79,6 +183,8 @@ int main(int argc, char **argv) {
       std::cerr << "Memory differs between GV and GVR\n";
       return -1;
     }
+    if (!checkOverwrites() || !checkAlignment() || !checkLoadedTiling())
+      return -1;
     return 0;
   }();
 

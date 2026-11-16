@@ -48,6 +48,29 @@ enum class BuiltinDType : std::uint8_t {
   F64,
 };
 
+// The size in bytes of one element of builtin, or 0 if builtin is not one of
+// the enumerators, as when it was read from a corrupt file.
+constexpr std::size_t builtinByteWidth(BuiltinDType builtin) {
+  switch (builtin) {
+  case BuiltinDType::U8:
+  case BuiltinDType::I8:
+    return 1;
+  case BuiltinDType::U16:
+  case BuiltinDType::I16:
+  case BuiltinDType::F16:
+    return 2;
+  case BuiltinDType::U32:
+  case BuiltinDType::I32:
+  case BuiltinDType::F32:
+    return 4;
+  case BuiltinDType::U64:
+  case BuiltinDType::I64:
+  case BuiltinDType::F64:
+    return 8;
+  }
+  return 0;
+}
+
 // How to interpret `threshold`.
 enum class ThresholdKind : std::uint8_t {
   Absolute = 0,
