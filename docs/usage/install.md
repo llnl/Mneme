@@ -20,11 +20,11 @@ on internal test systems.
 
 #### AMD Systems
 
-| ROCm version | LLVM version | Python 3.9 | Python 3.10 | Python 3.11 | Python 3.12 |
-|-------------|--------------|------------|-------------|-------------|-------------|
-| **6.4.3**   | **19**       | ✅         | ✅          | ✅          | ✅          |
-| **7.1.1**   | **20**       | ✅         | ✅          | ✅          | ✅          |
-| **7.2.0**   | **22**       | ✅         | ✅          | ✅          | ✅          |
+| ROCm version | LLVM version | Python 3.11 | Python 3.12 | Python 3.13 | Python 3.14 |
+|-------------|--------------|-------------|-------------|-------------|-------------|
+| **6.4.3**   | **19**       | ✅          | ✅          | ✅          | ✅          |
+| **7.1.1**   | **20**       | ✅          | ✅          | ✅          | ✅          |
+| **7.2.0**   | **22**       | ✅          | ✅          | ✅          | ✅          |
 
 #### NVIDIA Systems
 
@@ -33,7 +33,7 @@ Mneme follows Proteus CI and tests CUDA 12.2.2 with the LLVM versions below.
 Newer CUDA versions may be functional,
 but are not part of the tested matrix.
 
-| CUDA version | LLVM version | Python 3.10 |
+| CUDA version | LLVM version | Python 3.14 |
 |-------------|--------------|-------------|
 | **12.2.2**  | **19.1.7**   | ✅          |
 | **12.2.2**  | **20.1.8**   | ✅          |

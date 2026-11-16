@@ -9,7 +9,7 @@ using Mneme.
     - AMD supporting ROCm 6.4.3, 7.1.1, or 7.2.0 or,
     - NVIDIA supporting CUDA 12.2.2 with LLVM 19.1.7, 20.1.8, or 22.1.0.
 - CMake and a C++ compiler
-- Python 3.9+
+- Python 3.11+
 
 For full installation details, see **[Usage → Install](install.md)**.
 

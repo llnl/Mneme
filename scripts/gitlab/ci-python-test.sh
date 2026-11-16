@@ -97,7 +97,7 @@ pushd ${mneme_src}
 pytest --cov-report=xml:coverage-${CI_JOB_ID}.xml --cov-config=.coveragerc python/tests/
 
 # we only need to upload reports once and we only need to test editable installs once.
-if [[ "${MNEME_CI_PYTHON_VERSION}" == "3.10" && "${MNEME_CI_ROCM_VERSION}" == "7.2.0" ]]; then
+if [[ "${MNEME_CI_PYTHON_VERSION}" == "3.12" && "${MNEME_CI_ROCM_VERSION}" == "7.2.0" ]]; then
   # Upload to Codecov (only if token is available)
   if [[ -n "$CODECOV_TOKEN" ]]; then
     log "Uploading coverage to Codecov..."
