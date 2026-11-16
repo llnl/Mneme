@@ -860,11 +860,6 @@ class Replay(BaseExecutor):
         kwargs = vars(args)
         kwargs.pop("command")
         kwargs.pop("func")
-
-        if verbosity is not None:
-            logger.debug(f"MNEME_LOG_LEVEL={verbosity}")
-            os.environ["MNEME_LOG_LEVEL"] = verbosity
-
         executor = Replay(**kwargs)
 
         # We currently link all LLVM IR modules together
