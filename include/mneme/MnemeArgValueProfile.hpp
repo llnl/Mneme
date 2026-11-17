@@ -27,18 +27,6 @@ namespace mneme {
 
 enum class ArgLeafKind { Integer, Float, Pointer };
 
-inline const char *getArgLeafKindName(ArgLeafKind Kind) {
-  switch (Kind) {
-  case ArgLeafKind::Integer:
-    return "int";
-  case ArgLeafKind::Float:
-    return "float";
-  case ArgLeafKind::Pointer:
-    return "ptr";
-  }
-  return "int";
-}
-
 // A scalar inside a kernel argument, found at Offset bytes past Args[ArgIdx].
 struct ArgLeaf {
   unsigned ArgIdx;
@@ -363,7 +351,7 @@ public:
       Args.push_back(
           llvm::json::Object{{"Name", Layout.ArgNames[I]},
                              {"Type", Layout.ArgTypes[I]},
-                             {"ReadsKnown", Layout.ArgReadsKnown[I]}});
+                             {"ReadsAreKnown", Layout.ArgReadsKnown[I]}});
 
     llvm::json::Array Leaves;
     for (size_t I = 0; I < Layout.Leaves.size(); I++) {
@@ -374,16 +362,15 @@ public:
         Top.push_back(llvm::json::Object{{"Value", decode(Leaf, Bits)},
                                          {"Launches", Count}});
       Leaves.push_back(
-          llvm::json::Object{{"Path", Leaf.Path},
-                             {"Arg", Leaf.ArgIdx},
-                             {"Offset", Leaf.Offset},
-                             {"Size", Leaf.Size},
-                             {"Kind", getArgLeafKindName(Leaf.Kind)},
+          llvm::json::Object{{"Label", Leaf.Path},
+                             {"ArgIndex", Leaf.ArgIdx},
+                             {"OffsetBytes", Leaf.Offset},
+                             {"SizeBytes", Leaf.Size},
                              {"Type", Leaf.Type},
-                             {"Read", Leaf.IsRead},
-                             {"Distinct", S.distinct()},
+                             {"IsReadByKernel", Leaf.IsRead},
+                             {"NumDistinctValues", S.distinct()},
                              {"UntrackedLaunches", S.untrackedLaunches()},
-                             {"Top", std::move(Top)}});
+                             {"TopValues", std::move(Top)}});
     }
 
     return llvm::json::Object{

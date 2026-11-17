@@ -7,7 +7,7 @@ import pathlib
 
 
 def format_top(leaf, limit):
-    return ",".join(f"{t['Value']}({t['Launches']})" for t in leaf["Top"][:limit])
+    return ",".join(f"{t['Value']}({t['Launches']})" for t in leaf["TopValues"][:limit])
 
 
 def main():
@@ -29,13 +29,14 @@ def main():
                 f"TotalTimeNs:{kernel['TotalTimeNs']}"
             )
         for leaf in kernel["Leaves"]:
-            if args.no_pointers and leaf["Kind"] == "ptr":
+            if args.no_pointers and leaf["Type"].startswith("ptr"):
                 continue
             print(
-                f"  Leaf:{leaf['Path']} Kind:{leaf['Kind']} Type:{leaf['Type']} "
-                f"Read:{leaf['Read']} Distinct:{leaf['Distinct']} "
+                f"  Leaf:{leaf['Label']} Type:{leaf['Type']} "
+                f"IsReadByKernel:{leaf['IsReadByKernel']} "
+                f"NumDistinctValues:{leaf['NumDistinctValues']} "
                 f"Untracked:{leaf['UntrackedLaunches']} "
-                f"Top:{format_top(leaf, args.top)}"
+                f"TopValues:{format_top(leaf, args.top)}"
             )
         for unsupported in kernel["Unsupported"]:
             print(f"  Unsupported:{unsupported}")

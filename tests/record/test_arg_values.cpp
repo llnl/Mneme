@@ -40,44 +40,44 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // Kernels are listed by demangled name, leaves in argument layout order.
 // The box kernel reads only lo[0] and hi[0].
 // CHECK-PROFILE: Kernel: box_kernel(Box, double*) Launches: 3
-// CHECK-PROFILE-NEXT: Leaf:arg0.0[0] Kind:int Type:i32 Read:True Distinct:1 Untracked:0 Top:0(3)
-// CHECK-PROFILE-NEXT: Leaf:arg0.0[1] Kind:int Type:i32 Read:False Distinct:1 Untracked:0 Top:1(3)
-// CHECK-PROFILE-NEXT: Leaf:arg0.0[2] Kind:int Type:i32 Read:False Distinct:1 Untracked:0 Top:2(3)
-// CHECK-PROFILE-NEXT: Leaf:arg0.1[0] Kind:int Type:i32 Read:True Distinct:2 Untracked:0 Top:7(2),15(1)
-// CHECK-PROFILE-NEXT: Leaf:arg0.1[1] Kind:int Type:i32 Read:False Distinct:1 Untracked:0 Top:8(3)
-// CHECK-PROFILE-NEXT: Leaf:arg0.1[2] Kind:int Type:i32 Read:False Distinct:1 Untracked:0 Top:9(3)
-// CHECK-PROFILE-NEXT: Leaf:out{{.*}} Kind:ptr {{.*}} Read:True Distinct:1 Untracked:0
+// CHECK-PROFILE-NEXT: Leaf:arg0.0[0] Type:i32 IsReadByKernel:True NumDistinctValues:1 Untracked:0 TopValues:0(3)
+// CHECK-PROFILE-NEXT: Leaf:arg0.0[1] Type:i32 IsReadByKernel:False NumDistinctValues:1 Untracked:0 TopValues:1(3)
+// CHECK-PROFILE-NEXT: Leaf:arg0.0[2] Type:i32 IsReadByKernel:False NumDistinctValues:1 Untracked:0 TopValues:2(3)
+// CHECK-PROFILE-NEXT: Leaf:arg0.1[0] Type:i32 IsReadByKernel:True NumDistinctValues:2 Untracked:0 TopValues:7(2),15(1)
+// CHECK-PROFILE-NEXT: Leaf:arg0.1[1] Type:i32 IsReadByKernel:False NumDistinctValues:1 Untracked:0 TopValues:8(3)
+// CHECK-PROFILE-NEXT: Leaf:arg0.1[2] Type:i32 IsReadByKernel:False NumDistinctValues:1 Untracked:0 TopValues:9(3)
+// CHECK-PROFILE-NEXT: Leaf:out{{.*}} Type:ptr{{.*}} IsReadByKernel:True NumDistinctValues:1 Untracked:0
 // CHECK-PROFILE: Kernel: params_kernel(Params, long) Launches: 4
-// CHECK-PROFILE-NEXT: Leaf:arg0.0 Kind:int Type:i32 Read:True Distinct:1 Untracked:0 Top:100(4)
-// CHECK-PROFILE-NEXT: Leaf:arg0.1 Kind:int Type:i8 Read:True Distinct:1 Untracked:0 Top:1(4)
-// CHECK-PROFILE-NEXT: Leaf:arg0.2 Kind:float Type:double Read:True Distinct:1 Untracked:0 Top:0.25(4)
-// CHECK-PROFILE-NEXT: Leaf:arg0.3 Kind:ptr {{.*}} Read:True Distinct:1 Untracked:0
-// CHECK-PROFILE-NEXT: Leaf:step Kind:int Type:i64 Read:True Distinct:2 Untracked:0 Top:0(2),1(2)
+// CHECK-PROFILE-NEXT: Leaf:arg0.0 Type:i32 IsReadByKernel:True NumDistinctValues:1 Untracked:0 TopValues:100(4)
+// CHECK-PROFILE-NEXT: Leaf:arg0.1 Type:i8 IsReadByKernel:True NumDistinctValues:1 Untracked:0 TopValues:1(4)
+// CHECK-PROFILE-NEXT: Leaf:arg0.2 Type:double IsReadByKernel:True NumDistinctValues:1 Untracked:0 TopValues:0.25(4)
+// CHECK-PROFILE-NEXT: Leaf:arg0.3 Type:ptr{{.*}} IsReadByKernel:True NumDistinctValues:1 Untracked:0
+// CHECK-PROFILE-NEXT: Leaf:step Type:i64 IsReadByKernel:True NumDistinctValues:2 Untracked:0 TopValues:0(2),1(2)
 // Garbage in the explicit tail padding must not count as different values.
 // CHECK-PROFILE: Kernel: resource_kernel(Resource) Launches: 3
-// CHECK-PROFILE-NEXT: Leaf:arg0.0 Kind:ptr {{.*}} Read:True Distinct:1 Untracked:0
-// CHECK-PROFILE-NEXT: Leaf:arg0.1 Kind:int Type:i32 Read:True Distinct:1 Untracked:0 Top:3(3)
+// CHECK-PROFILE-NEXT: Leaf:arg0.0 Type:ptr{{.*}} IsReadByKernel:True NumDistinctValues:1 Untracked:0
+// CHECK-PROFILE-NEXT: Leaf:arg0.1 Type:i32 IsReadByKernel:True NumDistinctValues:1 Untracked:0 TopValues:3(3)
 // CHECK-PROFILE-NEXT: Unsupported:arg0.2: [4 x i8] (padding or char array)
 // CHECK-PROFILE: Kernel: scale_kernel(double*, double, int) Launches: 6
-// CHECK-PROFILE-NEXT: Leaf:out{{.*}} Kind:ptr {{.*}} Read:True Distinct:1 Untracked:0
-// CHECK-PROFILE-NEXT: Leaf:factor Kind:float Type:double Read:True Distinct:6 Untracked:0 Top:0.5(1),1(1),1.5(1)
-// CHECK-PROFILE-NEXT: Leaf:n Kind:int Type:i32 Read:True Distinct:3 Untracked:0 Top:64(3),128(2),256(1)
+// CHECK-PROFILE-NEXT: Leaf:out{{.*}} Type:ptr{{.*}} IsReadByKernel:True NumDistinctValues:1 Untracked:0
+// CHECK-PROFILE-NEXT: Leaf:factor Type:double IsReadByKernel:True NumDistinctValues:6 Untracked:0 TopValues:0.5(1),1(1),1.5(1)
+// CHECK-PROFILE-NEXT: Leaf:n Type:i32 IsReadByKernel:True NumDistinctValues:3 Untracked:0 TopValues:64(3),128(2),256(1)
 // CHECK-PROFILE: Kernel: void forall_kernel<main::'lambda'(int)>(main::'lambda'(int), int){{.*}} Launches: 2
-// CHECK-PROFILE-NEXT: Leaf:arg0.0 Kind:ptr {{.*}} Read:True Distinct:1 Untracked:0
-// CHECK-PROFILE-NEXT: Leaf:arg0.1 Kind:float Type:double Read:True Distinct:1 Untracked:0 Top:2(2)
-// CHECK-PROFILE-NEXT: Leaf:n Kind:int Type:i32 Read:True Distinct:1 Untracked:0 Top:64(2)
+// CHECK-PROFILE-NEXT: Leaf:arg0.0 Type:ptr{{.*}} IsReadByKernel:True NumDistinctValues:1 Untracked:0
+// CHECK-PROFILE-NEXT: Leaf:arg0.1 Type:double IsReadByKernel:True NumDistinctValues:1 Untracked:0 TopValues:2(2)
+// CHECK-PROFILE-NEXT: Leaf:n Type:i32 IsReadByKernel:True NumDistinctValues:1 Untracked:0 TopValues:64(2)
 // The byte of the empty functor takes three values but is not read.
 // CHECK-PROFILE: Kernel: void reduce_kernel<Plus>(double*, Plus) Launches: 3
-// CHECK-PROFILE-NEXT: Leaf:out{{.*}} Kind:ptr {{.*}} Read:True Distinct:1 Untracked:0
-// CHECK-PROFILE-NEXT: Leaf:arg1.0 Kind:int Type:i8 Read:False Distinct:3 Untracked:0 Top:16(1),17(1),18(1)
+// CHECK-PROFILE-NEXT: Leaf:out{{.*}} Type:ptr{{.*}} IsReadByKernel:True NumDistinctValues:1 Untracked:0
+// CHECK-PROFILE-NEXT: Leaf:arg1.0 Type:i8 IsReadByKernel:False NumDistinctValues:3 Untracked:0 TopValues:16(1),17(1),18(1)
 // CHECK-PROFILE-NOT: Unsupported
 
-// CHECK-INF: Leaf:factor {{.*}} Top:0.5(1),1(1),1.5(1),2(1),2.5(1),inf(1){{$}}
+// CHECK-INF: Leaf:factor {{.*}} TopValues:0.5(1),1(1),1.5(1),2(1),2.5(1),inf(1){{$}}
 
 // Launches with values past the cap are counted only as untracked.
 // CHECK-CAP: Kernel: scale_kernel(double*, double, int) Launches: 6
-// CHECK-CAP: Leaf:factor Kind:float Type:double Read:True Distinct:4 Untracked:2
-// CHECK-CAP-NEXT: Leaf:n Kind:int Type:i32 Read:True Distinct:3 Untracked:0 Top:64(3),128(2),256(1)
+// CHECK-CAP: Leaf:factor Type:double IsReadByKernel:True NumDistinctValues:4 Untracked:2
+// CHECK-CAP-NEXT: Leaf:n Type:i32 IsReadByKernel:True NumDistinctValues:3 Untracked:0 TopValues:64(3),128(2),256(1)
 
 // Kernels that record nothing still report their timing in the profile.
 // CHECK-TIMING: Kernel: scale_kernel(double*, double, int) Launches: 6
