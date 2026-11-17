@@ -33,9 +33,9 @@ def main():
                 continue
             print(
                 f"  Leaf:{leaf['Path']} Kind:{leaf['Kind']} Type:{leaf['Type']} "
-                f"WholeArg:{leaf['WholeArg']} Read:{leaf['Read']} "
-                f"Distinct:{leaf['Distinct']} Saturated:{leaf['Saturated']} "
-                f"Changes:{leaf['Changes']} Top:{format_top(leaf, args.top)}"
+                f"Read:{leaf['Read']} Distinct:{leaf['Distinct']} "
+                f"Untracked:{leaf['UntrackedLaunches']} "
+                f"Top:{format_top(leaf, args.top)}"
             )
         for unsupported in kernel["Unsupported"]:
             print(f"  Unsupported:{unsupported}")

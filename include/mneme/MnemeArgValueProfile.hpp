@@ -47,9 +47,6 @@ struct ArgLeaf {
   ArgLeafKind Kind;
   std::string Path;
   std::string Type;
-  // The leaf is the whole argument rather than a member of an aggregate, such
-  // as a lambda capture.
-  bool IsWholeArg;
   // The optimized kernel may read the leaf. Unread leaves, such as the byte of
   // an empty functor, cannot change the generated code and hold whatever the
   // host left there, so they are not part of any specialization key.
@@ -128,9 +125,8 @@ inline void flattenType(llvm::Type *T, unsigned ArgIdx, uint64_t Offset,
     Layout.Unsupported.push_back(Path + ": " + typeName(T));
     return;
   }
-  bool IsWholeArg = Path == Layout.ArgNames[ArgIdx];
   Layout.Leaves.push_back(ArgLeaf{ArgIdx, Offset, static_cast<unsigned>(Size),
-                                  *Kind, Path, typeName(T), IsWholeArg});
+                                  *Kind, Path, typeName(T)});
 }
 
 // Half-open byte ranges of an argument that a kernel reads.
@@ -269,15 +265,9 @@ inline void markUnreadLeaves(llvm::Module &M, const std::string &KernelName,
 class LeafValueStats {
   std::unordered_map<uint64_t, uint64_t> Launches;
   uint64_t UntrackedLaunches = 0;
-  uint64_t Changes = 0;
-  std::optional<uint64_t> Previous;
 
 public:
   void observe(uint64_t Bits, size_t Cap) {
-    if (Previous && *Previous != Bits)
-      Changes++;
-    Previous = Bits;
-
     auto It = Launches.find(Bits);
     if (It != Launches.end())
       It->second++;
@@ -289,7 +279,6 @@ public:
 
   size_t distinct() const { return Launches.size(); }
   uint64_t untrackedLaunches() const { return UntrackedLaunches; }
-  uint64_t changes() const { return Changes; }
 
   std::vector<std::pair<uint64_t, uint64_t>> top(size_t K) const {
     std::vector<std::pair<uint64_t, uint64_t>> Sorted(Launches.begin(),
@@ -391,12 +380,9 @@ public:
                              {"Size", Leaf.Size},
                              {"Kind", getArgLeafKindName(Leaf.Kind)},
                              {"Type", Leaf.Type},
-                             {"WholeArg", Leaf.IsWholeArg},
                              {"Read", Leaf.IsRead},
                              {"Distinct", S.distinct()},
-                             {"Saturated", S.distinct() >= Cap},
                              {"UntrackedLaunches", S.untrackedLaunches()},
-                             {"Changes", S.changes()},
                              {"Top", std::move(Top)}});
     }
 
