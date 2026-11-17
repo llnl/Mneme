@@ -359,9 +359,9 @@ public:
     ArgProfile.emplace(std::move(Layout), Cap);
   }
 
-  void profileArgs(void **Args, const dim3 &GridDim, const dim3 &BlockDim) {
+  void profileArgs(void **Args) {
     if (ArgProfile)
-      ArgProfile->observe(Args, GridDim, BlockDim);
+      ArgProfile->observe(Args);
   }
 
   // Kernels that record nothing write no kernel JSON, so the profile carries
@@ -660,7 +660,7 @@ public:
     if (!It->second)
       return std::nullopt;
     auto &Record = KernelRecords.find(*It->second)->second;
-    Record.profileArgs(Args, GridDim, BlockDim);
+    Record.profileArgs(Args);
     return Record.registerLaunch(GridDim, BlockDim, SharedMem);
   }
 

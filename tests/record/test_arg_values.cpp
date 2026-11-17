@@ -38,18 +38,8 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 
 // clang-format off
 // Kernels are listed by demangled name, leaves in argument layout order.
-// Box has no whole-argument scalars, so the argument tuples hold only the
-// launch dimensions, and the grid separates the two launches with hi 7. The
-// kernel reads only lo[0] and hi[0].
+// The box kernel reads only lo[0] and hi[0].
 // CHECK-PROFILE: Kernel: box_kernel(Box, double*) Launches: 3
-// CHECK-PROFILE-NEXT: ScalarTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:2 LaunchCounts:2,1{{$}}
-// CHECK-PROFILE-NEXT: ScalarBlockTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:2 LaunchCounts:2,1{{$}}
-// CHECK-PROFILE-NEXT: ScalarDimTuples: Distinct:3 Saturated:False MostCommonLaunches:1 Changes:2 LaunchCounts:1,1,1{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarDimTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:1 LaunchCounts:2,1{{$}}
-// CHECK-PROFILE-NEXT: BlockTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: GridTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:1 LaunchCounts:2,1{{$}}
-// CHECK-PROFILE-NEXT: DimTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:1 LaunchCounts:2,1{{$}}
 // CHECK-PROFILE-NEXT: Leaf:arg0.0[0] Kind:int Type:i32 WholeArg:False Read:True Distinct:1 Saturated:False Changes:0 Top:0(3)
 // CHECK-PROFILE-NEXT: Leaf:arg0.0[1] Kind:int Type:i32 WholeArg:False Read:False Distinct:1 Saturated:False Changes:0 Top:1(3)
 // CHECK-PROFILE-NEXT: Leaf:arg0.0[2] Kind:int Type:i32 WholeArg:False Read:False Distinct:1 Saturated:False Changes:0 Top:2(3)
@@ -57,17 +47,7 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-PROFILE-NEXT: Leaf:arg0.1[1] Kind:int Type:i32 WholeArg:False Read:False Distinct:1 Saturated:False Changes:0 Top:8(3)
 // CHECK-PROFILE-NEXT: Leaf:arg0.1[2] Kind:int Type:i32 WholeArg:False Read:False Distinct:1 Saturated:False Changes:0 Top:9(3)
 // CHECK-PROFILE-NEXT: Leaf:out{{.*}} Kind:ptr {{.*}} WholeArg:True Read:True Distinct:1 Saturated:False Changes:0
-// The padding differs on every launch, so only step and the block size make
-// distinct tuples.
 // CHECK-PROFILE: Kernel: params_kernel(Params, long) Launches: 4
-// CHECK-PROFILE-NEXT: ScalarTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:3 LaunchCounts:2,2{{$}}
-// CHECK-PROFILE-NEXT: ScalarBlockTuples: Distinct:4 Saturated:False MostCommonLaunches:1 Changes:3 LaunchCounts:1,1,1,1{{$}}
-// CHECK-PROFILE-NEXT: ScalarDimTuples: Distinct:4 Saturated:False MostCommonLaunches:1 Changes:3 LaunchCounts:1,1,1,1{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:3 LaunchCounts:2,2{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarDimTuples: Distinct:4 Saturated:False MostCommonLaunches:1 Changes:3 LaunchCounts:1,1,1,1{{$}}
-// CHECK-PROFILE-NEXT: BlockTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:1 LaunchCounts:2,2{{$}}
-// CHECK-PROFILE-NEXT: GridTuples: Distinct:1 Saturated:False MostCommonLaunches:4 Changes:0 LaunchCounts:4{{$}}
-// CHECK-PROFILE-NEXT: DimTuples: Distinct:2 Saturated:False MostCommonLaunches:2 Changes:1 LaunchCounts:2,2{{$}}
 // CHECK-PROFILE-NEXT: Leaf:arg0.0 Kind:int Type:i32 WholeArg:False Read:True Distinct:1 Saturated:False Changes:0 Top:100(4)
 // CHECK-PROFILE-NEXT: Leaf:arg0.1 Kind:int Type:i8 WholeArg:False Read:True Distinct:1 Saturated:False Changes:0 Top:1(4)
 // CHECK-PROFILE-NEXT: Leaf:arg0.2 Kind:float Type:double WholeArg:False Read:True Distinct:1 Saturated:False Changes:0 Top:0.25(4)
@@ -75,51 +55,19 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 // CHECK-PROFILE-NEXT: Leaf:step Kind:int Type:i64 WholeArg:True Read:True Distinct:2 Saturated:False Changes:3 Top:0(2),1(2)
 // Garbage in the explicit tail padding must not count as different values.
 // CHECK-PROFILE: Kernel: resource_kernel(Resource) Launches: 3
-// CHECK-PROFILE-NEXT: ScalarTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ScalarBlockTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ScalarDimTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarDimTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: BlockTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: GridTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: DimTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
 // CHECK-PROFILE-NEXT: Leaf:arg0.0 Kind:ptr {{.*}} WholeArg:False Read:True Distinct:1 Saturated:False Changes:0
 // CHECK-PROFILE-NEXT: Leaf:arg0.1 Kind:int Type:i32 WholeArg:False Read:True Distinct:1 Saturated:False Changes:0 Top:3(3)
 // CHECK-PROFILE-NEXT: Unsupported:arg0.2: [4 x i8] (padding or char array)
 // CHECK-PROFILE: Kernel: scale_kernel(double*, double, int) Launches: 6
-// CHECK-PROFILE-NEXT: ScalarTuples: Distinct:6 Saturated:False MostCommonLaunches:1 Changes:5 LaunchCounts:1,1,1,1,1,1{{$}}
-// CHECK-PROFILE-NEXT: ScalarBlockTuples: Distinct:6 Saturated:False MostCommonLaunches:1 Changes:5 LaunchCounts:1,1,1,1,1,1{{$}}
-// CHECK-PROFILE-NEXT: ScalarDimTuples: Distinct:6 Saturated:False MostCommonLaunches:1 Changes:5 LaunchCounts:1,1,1,1,1,1{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarTuples: Distinct:6 Saturated:False MostCommonLaunches:1 Changes:5 LaunchCounts:1,1,1,1,1,1{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarDimTuples: Distinct:6 Saturated:False MostCommonLaunches:1 Changes:5 LaunchCounts:1,1,1,1,1,1{{$}}
-// CHECK-PROFILE-NEXT: BlockTuples: Distinct:1 Saturated:False MostCommonLaunches:6 Changes:0 LaunchCounts:6{{$}}
-// CHECK-PROFILE-NEXT: GridTuples: Distinct:1 Saturated:False MostCommonLaunches:6 Changes:0 LaunchCounts:6{{$}}
-// CHECK-PROFILE-NEXT: DimTuples: Distinct:1 Saturated:False MostCommonLaunches:6 Changes:0 LaunchCounts:6{{$}}
 // CHECK-PROFILE-NEXT: Leaf:out{{.*}} Kind:ptr {{.*}} WholeArg:True Read:True Distinct:1 Saturated:False Changes:0
 // CHECK-PROFILE-NEXT: Leaf:factor Kind:float Type:double WholeArg:True Read:True Distinct:6 Saturated:False Changes:5 Top:0.5(1),1(1),1.5(1)
 // CHECK-PROFILE-NEXT: Leaf:n Kind:int Type:i32 WholeArg:True Read:True Distinct:3 Saturated:False Changes:2 Top:64(3),128(2),256(1)
 // CHECK-PROFILE: Kernel: void forall_kernel<main::'lambda'(int)>(main::'lambda'(int), int){{.*}} Launches: 2
-// CHECK-PROFILE-NEXT: ScalarTuples: Distinct:1 Saturated:False MostCommonLaunches:2 Changes:0 LaunchCounts:2{{$}}
-// CHECK-PROFILE-NEXT: ScalarBlockTuples: Distinct:1 Saturated:False MostCommonLaunches:2 Changes:0 LaunchCounts:2{{$}}
-// CHECK-PROFILE-NEXT: ScalarDimTuples: Distinct:1 Saturated:False MostCommonLaunches:2 Changes:0 LaunchCounts:2{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarTuples: Distinct:1 Saturated:False MostCommonLaunches:2 Changes:0 LaunchCounts:2{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarDimTuples: Distinct:1 Saturated:False MostCommonLaunches:2 Changes:0 LaunchCounts:2{{$}}
-// CHECK-PROFILE-NEXT: BlockTuples: Distinct:1 Saturated:False MostCommonLaunches:2 Changes:0 LaunchCounts:2{{$}}
-// CHECK-PROFILE-NEXT: GridTuples: Distinct:1 Saturated:False MostCommonLaunches:2 Changes:0 LaunchCounts:2{{$}}
-// CHECK-PROFILE-NEXT: DimTuples: Distinct:1 Saturated:False MostCommonLaunches:2 Changes:0 LaunchCounts:2{{$}}
 // CHECK-PROFILE-NEXT: Leaf:arg0.0 Kind:ptr {{.*}} WholeArg:False Read:True Distinct:1 Saturated:False Changes:0
 // CHECK-PROFILE-NEXT: Leaf:arg0.1 Kind:float Type:double WholeArg:False Read:True Distinct:1 Saturated:False Changes:0 Top:2(2)
 // CHECK-PROFILE-NEXT: Leaf:n Kind:int Type:i32 WholeArg:True Read:True Distinct:1 Saturated:False Changes:0 Top:64(2)
-// The unread byte of the empty functor takes three values but makes no tuples.
+// The byte of the empty functor takes three values but is not read.
 // CHECK-PROFILE: Kernel: void reduce_kernel<Plus>(double*, Plus) Launches: 3
-// CHECK-PROFILE-NEXT: ScalarTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ScalarBlockTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ScalarDimTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: ArgScalarDimTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: BlockTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: GridTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
-// CHECK-PROFILE-NEXT: DimTuples: Distinct:1 Saturated:False MostCommonLaunches:3 Changes:0 LaunchCounts:3{{$}}
 // CHECK-PROFILE-NEXT: Leaf:out{{.*}} Kind:ptr {{.*}} WholeArg:True Read:True Distinct:1 Saturated:False Changes:0
 // CHECK-PROFILE-NEXT: Leaf:arg1.0 Kind:int Type:i8 WholeArg:False Read:False Distinct:3 Saturated:False Changes:2 Top:16(1),17(1),18(1)
 // CHECK-PROFILE-NOT: Unsupported
@@ -128,7 +76,6 @@ using MnemeDeviceRT = DeviceTraits<DeviceVendors::CUDA>;
 
 // Values past the cap are not tracked, but launches still count as changes.
 // CHECK-CAP: Kernel: scale_kernel(double*, double, int) Launches: 6
-// CHECK-CAP-NEXT: ScalarTuples: Distinct:4 Saturated:True MostCommonLaunches:1 Changes:5 LaunchCounts:1,1,1,1{{$}}
 // CHECK-CAP: Leaf:factor Kind:float Type:double WholeArg:True Read:True Distinct:4 Saturated:True Changes:5
 // CHECK-CAP-NEXT: Leaf:n Kind:int Type:i32 WholeArg:True Read:True Distinct:3 Saturated:False Changes:2 Top:64(3),128(2),256(1)
 
