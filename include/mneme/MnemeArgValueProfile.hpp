@@ -35,18 +35,11 @@ struct ArgLeaf {
   ArgLeafKind Kind;
   std::string Path;
   std::string Type;
-  // The optimized kernel may read the leaf. Unread leaves, such as the byte of
-  // an empty functor, cannot change the generated code and hold whatever the
-  // host left there, so they are not part of any specialization key.
-  bool IsRead = true;
 };
 
 struct KernelArgLayout {
   llvm::SmallVector<std::string> ArgNames;
   llvm::SmallVector<std::string> ArgTypes;
-  // The bytes each argument reads were found exactly; otherwise every leaf of
-  // the argument counts as read.
-  llvm::SmallVector<bool> ArgReadsKnown;
   llvm::SmallVector<ArgLeaf> Leaves;
   // Pieces of arguments without leaves, such as long double, i128 or padding.
   llvm::SmallVector<std::string> Unsupported;
@@ -196,7 +189,6 @@ inline KernelArgLayout getKernelArgLayout(const llvm::Function &F) {
     Layout.ArgNames.push_back(Name);
     Layout.ArgTypes.push_back(arg_layout_detail::typeName(ArgTy) +
                               (InMemoryTy ? " (in memory)" : ""));
-    Layout.ArgReadsKnown.push_back(false);
     arg_layout_detail::flattenType(ArgTy, A.getArgNo(), 0, Name, DL, Layout);
   }
   return Layout;
@@ -217,14 +209,15 @@ inline void optimizeAtO3(llvm::Module &M, const std::string &KernelName) {
   proteus::detail::runOptimizationPassPipeline(M, Arch, '3', 3);
 }
 
-// Marks the leaves that the kernel cannot read. The captured bitcode is not yet
-// optimized, so every argument still has uses that copy it to the stack; the
-// module is optimized first, at O3, which removes the
-// copies of unread bytes. Uses the analysis cannot follow, such as passing the
-// argument to a call that was not inlined, keep every leaf of that argument as
-// read.
-inline void markUnreadLeaves(llvm::Module &M, const std::string &KernelName,
-                             KernelArgLayout &Layout) {
+// Removes the leaves that the kernel cannot read. Unread leaves, such as the
+// byte of an empty functor, cannot change the generated code and hold whatever
+// the host left there, so profiling them only adds noise. The captured bitcode
+// is not yet optimized, so every argument still has uses that copy it to the
+// stack; the module is optimized first, at O3, which removes the copies of
+// unread bytes. Uses the analysis cannot follow, such as passing the argument
+// to a call that was not inlined, keep every leaf of that argument.
+inline void removeUnreadLeaves(llvm::Module &M, const std::string &KernelName,
+                               KernelArgLayout &Layout) {
   optimizeAtO3(M, KernelName);
   llvm::Function *F = M.getFunction(KernelName);
   if (!F || F->arg_size() != Layout.ArgNames.size())
@@ -235,17 +228,16 @@ inline void markUnreadLeaves(llvm::Module &M, const std::string &KernelName,
     bool Known = A.getPointeeInMemoryValueType()
                      ? arg_layout_detail::collectPointerReads(&A, 0, DL, Reads)
                      : arg_layout_detail::collectValueReads(A, DL, Reads);
-    Layout.ArgReadsKnown[A.getArgNo()] = Known;
     if (!Known)
       continue;
-    for (ArgLeaf &Leaf : Layout.Leaves) {
+    llvm::erase_if(Layout.Leaves, [&](const ArgLeaf &Leaf) {
       if (Leaf.ArgIdx != A.getArgNo())
-        continue;
+        return false;
       int64_t Begin = Leaf.Offset, End = Leaf.Offset + Leaf.Size;
-      Leaf.IsRead = llvm::any_of(Reads, [&](const auto &R) {
+      return llvm::none_of(Reads, [&](const auto &R) {
         return R.first < End && Begin < R.second;
       });
-    }
+    });
   }
 }
 
@@ -348,10 +340,8 @@ public:
   llvm::json::Object toJSON() const {
     llvm::json::Array Args;
     for (size_t I = 0; I < Layout.ArgNames.size(); I++)
-      Args.push_back(
-          llvm::json::Object{{"Name", Layout.ArgNames[I]},
-                             {"Type", Layout.ArgTypes[I]},
-                             {"ReadsAreKnown", Layout.ArgReadsKnown[I]}});
+      Args.push_back(llvm::json::Object{{"Name", Layout.ArgNames[I]},
+                                        {"Type", Layout.ArgTypes[I]}});
 
     llvm::json::Array Leaves;
     for (size_t I = 0; I < Layout.Leaves.size(); I++) {
@@ -367,7 +357,6 @@ public:
                              {"OffsetBytes", Leaf.Offset},
                              {"SizeBytes", Leaf.Size},
                              {"Type", Leaf.Type},
-                             {"IsReadByKernel", Leaf.IsRead},
                              {"NumDistinctValues", S.distinct()},
                              {"UntrackedLaunches", S.untrackedLaunches()},
                              {"TopValues", std::move(Top)}});

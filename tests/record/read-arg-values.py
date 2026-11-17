@@ -33,7 +33,6 @@ def main():
                 continue
             print(
                 f"  Leaf:{leaf['Label']} Type:{leaf['Type']} "
-                f"IsReadByKernel:{leaf['IsReadByKernel']} "
                 f"NumDistinctValues:{leaf['NumDistinctValues']} "
                 f"Untracked:{leaf['UntrackedLaunches']} "
                 f"TopValues:{format_top(leaf, args.top)}"

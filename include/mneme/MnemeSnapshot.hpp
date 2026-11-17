@@ -355,7 +355,7 @@ public:
     auto Mod = parseKernelModule(
         llvm::StringRef(BitcodeBytes.data(), BitcodeBytes.size()), Ctx);
     KernelArgLayout Layout = getKernelArgLayout(*Mod->getFunction(KName));
-    markUnreadLeaves(*Mod, KName, Layout);
+    removeUnreadLeaves(*Mod, KName, Layout);
     ArgProfile.emplace(std::move(Layout), Cap);
   }
 
