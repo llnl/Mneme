@@ -8,7 +8,6 @@
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallVector.h>
-#include <llvm/Support/FormatVariadic.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MD5.h>
 #include <llvm/Support/MemoryBuffer.h>
@@ -359,26 +358,29 @@ public:
     ArgProfile.emplace(std::move(Layout), Cap);
   }
 
-  void profileArgs(void **Args) {
+  void profileArgs(void **Args, const dim3 &GridDim, const dim3 &BlockDim,
+                   uint64_t SharedMem) {
     if (ArgProfile)
-      ArgProfile->observe(Args);
+      ArgProfile->observe(Args, {GridDim.x, GridDim.y, GridDim.z, BlockDim.x,
+                                 BlockDim.y, BlockDim.z, SharedMem});
   }
+
+  bool hasArgProfile() const { return ArgProfile.has_value(); }
 
   // Kernels that record nothing write no kernel JSON, so the profile carries
   // their timing.
-  std::optional<llvm::json::Object>
-  argProfileJSON(KernelTimingType Timing) const {
-    if (!ArgProfile)
-      return std::nullopt;
-    auto JSON = ArgProfile->toJSON();
-    JSON["KernelName"] = KName;
-    JSON["DemangledName"] = util::demangleKernelName(KName);
-    if (Timing != KernelTimingType::Off) {
-      JSON["TimingSource"] = getKernelTimingName(Timing);
-      JSON["TimedLaunches"] = TimedLaunches;
-      JSON["TotalTimeNs"] = TotalTimeNs;
-    }
-    return JSON;
+  void writeArgProfile(llvm::json::OStream &J, KernelTimingType Timing) const {
+    J.object([&] {
+      J.attribute("KernelName", KName);
+      J.attribute("DemangledName", util::demangleKernelName(KName));
+      ArgProfile->writeCounts(J);
+      if (Timing != KernelTimingType::Off) {
+        J.attribute("TimingSource", getKernelTimingName(Timing));
+        J.attribute("TimedLaunches", TimedLaunches);
+        J.attribute("TotalTimeNs", TotalTimeNs);
+      }
+      ArgProfile->writeTables(J);
+    });
   }
 
   void addLaunchTime(const LaunchHandle &Launch, uint64_t Ns) {
@@ -536,12 +538,13 @@ class RecordDatabase {
   std::optional<size_t> ArgValueCap;
 
   void writeArgProfileJSON() const {
-    llvm::json::Object Kernels;
+    std::vector<uint64_t> Hashes;
     for (const auto &Entry : KernelRecords)
-      if (auto JSON = Entry.second.argProfileJSON(Timing))
-        Kernels[std::to_string(Entry.first)] = std::move(*JSON);
-    if (Kernels.empty())
+      if (Entry.second.hasArgProfile())
+        Hashes.push_back(Entry.first);
+    if (Hashes.empty())
       return;
+    std::sort(Hashes.begin(), Hashes.end());
 
     // Record readers treat every JSON file in the data directory as a kernel
     // record, so the profile lives in a subdirectory.
@@ -554,8 +557,16 @@ class RecordDatabase {
     llvm::raw_fd_ostream OS(Filename.string(), EC);
     if (EC)
       LOG_FATAL("Failed to open " + Filename.string() + ": " + EC.message());
-    OS << llvm::formatv("{0:2}", llvm::json::Value(llvm::json::Object{
-                                     {"Kernels", std::move(Kernels)}}));
+    llvm::json::OStream J(OS, 2);
+    J.object([&] {
+      J.attributeObject("Kernels", [&] {
+        for (uint64_t Hash : Hashes) {
+          J.attributeBegin(std::to_string(Hash));
+          KernelRecords.find(Hash)->second.writeArgProfile(J, Timing);
+          J.attributeEnd();
+        }
+      });
+    });
     OS.close();
     if (OS.has_error())
       LOG_FATAL("Failed to write " + Filename.string() + ": " +
@@ -660,7 +671,7 @@ public:
     if (!It->second)
       return std::nullopt;
     auto &Record = KernelRecords.find(*It->second)->second;
-    Record.profileArgs(Args);
+    Record.profileArgs(Args, GridDim, BlockDim, SharedMem);
     return Record.registerLaunch(GridDim, BlockDim, SharedMem);
   }
 

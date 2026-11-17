@@ -315,7 +315,7 @@ public:
   const uint64_t ChunkSize;
   const KernelTimingType KernelTiming;
   const bool ProfileArgValues;
-  // Distinct values kept per argument leaf, and distinct tuples per kernel.
+  // Distinct values kept per argument value leaf.
   const uint64_t ArgValueCap;
 
   const config_detail::RecordingRankPolicy &getRecordingRankPolicy() const {
@@ -359,7 +359,7 @@ private:
         ProfileArgValues(config_detail::getEnvOrDefaultBool(
             "MNEME_PROFILE_ARG_VALUES", false)),
         ArgValueCap(config_detail::getEnvOrDefaultPositiveInteger(
-            "MNEME_ARG_VALUE_CAP", 1024)),
+            "MNEME_ARG_VALUE_CAP", 64)),
         MnemeDataDir(config_detail::getEnvOrDefaultString("MNEME_DATA_DIR")),
         MnemeLogDir(config_detail::getEnvOrDefaultString("MNEME_LOG_DIR")) {
 
@@ -369,6 +369,10 @@ private:
 
     if (RecordingFilterMode == FilterMode::Scoped && FilterConfigPath)
       throw std::runtime_error("MNEME_FILTER_CONFIG is not supported in scoped mode");
+
+    if (ArgValueCap > static_cast<uint64_t>(INT32_MAX))
+      throw std::runtime_error(
+          "MNEME_ARG_VALUE_CAP must be at most 2147483647");
   }
 };
 

@@ -1,14 +1,15 @@
 #pragma once
 
-#include <algorithm>
-#include <cmath>
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include <llvm/ADT/Hashing.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -25,7 +26,7 @@
 
 namespace mneme {
 
-enum class ArgLeafKind { Integer, Float, Pointer };
+enum class ArgLeafKind { Integer, Float };
 
 // A scalar inside a kernel argument, found at Offset bytes past Args[ArgIdx].
 struct ArgLeaf {
@@ -41,8 +42,6 @@ struct KernelArgLayout {
   llvm::SmallVector<std::string> ArgNames;
   llvm::SmallVector<std::string> ArgTypes;
   llvm::SmallVector<ArgLeaf> Leaves;
-  // Pieces of arguments without leaves, such as long double, i128 or padding.
-  llvm::SmallVector<std::string> Unsupported;
 };
 
 namespace arg_layout_detail {
@@ -79,11 +78,8 @@ inline void flattenType(llvm::Type *T, unsigned ArgIdx, uint64_t Offset,
   }
   // Clang pads some structs with explicit [N x i8] fields, which hold whatever
   // the host left there, and IR cannot tell them from a char array member.
-  if (ElemTy && ElemTy->isIntegerTy(8)) {
-    Layout.Unsupported.push_back(Path + ": " + typeName(T) +
-                                 " (padding or char array)");
+  if (ElemTy && ElemTy->isIntegerTy(8))
     return;
-  }
   if (ElemTy) {
     uint64_t Stride = DL.getTypeAllocSize(ElemTy);
     for (uint64_t I = 0; I < NumElems; I++)
@@ -94,18 +90,14 @@ inline void flattenType(llvm::Type *T, unsigned ArgIdx, uint64_t Offset,
 
   uint64_t Size = DL.getTypeStoreSize(T);
   std::optional<ArgLeafKind> Kind;
-  if (T->isPointerTy())
-    Kind = ArgLeafKind::Pointer;
-  else if (T->isIntegerTy())
+  if (T->isIntegerTy())
     Kind = ArgLeafKind::Integer;
   else if (T->isHalfTy() || T->isBFloatTy() || T->isFloatTy() ||
            T->isDoubleTy())
     Kind = ArgLeafKind::Float;
 
-  if (!Kind || Size == 0 || Size > sizeof(uint64_t)) {
-    Layout.Unsupported.push_back(Path + ": " + typeName(T));
+  if (!Kind || Size == 0 || Size > sizeof(uint64_t))
     return;
-  }
   Layout.Leaves.push_back(ArgLeaf{ArgIdx, Offset, static_cast<unsigned>(Size),
                                   *Kind, Path, typeName(T)});
 }
@@ -228,8 +220,19 @@ inline void removeUnreadLeaves(llvm::Module &M, const std::string &KernelName,
     bool Known = A.getPointeeInMemoryValueType()
                      ? arg_layout_detail::collectPointerReads(&A, 0, DL, Reads)
                      : arg_layout_detail::collectValueReads(A, DL, Reads);
-    if (!Known)
+    if (!Known) {
+      bool HasLeaves = llvm::any_of(Layout.Leaves, [&](const ArgLeaf &Leaf) {
+        return Leaf.ArgIdx == A.getArgNo();
+      });
+      // Printed without the logger so that default builds still tell the user
+      // that this argument's leaves may include bytes the kernel never reads.
+      if (HasLeaves)
+        std::cerr << "[mneme] Argument value profile keeps every leaf of "
+                     "argument "
+                  << Layout.ArgNames[A.getArgNo()] << " of kernel "
+                  << KernelName << " because its reads cannot be followed\n";
       continue;
+    }
     llvm::erase_if(Layout.Leaves, [&](const ArgLeaf &Leaf) {
       if (Leaf.ArgIdx != A.getArgNo())
         return false;
@@ -241,44 +244,80 @@ inline void removeUnreadLeaves(llvm::Module &M, const std::string &KernelName,
   }
 }
 
-// Counts launches per value of one leaf, up to Cap distinct values.
-class LeafValueStats {
-  std::unordered_map<uint64_t, uint64_t> Launches;
-  uint64_t UntrackedLaunches = 0;
+// The launch configuration is profiled as leaves that follow the argument
+// leaves, so signatures tie argument values to the launch they came with.
+struct LaunchLeaf {
+  const char *Label;
+  unsigned Size;
+  const char *Type;
+};
+
+inline constexpr std::array<LaunchLeaf, 7> LaunchLeaves = {{
+    {"GridDims.x", 4, "i32"},
+    {"GridDims.y", 4, "i32"},
+    {"GridDims.z", 4, "i32"},
+    {"BlockDims.x", 4, "i32"},
+    {"BlockDims.y", 4, "i32"},
+    {"BlockDims.z", 4, "i32"},
+    {"SharedMem", 8, "i64"},
+}};
+
+using LaunchLeafValues = std::array<uint64_t, LaunchLeaves.size()>;
+
+// Maps the values of one leaf to indices in admission order, up to Cap values.
+class LeafValueTable {
+  std::unordered_map<uint64_t, int32_t> IndexOf;
+  std::vector<uint64_t> Values;
+  std::vector<uint64_t> Launches;
+  uint64_t OverflowLaunches = 0;
 
 public:
-  void observe(uint64_t Bits, size_t Cap) {
-    auto It = Launches.find(Bits);
-    if (It != Launches.end())
-      It->second++;
-    else if (Launches.size() < Cap)
-      Launches.emplace(Bits, 1);
-    else
-      UntrackedLaunches++;
+  static constexpr int32_t Overflow = -1;
+
+  int32_t observe(uint64_t Bits, size_t Cap) {
+    auto It = IndexOf.find(Bits);
+    if (It != IndexOf.end()) {
+      Launches[It->second]++;
+      return It->second;
+    }
+    if (Values.size() >= Cap) {
+      OverflowLaunches++;
+      return Overflow;
+    }
+    auto Index = static_cast<int32_t>(Values.size());
+    IndexOf.emplace(Bits, Index);
+    Values.push_back(Bits);
+    Launches.push_back(1);
+    return Index;
   }
 
-  size_t distinct() const { return Launches.size(); }
-  uint64_t untrackedLaunches() const { return UntrackedLaunches; }
-
-  std::vector<std::pair<uint64_t, uint64_t>> top(size_t K) const {
-    std::vector<std::pair<uint64_t, uint64_t>> Sorted(Launches.begin(),
-                                                      Launches.end());
-    std::sort(Sorted.begin(), Sorted.end(), [](const auto &A, const auto &B) {
-      return A.second != B.second ? A.second > B.second : A.first < B.first;
-    });
-    if (Sorted.size() > K)
-      Sorted.resize(K);
-    return Sorted;
-  }
+  size_t size() const { return Values.size(); }
+  uint64_t value(size_t Index) const { return Values[Index]; }
+  uint64_t launches(size_t Index) const { return Launches[Index]; }
+  uint64_t overflowLaunches() const { return OverflowLaunches; }
 };
 
 class KernelArgProfile {
-  static constexpr size_t TopValues = 8;
+  static constexpr size_t MaxSignatures = 4096;
+
+  struct SignatureHash {
+    size_t operator()(const std::vector<int32_t> &Indices) const {
+      return llvm::hash_combine_range(Indices.begin(), Indices.end());
+    }
+  };
 
   KernelArgLayout Layout;
-  std::vector<LeafValueStats> Stats;
+  // One table per argument leaf, then one per launch leaf.
+  std::vector<LeafValueTable> Tables;
+  // Maps a signature to its row; rows are numbered in first-seen order.
+  std::unordered_map<std::vector<int32_t>, size_t, SignatureHash> SignatureRows;
+  std::vector<uint64_t> SignatureLaunches;
+  // Reused across launches so a launch with a known signature allocates
+  // nothing.
+  std::vector<int32_t> Signature;
   size_t Cap;
   uint64_t Launches = 0;
+  uint64_t UntrackedLaunches = 0;
 
   static uint64_t readLeaf(void **Args, const ArgLeaf &Leaf) {
     uint64_t Bits = 0;
@@ -293,81 +332,116 @@ class KernelArgProfile {
     return static_cast<int64_t>(Bits << Shift) >> Shift;
   }
 
-  // JSON has no infinity or NaN, so those are written as strings.
-  static llvm::json::Value decodeFloat(double D) {
-    if (std::isnan(D))
-      return "nan";
-    if (std::isinf(D))
-      return D > 0 ? "inf" : "-inf";
-    return D;
+  static void writeValue(llvm::raw_ostream &OS, ArgLeafKind Kind, unsigned Size,
+                         uint64_t Bits) {
+    if (Kind == ArgLeafKind::Float)
+      OS << '"' << llvm::format_hex(Bits, 2 + 2 * Size) << '"';
+    else
+      OS << signExtend(Bits, Size);
   }
 
-  static llvm::json::Value decode(const ArgLeaf &Leaf, uint64_t Bits) {
-    switch (Leaf.Kind) {
-    case ArgLeafKind::Integer:
-      return signExtend(Bits, Leaf.Size);
-    case ArgLeafKind::Float:
-      if (Leaf.Size == sizeof(double)) {
-        double D;
-        std::memcpy(&D, &Bits, sizeof(D));
-        return decodeFloat(D);
-      }
-      if (Leaf.Size == sizeof(float)) {
-        float F;
-        std::memcpy(&F, &Bits, sizeof(F));
-        return decodeFloat(F);
-      }
-      break;
-    case ArgLeafKind::Pointer:
-      break;
+  template <typename WriteValueT>
+  static void writeValues(llvm::json::OStream &J, const LeafValueTable &Table,
+                          WriteValueT WriteValue) {
+    J.attribute("OverflowLaunches", Table.overflowLaunches());
+    J.attributeArray("Values", [&] {
+      for (size_t I = 0; I < Table.size(); I++)
+        J.rawValue([&](llvm::raw_ostream &OS) {
+          OS << '[';
+          WriteValue(OS, Table.value(I));
+          OS << ',' << Table.launches(I) << ']';
+        });
+    });
+  }
+
+  void writeLeaves(llvm::json::OStream &J) const {
+    size_t NumArgLeaves = Layout.Leaves.size();
+    for (size_t I = 0; I < NumArgLeaves; I++) {
+      const ArgLeaf &Leaf = Layout.Leaves[I];
+      J.object([&] {
+        J.attribute("Label", Leaf.Path);
+        J.attribute("ArgIndex", Leaf.ArgIdx);
+        J.attribute("OffsetBytes", Leaf.Offset);
+        J.attribute("SizeBytes", Leaf.Size);
+        J.attribute("Type", Leaf.Type);
+        writeValues(J, Tables[I], [&](llvm::raw_ostream &OS, uint64_t Bits) {
+          writeValue(OS, Leaf.Kind, Leaf.Size, Bits);
+        });
+      });
     }
-    std::string Hex;
-    llvm::raw_string_ostream(Hex) << llvm::format_hex(Bits, 2 + 2 * Leaf.Size);
-    return Hex;
+    for (size_t I = 0; I < LaunchLeaves.size(); I++) {
+      const LaunchLeaf &Leaf = LaunchLeaves[I];
+      J.object([&] {
+        J.attribute("Label", Leaf.Label);
+        J.attribute("ArgIndex", nullptr);
+        J.attribute("OffsetBytes", nullptr);
+        J.attribute("SizeBytes", Leaf.Size);
+        J.attribute("Type", Leaf.Type);
+        writeValues(J, Tables[NumArgLeaves + I],
+                    [](llvm::raw_ostream &OS, uint64_t Bits) { OS << Bits; });
+      });
+    }
+  }
+
+  void writeSignatures(llvm::json::OStream &J) const {
+    std::vector<const std::vector<int32_t> *> Rows(SignatureRows.size());
+    for (const auto &Entry : SignatureRows)
+      Rows[Entry.second] = &Entry.first;
+    for (size_t Row = 0; Row < Rows.size(); Row++)
+      J.rawValue([&](llvm::raw_ostream &OS) {
+        OS << "[[";
+        for (size_t I = 0; I < Rows[Row]->size(); I++)
+          OS << (I ? "," : "") << (*Rows[Row])[I];
+        OS << "]," << SignatureLaunches[Row] << ']';
+      });
   }
 
 public:
   KernelArgProfile(KernelArgLayout Layout, size_t Cap)
-      : Layout(std::move(Layout)), Stats(this->Layout.Leaves.size()), Cap(Cap) {
-  }
+      : Layout(std::move(Layout)),
+        Tables(this->Layout.Leaves.size() + LaunchLeaves.size()),
+        Signature(Tables.size()), Cap(Cap) {}
 
-  void observe(void **Args) {
+  void observe(void **Args, const LaunchLeafValues &LaunchValues) {
     Launches++;
-    for (size_t I = 0; I < Layout.Leaves.size(); I++)
-      Stats[I].observe(readLeaf(Args, Layout.Leaves[I]), Cap);
+    size_t NumArgLeaves = Layout.Leaves.size();
+    for (size_t I = 0; I < NumArgLeaves; I++)
+      Signature[I] = Tables[I].observe(readLeaf(Args, Layout.Leaves[I]), Cap);
+    for (size_t I = 0; I < LaunchValues.size(); I++)
+      Signature[NumArgLeaves + I] =
+          Tables[NumArgLeaves + I].observe(LaunchValues[I], Cap);
+
+    auto It = SignatureRows.find(Signature);
+    if (It != SignatureRows.end()) {
+      SignatureLaunches[It->second]++;
+      return;
+    }
+    if (SignatureRows.size() >= MaxSignatures) {
+      UntrackedLaunches++;
+      return;
+    }
+    SignatureRows.emplace(Signature, SignatureLaunches.size());
+    SignatureLaunches.push_back(1);
   }
 
-  llvm::json::Object toJSON() const {
-    llvm::json::Array Args;
-    for (size_t I = 0; I < Layout.ArgNames.size(); I++)
-      Args.push_back(llvm::json::Object{{"Name", Layout.ArgNames[I]},
-                                        {"Type", Layout.ArgTypes[I]}});
+  // Writes the launch counts into the JSON object that is open in J.
+  void writeCounts(llvm::json::OStream &J) const {
+    J.attribute("Launches", Launches);
+    J.attribute("UntrackedLaunches", UntrackedLaunches);
+  }
 
-    llvm::json::Array Leaves;
-    for (size_t I = 0; I < Layout.Leaves.size(); I++) {
-      const ArgLeaf &Leaf = Layout.Leaves[I];
-      const LeafValueStats &S = Stats[I];
-      llvm::json::Array Top;
-      for (const auto &[Bits, Count] : S.top(TopValues))
-        Top.push_back(llvm::json::Object{{"Value", decode(Leaf, Bits)},
-                                         {"Launches", Count}});
-      Leaves.push_back(
-          llvm::json::Object{{"Label", Leaf.Path},
-                             {"ArgIndex", Leaf.ArgIdx},
-                             {"OffsetBytes", Leaf.Offset},
-                             {"SizeBytes", Leaf.Size},
-                             {"Type", Leaf.Type},
-                             {"NumDistinctValues", S.distinct()},
-                             {"UntrackedLaunches", S.untrackedLaunches()},
-                             {"TopValues", std::move(Top)}});
-    }
-
-    return llvm::json::Object{
-        {"Launches", Launches},
-        {"Cap", Cap},
-        {"Args", std::move(Args)},
-        {"Leaves", std::move(Leaves)},
-        {"Unsupported", llvm::json::Array(Layout.Unsupported)}};
+  // Writes the arguments, leaves and signatures into the JSON object that is
+  // open in J.
+  void writeTables(llvm::json::OStream &J) const {
+    J.attributeArray("Args", [&] {
+      for (size_t I = 0; I < Layout.ArgNames.size(); I++)
+        J.object([&] {
+          J.attribute("Name", Layout.ArgNames[I]);
+          J.attribute("Type", Layout.ArgTypes[I]);
+        });
+    });
+    J.attributeArray("Leaves", [&] { writeLeaves(J); });
+    J.attributeArray("Signatures", [&] { writeSignatures(J); });
   }
 };
 
