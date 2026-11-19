@@ -549,7 +549,7 @@ def test_async_executor_shutdown(monkeypatch):
 
         def join(self):
             assert self.global_q.shutdown_requested.is_set()
-            assert self.global_q.get(timeout=0) is None
+            assert queued.done()
             joined.append(True)
 
     monkeypatch.setattr("mneme.async_executor.TuneWorkerHandle", FakeHandle)
@@ -562,10 +562,32 @@ def test_async_executor_shutdown(monkeypatch):
         num_workers=2,
     )
     queued = exe.submit(ExperimentConfiguration())
+    waiting = threading.Event()
+    original_wait = queued._cond.wait
+    results = queue.Queue()
+
+    def observe_wait(timeout=None):
+        waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(queued._cond, "wait", observe_wait)
+    waiter = threading.Thread(target=lambda: results.put(queued.result()), daemon=True)
+    waiter.start()
+    assert waiting.wait(timeout=5)
 
     exe.shutdown()
+
     assert len(joined) == 2
-    assert not queued.done()
+    result = results.get(timeout=5)
+    waiter.join(timeout=5)
+    assert not waiter.is_alive()
+    assert result.failed
+    assert result.error == "Executor shut down before the job started"
+
+    late = exe.submit(ExperimentConfiguration())
+    assert late.done()
+    assert late.result().error == result.error
+    assert exe.global_q.drain() == []
 
 
 def test_worker_process_receives_pass_plugins(monkeypatch):
