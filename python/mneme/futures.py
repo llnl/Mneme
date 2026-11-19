@@ -72,6 +72,7 @@ class EvalFuture:
         self.ir_data = ir_data
 
         self._cond = threading.Condition()
+        self._completion_events: set[threading.Event] = set()
         self._done = False
         self._result: Optional[ExperimentResult] = None
         self._error: Optional[str] = None
@@ -90,9 +91,8 @@ class EvalFuture:
         This method wakes all threads waiting in :meth:`result`.
         """
         with self._cond:
-            self._done = True
             self._result = result
-            self._cond.notify_all()
+            self._complete()
 
     def set_error(self, error: str):
         """
@@ -108,9 +108,23 @@ class EvalFuture:
         This method wakes all threads waiting in :meth:`result`.
         """
         with self._cond:
-            self._done = True
             self._error = error
-            self._cond.notify_all()
+            self._complete()
+
+    def _complete(self):
+        self._done = True
+        self._cond.notify_all()
+        for event in self._completion_events:
+            event.set()
+        self._completion_events.clear()
+
+    def notify_when_done(self, event: threading.Event):
+        """Set the event when this future completes, or immediately if it is done."""
+        with self._cond:
+            if self._done:
+                event.set()
+            else:
+                self._completion_events.add(event)
 
     def done(self):
         """
