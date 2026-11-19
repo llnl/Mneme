@@ -15,6 +15,9 @@ from mneme.replay_executor import TuneWorker
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
 
 
+_SHUTDOWN_ERROR = "Executor shut down before the job started"
+
+
 def pop(q, timeout):
     """
     Pop an item from a queue with a timeout.
@@ -526,8 +529,7 @@ class AsyncReplayExecutor:
             if len(self._failed_workers) < self._num_workers:
                 return
             self._broken_error = error
-
-        self._fail_pending_futures(error)
+            self._fail_pending_futures(error)
 
     def _fail_pending_futures(self, error: str):
         for future in self.global_q.drain():
@@ -569,7 +571,8 @@ class AsyncReplayExecutor:
         -------
         EvalFuture
             A future that will be resolved with an :class:`ExperimentResult` once
-            the worker completes the experiment (or marked as failed on crash).
+            the worker completes the experiment, or marked as failed on shutdown
+            or worker failure.
         """
         with self._lock:
             job_id = self._next_id
@@ -577,10 +580,12 @@ class AsyncReplayExecutor:
             logger.debug(f"[{self.__class__.__name__}] Submitting job {job_id}")
             future = EvalFuture(job_id, config, self._ir_revision, self._ir_data)
             self._futures[job_id] = future
-            if self._broken_error is not None:
+            if self.global_q.shutdown_requested.is_set():
+                future.set_error(_SHUTDOWN_ERROR)
+            elif self._broken_error is not None:
                 future.set_error(self._broken_error)
-                return future
-            self.global_q.put(future)
+            else:
+                self.global_q.put(future)
         return future
 
     def shutdown(self):
@@ -588,14 +593,12 @@ class AsyncReplayExecutor:
         Gracefully shut down all workers and their monitoring threads.
 
         Workers finish any experiment already claimed by a monitor. Jobs still
-        in the shared queue when shutdown starts are left pending.
-
-        Notes
-        -----
-        * After shutdown, submitting additional jobs is undefined behavior.
+        queued or submitted after shutdown starts receive a shutdown error.
         """
         logger.debug(f"[{self.__class__.__name__}] Starting shutdown process")
-        self.global_q.shutdown()
+        with self._lock:
+            self.global_q.shutdown()
+            self._fail_pending_futures(_SHUTDOWN_ERROR)
         for w in self.workers:
             w.join()
         logger.debug(f"[{self.__class__.__name__}] Done Shutdown")
