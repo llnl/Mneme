@@ -3,10 +3,12 @@
 
 import hashlib
 import json
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
 
+from mneme.futures import EvalFuture
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
 from mneme.recorded_execution import KernelSource
 from mneme.tuning import session as tune_session
@@ -900,17 +902,66 @@ def test_baseline_failure_continuation_and_complete_failure(monkeypatch, tmp_pat
         assert json.loads((tmp_path / "summary.json").read_text())["status"] == "failed"
 
 
+def test_tuning_refills_a_worker_slot_after_an_out_of_order_completion(monkeypatch, tmp_path):
+    monkeypatch.setattr(TuningSession, "_load_record", lambda self: (FakeRecorded(), FakeKernel()))
+    monkeypatch.setattr(tune_session, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    futures = []
+    result = ExperimentResult(verified=True, executed=True, exec_time=[5])
+
+    class Executor(RecordingExecutor):
+        def submit(self, config):
+            future = EvalFuture(len(futures), config)
+            futures.append(future)
+            return future
+
+    class CompletionEvent(Event):
+        def wait(self, timeout=None):
+            if len(futures) == 2:
+                futures[1].set_error("device error")
+            else:
+                assert len(futures) == 3
+                assert not futures[0].done()
+                futures[0].set_result(result)
+                futures[2].set_result(result)
+            assert self.is_set()
+            return True
+
+    monkeypatch.setattr(tune_session, "Event", CompletionEvent)
+    options = make_options(
+        tmp_path, space_preset="compiler", fixed_passes="default<O3>",
+        codegen_opt_range="1:3", workers=2, proteus_enabled=False, fail_fast=True,
+    )
+    assert TuningSession(options, executor=Executor()).run() == 0
+    trials = [json.loads(line) for line in (tmp_path / "trials.jsonl").read_text().splitlines()]
+    assert [trial["trial"] for trial in trials] == [1, 0, 2]
+    assert [trial["status"] for trial in trials] == ["runtime_error", "verified", "verified"]
+
+
 @pytest.mark.parametrize("verified", [True, False])
 def test_timeout_drains_initial_evaluation_and_keeps_best_verified(monkeypatch, tmp_path, verified):
     monkeypatch.setattr(TuningSession, "_load_record", lambda self: (FakeRecorded(), FakeKernel()))
     now = [0.0]
-    monkeypatch.setattr(tune_session.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(tune_session, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    waits = []
 
     class Executor(RecordingExecutor):
         def submit(self, config):
-            now[0] = 2.0
-            return super().submit(config)
+            self.submitted.append(config)
+            self.pending = EvalFuture(len(self.submitted), config)
+            return self.pending
 
+    class CompletionEvent(Event):
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            if timeout is not None:
+                assert timeout == 1.0
+                now[0] += timeout
+                return False
+            executor.pending.set_result(executor.submitted_result)
+            assert self.is_set()
+            return True
+
+    monkeypatch.setattr(tune_session, "Event", CompletionEvent)
     executor = Executor(
         baseline_result=ExperimentResult(executed=True),
         submitted_result=ExperimentResult(verified=verified, executed=True, exec_time=[5]),
@@ -921,6 +972,7 @@ def test_timeout_drains_initial_evaluation_and_keeps_best_verified(monkeypatch, 
     )
     assert TuningSession(options, executor=executor).run() == (0 if verified else EXIT_BASELINE_FAILED)
     assert len(executor.submitted) == 1
+    assert waits == [1.0, None]
     if verified:
         assert json.loads((tmp_path / "best.json").read_text())["config"]["block"]["x"] == 256
     else:

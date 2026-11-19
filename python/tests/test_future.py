@@ -13,6 +13,24 @@ def test_done_initially_false():
     assert fut.done() is False
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_notify_when_done_signals_early_and_late_registrations(failed):
+    fut = EvalFuture(job_id=1, config=ExperimentConfiguration())
+    early = threading.Event()
+    fut.notify_when_done(early)
+    assert not early.is_set()
+
+    if failed:
+        fut.set_error("worker failed")
+    else:
+        fut.set_result(ExperimentResult(executed=True))
+
+    late = threading.Event()
+    fut.notify_when_done(late)
+    assert early.is_set()
+    assert late.is_set()
+
+
 def test_result_timeout_returns_none_when_not_done():
     fut = EvalFuture(job_id=1, config=ExperimentConfiguration())
     t0 = time.time()

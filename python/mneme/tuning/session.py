@@ -13,6 +13,7 @@ import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from threading import TIMEOUT_MAX, Event
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 
 import optuna
@@ -958,16 +959,17 @@ class TuningSession:
                 if initial_phase else self._candidate_iter(space)
             )
             in_flight: List[Tuple[Candidate, EvalFuture]] = []
-            start_time = time.monotonic()
+            completion = Event()
+            deadline = (
+                time.monotonic() + self.options.timeout
+                if self.options.timeout is not None else None
+            )
             submitted = 0
             exhausted = False
 
             # outer tuning loop -- continue until we've exhausted the candidate iterator and all in-flight trials have completed, or we've hit the timeout 
             while in_flight or not exhausted:
-                timed_out = (
-                    self.options.timeout is not None
-                    and time.monotonic() - start_time >= self.options.timeout
-                )
+                timed_out = deadline is not None and time.monotonic() >= deadline
 
                 # inner loop -- submit new candidates until we run out or hit the worker limit
                 while not exhausted and not timed_out and len(in_flight) < self.options.workers:
@@ -1017,11 +1019,13 @@ class TuningSession:
                     in_flight.append((candidate, future))
                     submitted += 1
 
-                # check on in-flight trials and record any that have completed
+                # Clear old notifications before checking for new completions.
+                completion.clear()
                 made_progress = False
                 remaining: List[Tuple[Candidate, EvalFuture]] = []
                 for candidate, future in in_flight:
                     if not future.done():
+                        future.notify_when_done(completion)
                         remaining.append((candidate, future))
                         continue
 
@@ -1084,7 +1088,10 @@ class TuningSession:
                 if timed_out and not in_flight:
                     break
                 if in_flight and not made_progress:
-                    time.sleep(0.05)
+                    wait_timeout = None
+                    if deadline is not None and not timed_out and not exhausted:
+                        wait_timeout = max(0.0, min(TIMEOUT_MAX, deadline - time.monotonic()))
+                    completion.wait(timeout=wait_timeout)
 
             summary = self._write_final_outputs(
                 recorded,
