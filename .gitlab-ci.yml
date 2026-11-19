@@ -69,6 +69,7 @@ workflow:
           - ".gitlab/**/*"
           - ".coveragerc"
           - "CMakeLists.txt"
+          - "PROTEUS_VERSION"
           - "cmake/**/*"
           - "include/**/*"
           - "pyproject.toml"
