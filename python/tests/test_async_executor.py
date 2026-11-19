@@ -271,11 +271,22 @@ def test_worker_crash_branch_marks_future_failed_and_respawns(handle):
     assert handle.current is None
 
 
-def test_ready_worker_resets_startup_failures_and_submits(handle):
+def test_ready_worker_resets_startup_failures_and_submits(handle, monkeypatch):
     future = EvalFuture(3, ExperimentConfiguration())
     handle.global_q.put(future)
     handle._startup_failures = 2
-    handle._state.set()
+
+    def wait_until_ready(timeout):
+        assert timeout == 0.5
+        handle._state.set()
+
+    def unexpected_shutdown_wait(timeout):
+        pytest.fail("Monitor skipped the worker readiness event")
+
+    handle._state.wait = wait_until_ready
+    monkeypatch.setattr(
+        handle.global_q.shutdown_requested, "wait", unexpected_shutdown_wait
+    )
 
     original_submit = handle._submit
     original_receive = handle._try_receive
@@ -541,14 +552,20 @@ def test_async_executor_set_ir_normalizes_path(monkeypatch, tmp_path):
 
 
 def test_async_executor_shutdown(monkeypatch):
+    woken = []
     joined = []
 
     class FakeHandle:
         def __init__(self, idx, global_q, *args, **kwargs):
+            self.idx = idx
             self.global_q = global_q
 
-        def join(self):
+        def _wake_for_shutdown(self):
             assert self.global_q.shutdown_requested.is_set()
+            woken.append(self.idx)
+
+        def join(self):
+            assert woken == [0, 1]
             assert queued.done()
             joined.append(True)
 
