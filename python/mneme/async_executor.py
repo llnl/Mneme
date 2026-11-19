@@ -1,12 +1,11 @@
 import queue
 import threading
-import time
+from collections import deque
 from enum import IntEnum
 from multiprocessing import Event as ProcessEvent
 from multiprocessing import Process
 from multiprocessing import Queue as ProcessQueue
 from pathlib import Path
-from queue import Queue as ThreadQueue
 from threading import Event as ThreadEvent
 from typing import Callable, Dict, Optional, Sequence, Union
 
@@ -41,6 +40,48 @@ def pop(q, timeout):
         return q.get(timeout=timeout)
     except queue.Empty:
         return None
+
+
+class _WorkQueue:
+    """A shared queue whose idle consumers can be woken for shutdown."""
+
+    def __init__(self):
+        self._pending: deque[EvalFuture] = deque()
+
+        # thread.Condition allows signalling a thread that owns a lock
+        # we use it to signal shutdown events
+        self._available = threading.Condition()
+        self.shutdown_requested = ThreadEvent()
+
+    def put(self, future: EvalFuture):
+        with self._available:
+            self._pending.append(future)
+            self._available.notify() # notify owning thread
+
+    def get(self, timeout: float) -> Optional[EvalFuture]:
+        with self._available:
+            # poll for shutdown or pending status
+            self._available.wait_for(
+                lambda: self.shutdown_requested.is_set() or bool(self._pending),
+                timeout,
+            )
+
+            # don't return if shutdown
+            if self.shutdown_requested.is_set() or not self._pending:
+                return None
+
+            return self._pending.popleft()
+
+    def drain(self) -> list[EvalFuture]:
+        with self._available:
+            pending = list(self._pending)
+            self._pending.clear()
+            return pending
+
+    def shutdown(self):
+        with self._available:
+            self.shutdown_requested.set()
+            self._available.notify_all()
 
 
 class TuneWorkerHandle:
@@ -82,7 +123,7 @@ class TuneWorkerHandle:
     def __init__(
         self,
         idx,
-        global_q: ThreadQueue,
+        global_q: _WorkQueue,
         record_db: str,
         record_id: str,
         device_id: int,
@@ -103,7 +144,7 @@ class TuneWorkerHandle:
         ----------
         idx : int
             Logical worker index (primarily used for logging/debugging).
-        global_q : queue.Queue
+        global_q : _WorkQueue
             Shared thread queue containing :class:`EvalFuture` objects to be executed
             by this handle’s worker process.
         record_db : str
@@ -138,7 +179,6 @@ class TuneWorkerHandle:
         self._ipc_write_q = None
         self._ipc_read_q = None
 
-        self._shutdown_event = ThreadEvent()
         self._action = self.StateMachine.SUBMIT
 
         self.record_db = record_db
@@ -252,7 +292,7 @@ class TuneWorkerHandle:
         self.current.set_result(ExperimentResult.from_dict(msg["data"]))
         self.current = None
 
-    def _try_receive(self):
+    def _try_receive(self, timeout: float = 1):
         """
         Poll the worker response queue and process one available result.
 
@@ -260,12 +300,18 @@ class TuneWorkerHandle:
         without modifying state. On a successful receive, the internal action state
         transitions back to ``SUBMIT``.
         """
-        msg = pop(self._ipc_read_q, timeout=1)
+        msg = pop(self._ipc_read_q, timeout=timeout)
         if msg is None:
             return
 
         self._process_result(msg)
         self._action = self.StateMachine.SUBMIT
+
+    def _fail_current(self):
+        self.current.set_error(
+            f"Worker crashed (exit code: {self._process.exitcode}) running on device {self.device_id}"
+        )
+        self.current = None
 
     # ------------------------------------------------------------
     # Job submission
@@ -282,7 +328,7 @@ class TuneWorkerHandle:
         -----
         * At most one job is in-flight per worker handle at any time.
         """
-        future: EvalFuture = pop(self.global_q, timeout=1)
+        future = self.global_q.get(timeout=1)
         if future is None:
             return
 
@@ -323,16 +369,15 @@ class TuneWorkerHandle:
 
           4) **Graceful shutdown**
              When the shutdown event is set, the loop sends a ``terminate`` message
-             to the worker, drains results while the process is alive, and joins
-             the process.
+             to the worker, collects any outstanding result, and joins the process.
 
         Notes
         -----
-        * The loop uses polling timeouts to remain responsive to shutdown.
-        * The readiness event is a simple synchronization primitive; future versions
-          may use condition variables or a richer handshake protocol.
+        * Polling timeouts let the monitor detect an unexpected worker exit while
+          waiting for work, readiness, or a response.
         """
-        while not self._shutdown_event.is_set():
+        shutdown_requested = self.global_q.shutdown_requested
+        while not shutdown_requested.is_set():
             if not self._process.is_alive():
                 # Crash recovery
                 if not self._state.is_set():
@@ -341,21 +386,16 @@ class TuneWorkerHandle:
                         self._disable_after_startup_failures()
                         return
                 elif self.current is not None:
-                    # TODO: At some point we need to have more descrptive messages on the crash, it is not always a seg fault, somethimes it is LLVM related and we should know.
-                    self.current.set_error(
-                        f"Worker crashed (exit code: {self._process.exitcode}) running on device {self.device_id}"
-                    )
-                    self.current = None
+                    self._fail_current()
                     _ = pop(self._ipc_read_q, timeout=0)
 
-                self._spawn_process()
+                if not shutdown_requested.is_set():
+                    self._spawn_process()
                 continue
 
             # Wait for worker to initialize
             if not self._state.is_set():
-                # TODO: We should use mp.conditional variables instead of the state.
-                # That should simplify the logic.
-                time.sleep(0.5)
+                shutdown_requested.wait(timeout=0.5)
                 continue
 
             self._startup_failures = 0
@@ -368,18 +408,20 @@ class TuneWorkerHandle:
         # Shutdown
         if self._process.is_alive():
             self._ipc_write_q.put({"payload": "terminate"})
-            while self._process.is_alive():
-                self._try_receive()
-            self._process.join()
+
+        # The child may need the response queue drained before it can exit.
+        while self.current is not None and self._process.is_alive():
+            self._try_receive()
+        self._process.join()
+
+        if self.current is not None:
+            # The worker may have exited with its result still in the queue.
+            self._try_receive(timeout=0)
+            if self.current is not None:
+                self._fail_current()
 
     def join(self):
-        """
-        Request shutdown of the monitor thread and wait for completion.
-
-        This method signals the monitor loop to terminate, which triggers graceful
-        worker shutdown and process join. It then joins the monitor thread.
-        """
-        self._shutdown_event.set()
+        """Wait for the monitor thread to shut down after the queue is closed."""
         self._monitor_thread.join()
 
 
@@ -445,7 +487,7 @@ class AsyncReplayExecutor:
         pass_plugins : Sequence[str]
             Pass plugin libraries every worker loads into the JIT.
         """
-        self.global_q = ThreadQueue()
+        self.global_q = _WorkQueue()
         self._futures: Dict[int, EvalFuture] = {}
         self._next_id = 0
         self._lock = threading.Lock()
@@ -488,10 +530,7 @@ class AsyncReplayExecutor:
         self._fail_pending_futures(error)
 
     def _fail_pending_futures(self, error: str):
-        while True:
-            future = pop(self.global_q, timeout=0)
-            if future is None:
-                return
+        for future in self.global_q.drain():
             future.set_error(error)
 
     def set_ir(self, ir: Union[str, Path]):
@@ -546,18 +585,17 @@ class AsyncReplayExecutor:
 
     def shutdown(self):
         """
-        Gracefully shutdown all workers and their monitoring threads.
+        Gracefully shut down all workers and their monitoring threads.
 
-        This method requests each :class:`TuneWorkerHandle` to stop, which causes:
-          - the worker loop to receive a terminate message,
-          - the worker process to exit,
-          - the monitor thread to join.
+        Workers finish any experiment already claimed by a monitor. Jobs still
+        in the shared queue when shutdown starts are left pending.
 
         Notes
         -----
         * After shutdown, submitting additional jobs is undefined behavior.
         """
         logger.debug(f"[{self.__class__.__name__}] Starting shutdown process")
+        self.global_q.shutdown()
         for w in self.workers:
             w.join()
         logger.debug(f"[{self.__class__.__name__}] Done Shutdown")
