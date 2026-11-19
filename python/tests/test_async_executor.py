@@ -1,5 +1,7 @@
 import inspect
 import queue
+import threading
+
 import pytest
 
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
@@ -8,6 +10,7 @@ from mneme.async_executor import (
     pop,
     TuneWorkerHandle,
     AsyncReplayExecutor,
+    _WorkQueue,
 )
 
 
@@ -25,6 +28,33 @@ def test_pop_returns_item():
 def test_pop_returns_none_on_timeout():
     q = queue.Queue()
     assert pop(q, timeout=0.01) is None
+
+
+def test_work_queue_shutdown_wakes_all_waiters(monkeypatch):
+    work = _WorkQueue()
+    waiting = queue.Queue()
+    results = queue.Queue()
+    original_wait = work._available.wait
+
+    def observe_wait(timeout=None):
+        waiting.put(threading.get_ident())
+        return original_wait(timeout)
+
+    def consume():
+        results.put(work.get(timeout=30))
+
+    monkeypatch.setattr(work._available, "wait", observe_wait)
+    threads = [threading.Thread(target=consume, daemon=True) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    assert len({waiting.get(timeout=5) for _ in threads}) == len(threads)
+
+    work.shutdown()
+
+    for thread in threads:
+        assert results.get(timeout=5) is None
+        thread.join(timeout=5)
+        assert not thread.is_alive()
 
 
 # -----------------------------------------------------------------------------
@@ -93,7 +123,7 @@ def handle(monkeypatch):
     monkeypatch.setattr(mod, "ProcessEvent", DummyEvent)
     monkeypatch.setattr(mod, "ProcessQueue", DummyQueue)
 
-    global_q = queue.Queue()
+    global_q = _WorkQueue()
 
     h = mod.TuneWorkerHandle(
         idx=0,
@@ -228,7 +258,7 @@ def test_worker_crash_branch_marks_future_failed_and_respawns(handle):
     handle._process.exitcode = 42
 
     def stop_after_respawn():
-        handle._shutdown_event.set()
+        handle.global_q.shutdown()
 
     handle._spawn_process = stop_after_respawn
 
@@ -248,42 +278,60 @@ def test_ready_worker_resets_startup_failures_and_submits(handle):
     handle._state.set()
 
     original_submit = handle._submit
+    original_receive = handle._try_receive
 
     def submit_once():
         original_submit()
-        handle._process._alive = False
-        handle._shutdown_event.set()
-
-    handle._submit = submit_once
-
-    handle._shadow_process_loop()
-
-    assert handle._startup_failures == 0
-    assert handle.current is future
-    assert handle._action == handle.StateMachine.RECEIVE
-
-
-def test_shadow_loop_shutdown_sends_terminate_and_joins(handle):
-    handle._shutdown_event.set()
-    received = []
+        assert handle.current is future
+        assert handle._action == handle.StateMachine.RECEIVE
+        handle._ipc_read_q.put(
+            {"exp_id": future.job_id, "data": ExperimentResult(executed=True).to_dict()}
+        )
+        handle.global_q.shutdown()
 
     def receive_once():
-        received.append(True)
-        handle._process._alive = False
+        assert handle.current is future
+        original_receive()
 
+    handle._submit = submit_once
     handle._try_receive = receive_once
 
     handle._shadow_process_loop()
 
+    assert handle._startup_failures == 0
+    assert future.done()
+
+
+def test_idle_shutdown_sends_terminate_without_waiting_for_a_result(handle):
+    handle.global_q.shutdown()
+
+    def unexpected_receive():
+        pytest.fail("Idle shutdown tried to read from the response queue")
+
+    handle._try_receive = unexpected_receive
+
+    handle._shadow_process_loop()
+
     assert handle._ipc_write_q.get_nowait()["payload"] == "terminate"
-    assert received == [True]
     assert handle._process.is_alive() is False
 
 
-def test_tuneworker_handle_join_signals_thread(handle):
-    handle.join()
+@pytest.mark.parametrize("result_waiting", [True, False])
+def test_shutdown_resolves_current_future_after_worker_exit(handle, result_waiting):
+    future = EvalFuture(7, ExperimentConfiguration())
+    handle.current = future
+    handle._process._alive = False
+    if result_waiting:
+        handle._ipc_read_q.put(
+            {"exp_id": future.job_id, "data": ExperimentResult(executed=True).to_dict()}
+        )
+    handle.global_q.shutdown()
 
-    assert handle._shutdown_event.is_set()
+    handle._shadow_process_loop()
+
+    assert future.done()
+    assert future.result().executed is result_waiting
+    assert future.result().failed is not result_waiting
 
 
 def test_startup_failures_stop_respawning_after_limit(monkeypatch):
@@ -297,7 +345,7 @@ def test_startup_failures_stop_respawning_after_limit(monkeypatch):
     failures = []
     h = mod.TuneWorkerHandle(
         idx=0,
-        global_q=queue.Queue(),
+        global_q=_WorkQueue(),
         record_db="db",
         record_id="rid",
         device_id=0,
@@ -404,7 +452,7 @@ def test_async_executor_preserves_short_circuit_on_worker_respawn(
 
     def stop_after_respawn():
         spawn_process()
-        worker._shutdown_event.set()
+        worker.global_q.shutdown()
         worker._process._alive = False
 
     monkeypatch.setattr(worker, "_spawn_process", stop_after_respawn)
@@ -496,12 +544,15 @@ def test_async_executor_shutdown(monkeypatch):
     joined = []
 
     class FakeHandle:
+        def __init__(self, idx, global_q, *args, **kwargs):
+            self.global_q = global_q
+
         def join(self):
+            assert self.global_q.shutdown_requested.is_set()
+            assert self.global_q.get(timeout=0) is None
             joined.append(True)
 
-    monkeypatch.setattr(
-        "mneme.async_executor.TuneWorkerHandle", lambda *a, **k: FakeHandle()
-    )
+    monkeypatch.setattr("mneme.async_executor.TuneWorkerHandle", FakeHandle)
 
     exe = AsyncReplayExecutor(
         record_db="db",
@@ -510,9 +561,11 @@ def test_async_executor_shutdown(monkeypatch):
         results_db_dir="/tmp",
         num_workers=2,
     )
+    queued = exe.submit(ExperimentConfiguration())
 
     exe.shutdown()
     assert len(joined) == 2
+    assert not queued.done()
 
 
 def test_worker_process_receives_pass_plugins(monkeypatch):
