@@ -66,25 +66,31 @@ def _parse_prologue_blob_metadata(prologue_path: Path):
         skip(8)  # dev addr
         skip(blob_size)
 
-        builtin = read_u8()
-        threshold = read_f64()
-        threshold_kind = read_u8()
-        norm = read_u8()
-        tag_len = read_u64()
-        tag = None
-        if tag_len:
-            tag = data[off : off + tag_len].decode("utf-8", errors="replace")
-            skip(tag_len)
+        for _ in range(read_u64()):
+            offset = read_u64()
+            extent = read_u64()
+            builtin = read_u8()
+            threshold = read_f64()
+            threshold_kind = read_u8()
+            norm = read_u8()
+            tag_len = read_u64()
+            tag = None
+            if tag_len:
+                tag = data[off : off + tag_len].decode("utf-8", errors="replace")
+                skip(tag_len)
 
-        out.append(
-            {
-                "builtin": builtin,
-                "threshold": threshold,
-                "threshold_kind": threshold_kind,
-                "norm": norm,
-                "tag": tag,
-            }
-        )
+            out.append(
+                {
+                    "offset": offset,
+                    "extent": extent,
+                    "blob_size": blob_size,
+                    "builtin": builtin,
+                    "threshold": threshold,
+                    "threshold_kind": threshold_kind,
+                    "norm": norm,
+                    "tag": tag,
+                }
+            )
 
     return out
 

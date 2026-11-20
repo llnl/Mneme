@@ -12,6 +12,7 @@
 #include "mneme/MnemeSnapshot.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -33,7 +34,7 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
   RecorderRuntimeFunctions<VendorTypes> Runtime;
   std::unique_ptr<LaunchTimer<VendorTypes>> Timer;
   RecordDatabase DB;
-  llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> AllocatedBlobs;
+  BlobsByAddress<VendorTypes> AllocatedBlobs;
   // Allocations served by the vendor runtime (pinned, pitched, stream-ordered,
   // managed where Mneme cannot place it, ...). They are not captured, but the
   // application may release them with the device free, which must then be
@@ -103,6 +104,25 @@ class RecordingBackend final : public RecorderBackend<VendorTypes> {
     AllocatedBlobs.erase(It);
     ManagedBlobs.erase(Ptr);
     return ret;
+  }
+
+  struct OwningBlob {
+    typename BlobsByAddress<VendorTypes>::iterator It;
+    uint64_t Offset;
+  };
+
+  // The blob that holds the byte at ptr, and ptr's offset in it.
+  std::optional<OwningBlob> findOwningBlob(const void *ptr) {
+    auto It = AllocatedBlobs.upper_bound(const_cast<void *>(ptr));
+    if (It == AllocatedBlobs.begin())
+      return std::nullopt;
+
+    --It;
+    uint64_t Offset = reinterpret_cast<std::uintptr_t>(ptr) -
+                      reinterpret_cast<std::uintptr_t>(It->first);
+    if (Offset >= It->second.getSize())
+      return std::nullopt;
+    return OwningBlob{It, Offset};
   }
 
   // The caller must first wait for work that may still use the memory.
@@ -225,14 +245,38 @@ public:
            Config::get().CopySource, Config::get().KernelTiming) {}
 
   bool setMetadataForPointer(const void *ptr, Metadata md) override {
-    if (!ptr)
-      return false;
-
     auto It = AllocatedBlobs.find(const_cast<void *>(ptr));
     if (It == AllocatedBlobs.end())
-      return false;
+      LOG_FATAL("annotation ptr={} tag={} is not the start of a recorded "
+                "allocation; annotate a pointer inside one with its size in "
+                "bytes",
+                ptr, md.tag.value_or("no_tag"));
 
-    It->second.setMetadata(std::move(md));
+    auto &Blob = It->second;
+    auto Status = Blob.setAnnotation({0, Blob.getSize()}, md);
+    if (Status != AnnotationStatus::Ok)
+      LOG_FATAL("annotation {} ptr={} size={} builtin={} tag={}",
+                describeAnnotationStatus(Status), ptr, Blob.getSize(),
+                static_cast<unsigned>(md.builtin), md.tag.value_or("no_tag"));
+    return true;
+  }
+
+  bool setMetadataForRegion(const void *ptr, size_t bytes,
+                            Metadata md) override {
+    auto Owner = findOwningBlob(ptr);
+    if (!Owner)
+      LOG_FATAL("region annotation ptr={} bytes={} tag={} is not inside a "
+                "recorded allocation",
+                ptr, bytes, md.tag.value_or("no_tag"));
+
+    auto &[BasePtr, Blob] = *Owner->It;
+    auto Status = Blob.setAnnotation({Owner->Offset, bytes}, md);
+    if (Status != AnnotationStatus::Ok)
+      LOG_FATAL("region annotation {} ptr={} base_ptr={} offset={} bytes={} "
+                "blob_size={} builtin={} elem_size={} tag={}",
+                describeAnnotationStatus(Status), ptr, BasePtr, Owner->Offset,
+                bytes, Blob.getSize(), static_cast<unsigned>(md.builtin),
+                builtinByteWidth(md.builtin), md.tag.value_or("no_tag"));
     return true;
   }
 
@@ -244,7 +288,7 @@ public:
     if (It == AllocatedBlobs.end())
       return false;
 
-    md = It->second.getMetadata();
+    md = It->second.annotationAt(0).MD;
     return true;
   }
 
@@ -256,7 +300,7 @@ public:
     if (It == AllocatedBlobs.end())
       return false;
 
-    It->second.setMetadata(Metadata{});
+    It->second.resetAnnotations();
     return true;
   }
 
@@ -324,7 +368,7 @@ public:
     if (ManagedBlobs.contains(ptr))
       return releaseManagedBlob(ptr, MnemeDeviceRT::getDeviceFreeFnName(),
                                 [&] { return Runtime.origFreeDevice(ptr); });
-    if (!AllocatedBlobs.contains(ptr)) {
+    if (!AllocatedBlobs.count(ptr)) {
       if (PassthroughAllocs.erase(ptr)) {
         LOG_DEBUG("Forwarding free of vendor runtime allocation PTR:{}", ptr);
         return Runtime.origFreeDevice(ptr);
@@ -348,7 +392,7 @@ public:
       return releaseManagedBlob(ptr, MnemeDeviceRT::getAsyncFreeFnName(), [&] {
         return Runtime.origFreeAsync(ptr, stream);
       });
-    if (AllocatedBlobs.contains(ptr)) {
+    if (AllocatedBlobs.count(ptr)) {
       // Mneme releases its memory right away, so first wait for the work
       // queued on the stream that may still use it. The sync fails during
       // stream capture; keep the memory then.
@@ -450,7 +494,7 @@ public:
     LOG_DEBUG("RecordingBackend destructor: releasing {} blobs",
               AllocatedBlobs.size());
 
-    // Release all unreleased blobs before the DenseMap destructs
+    // Release all unreleased blobs before the map destructs
     for (auto &Entry : AllocatedBlobs) {
       auto &Blob = Entry.second;
       if (Blob.getBlobAddr() != nullptr) {

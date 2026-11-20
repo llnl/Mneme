@@ -99,26 +99,28 @@ must continue to open. `ctest -R Serialize` checks this.
 
 ### How to bump the version
 
-This procedure uses a change to the diff layout as the example.
+This procedure uses a change to the diff layout as the example. The
+current diff reader is `DiffReaderV<n>`, and the new layout is version
+`n + 1`.
 
-1. Add `DiffReaderV2` after `DiffReaderV1`. Give it
-   `static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 2};` and a
-   `read()` that decodes the new payload. Keep `DiffReaderV1`. Every
+1. Add `DiffReaderV<n+1>` after `DiffReaderV<n>`. Give it
+   `static constexpr SnapshotHeader Layout{SnapshotKind::Diff, n + 1};` and
+   a `read()` that decodes the new payload. Keep `DiffReaderV<n>`. Every
    reader derives directly from `SnapshotReader`, never from another
    version's reader. Build `read()` from the section helpers in
    `mneme::snapshot_detail`.
    For a section whose encoding changes, add a new helper. Do not change a
    helper that an older reader calls.
-2. Add `entry<DiffReaderV2<VendorTypes>>()` to the table in
+2. Add `entry<DiffReaderV<n+1><VendorTypes>>()` to the table in
    `SnapshotFormatRegistry::table`.
 3. Change `DiffWriter::header()` to return
-   `DiffReaderV2<VendorTypes>::Layout`. Change `DiffWriter::writePayload` to
-   write the new layout.
+   `DiffReaderV<n+1><VendorTypes>::Layout`. Change
+   `DiffWriter::writePayload` to write the new layout.
 4. Extend `tests/unit_tests/ReadWriteSnapshot.cpp` so that the round trip
    covers the new layout. Keep a fixture or a hand-built buffer in the old
    layout so that the old reader stays covered.
 
 The version number appears only in the new reader's `Layout`. The compiler
-cannot detect a missing step 2. In that case the writer stamps version 2,
-the registry has no row for it, and the snapshot fails to open with
+cannot detect a missing step 2. In that case the writer stamps version
+`n + 1`, the registry has no row for it, and the snapshot fails to open with
 `Unsupported Mneme snapshot format`.
