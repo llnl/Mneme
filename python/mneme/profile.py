@@ -23,7 +23,7 @@ Notes:
   - The native library and its ABI are considered the source of truth.
 """
 
-from ctypes import POINTER, c_char_p, c_uint64, c_int64
+from ctypes import POINTER, c_char_p, c_uint64, c_int64, c_double, c_int
 
 from mneme.mneme_logging import logger
 
@@ -68,6 +68,23 @@ def _init_profile():
         profile_lib.MnemePy_getNumRecords.restype = c_int64
 
         profile_lib.MnemePy_initProfiler.argtypes = []
+
+        # The counter exports exist only in the CUPTI profile library.
+        if hasattr(profile_lib, "MnemePy_counterAvailable"):
+            profile_lib.MnemePy_counterAvailable.argtypes = []
+            profile_lib.MnemePy_counterAvailable.restype = c_int
+
+            profile_lib.MnemePy_counterMetricName.argtypes = []
+            profile_lib.MnemePy_counterMetricName.restype = c_char_p
+
+            profile_lib.MnemePy_counterInit.argtypes = [c_int]
+            profile_lib.MnemePy_counterInit.restype = c_int
+
+            profile_lib.MnemePy_counterStart.argtypes = [c_int64]
+            profile_lib.MnemePy_counterStart.restype = c_int
+
+            profile_lib.MnemePy_counterStop.argtypes = [POINTER(c_double), c_int64]
+            profile_lib.MnemePy_counterStop.restype = c_int64
 
 
 def gpu_profile_start(kernel_name: str):
@@ -143,3 +160,57 @@ def init_profiler() -> None:
     to :func:`gpu_profile_start` / :func:`gpu_profile_stop`.
     """
     _init_profile()
+
+
+def counters_available() -> bool:
+    """Whether the native profile library can collect hardware counters."""
+    _init_profile()
+    if not hasattr(profile_lib, "MnemePy_counterAvailable"):
+        return False
+    return bool(profile_lib.MnemePy_counterAvailable())
+
+
+def counter_metric_name() -> str:
+    """Name of the (currently hard-coded) hardware counter that is collected."""
+    _init_profile()
+    return profile_lib.MnemePy_counterMetricName().decode()
+
+
+_counters_ready = False
+
+
+def gpu_counter_start(device_id: int, max_ranges: int) -> None:
+    """
+    Open a hardware-counter session for up to ``max_ranges`` kernel launches.
+
+    The first call in a process also does the one-time counter setup.
+    """
+    global _counters_ready
+    if profile_lib is None:
+        raise RuntimeError("Profile library is not initialized")
+    if not _counters_ready:
+        if profile_lib.MnemePy_counterInit(device_id) != 0:
+            raise RuntimeError("Counter setup failed")
+        _counters_ready = True
+    if profile_lib.MnemePy_counterStart(max_ranges) != 0:
+        raise RuntimeError("Could not start the counter session")
+
+
+def gpu_counter_stop(expected: int) -> list[float]:
+    """
+    Close the counter session and return one value per recorded launch.
+
+    ``expected`` is the number of launches made inside the session.
+    """
+    if profile_lib is None:
+        raise RuntimeError("Profile library is not initialized")
+    capacity = expected + 4
+    arr = (c_double * capacity)()
+    recorded = profile_lib.MnemePy_counterStop(arr, capacity)
+    if recorded < 0:
+        raise RuntimeError("Counter collection failed")
+    if recorded != expected:
+        logger.warning(
+            f"Counter session recorded {recorded} ranges for {expected} launches"
+        )
+    return [float(arr[i]) for i in range(min(recorded, capacity))]
