@@ -392,6 +392,12 @@ class Record:
             help="The format to use when saving epilogue snapshots: full bytes, diffs from the prologue, or the smaller of the two",
         )
         parser.add_argument(
+            "--capture-mode",
+            choices=["full", "reachable"],
+            default="full",
+            help="Which device allocations to snapshot: every tracked allocation, or only those reachable from pointer-typed kernel arguments",
+        )
+        parser.add_argument(
             "-rr",
             "--record-ranks",
             dest="record_ranks",
@@ -453,6 +459,8 @@ class Record:
         record_env["MNEME_DATA_DIR"] = str(record_db_dir)
 
         record_env["MNEME_EPILOGUE_TYPE"] = args.epilogue_format.lower()
+        logger.debug(f"MNEME_CAPTURE_MODE={args.capture_mode}")
+        record_env["MNEME_CAPTURE_MODE"] = args.capture_mode.lower()
 
         if args.record_ranks is not None:
             logger.debug(f"MNEME_RECORD_RANKS={args.record_ranks}")

@@ -534,6 +534,7 @@ class RecordedExecution:
         total_launches: Optional[int] = None,
         total_time_ns: Optional[int] = None,
         timing_source: Optional[str] = None,
+        capture_mode: str = "full",
     ):
         self.static_hash = static_hash
         self.kernel_name = kernel_name
@@ -552,6 +553,7 @@ class RecordedExecution:
         self.total_launches = total_launches
         self.total_time_ns = total_time_ns
         self.timing_source = timing_source
+        self.capture_mode = capture_mode
         self._link_mod = None
 
     def __str__(self):
@@ -682,6 +684,7 @@ class RecordedExecution:
             res["TotalTimeNs"] = self.total_time_ns
         if self.timing_source is not None:
             res["TimingSource"] = self.timing_source
+        res["CaptureMode"] = self.capture_mode
         res["instances"] = {}
         for k, v in self.items():
             res["instances"][k] = v.to_dict(base_dir)
@@ -797,4 +800,5 @@ class RecordedExecution:
             total_launches=record_db.get("TotalLaunches"),
             total_time_ns=record_db.get("TotalTimeNs"),
             timing_source=record_db.get("TimingSource"),
+            capture_mode=record_db.get("CaptureMode", "full"),
         )

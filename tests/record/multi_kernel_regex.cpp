@@ -5,6 +5,12 @@
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/_two.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/multi_kernel_regex%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-WITH-REGEX
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: MNEME_CAPTURE_MODE=reachable LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/multi_kernel_regex%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-NOREGEX
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: MNEME_CAPTURE_MODE=reachable MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/_two.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/multi_kernel_regex%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR-WITH-REGEX
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 

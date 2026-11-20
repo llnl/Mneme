@@ -2,6 +2,9 @@
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/kernel%ext | %FILECHECK %s --check-prefixes=CHECK
 // RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: MNEME_CAPTURE_MODE=reachable LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/kernel%ext | %FILECHECK %s --check-prefixes=CHECK
+// RUN: %RR "%t.$$.mneme" | %FILECHECK %s --check-prefix=CHECK-RR
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 

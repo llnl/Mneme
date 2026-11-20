@@ -2,6 +2,9 @@
 // RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
 // RUN: env MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/max1.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/test_crash_handling%ext > %t.out 2>&1 || true
 // RUN: %FILECHECK %s --check-prefixes=CHECK < %t.out
+// RUN: rm -rf "%t.$$.mneme" && mkdir -p "%t.$$.mneme"
+// RUN: env MNEME_CAPTURE_MODE=reachable MNEME_FILTER_MODE=config MNEME_FILTER_CONFIG="%S/Inputs/max1.json" LD_PRELOAD=MNEME_PRELOAD_LIB MNEME_LOG_LEVEL=debug MNEME_DATA_DIR="%t.$$.mneme" %build/test_crash_handling%ext > %t.out 2>&1 || true
+// RUN: %FILECHECK %s --check-prefixes=CHECK < %t.out
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 

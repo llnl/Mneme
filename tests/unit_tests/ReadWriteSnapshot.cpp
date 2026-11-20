@@ -98,8 +98,10 @@ int main(int argc, char **argv) {
   std::filesystem::path SnapshotFN("./test.mneme");
 
   auto PrologueGlobals = std::make_shared<GlobalSnapshotData>();
-  SnapshotInput<Vendor> In{GVars, DeviceMemMap, TestKernel->KernelArgSizes,
-                           Args, nullptr};
+  auto Blobs =
+      resolveBlobs<Vendor>(DeviceMemMap, allBlobKeys<Vendor>(DeviceMemMap));
+  SnapshotInput<Vendor> In{GVars, Blobs, TestKernel->KernelArgSizes, Args,
+                           nullptr};
   BytesWriter<Vendor> PrologueWriter(PrologueGlobals);
   size_t MeasuredBytes = PrologueWriter.measure(In);
   PrologueWriter.write(SnapshotFN, In);
@@ -232,15 +234,15 @@ int main(int argc, char **argv) {
   GlobalData.second[3] ^= 0x9;
   GlobalData.second[4] ^= 0x13;
 
-  auto EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
-      BlobData.first, BlobData.second, 128,
-      MnemeDeviceRT::MemcpyHostToDeviceKind()));
+  auto EC = MnemeDeviceRT::DeviceErrorCheck(
+      MnemeDeviceRT::DeviceCopy(BlobData.first, BlobData.second, 128,
+                                MnemeDeviceRT::MemcpyHostToDeviceKind()));
   if (EC)
     LOG_FATAL("Could not update device blob data");
 
-  EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceCopy(
-      GlobalData.first, GlobalData.second, 128,
-      MnemeDeviceRT::MemcpyHostToDeviceKind()));
+  EC = MnemeDeviceRT::DeviceErrorCheck(
+      MnemeDeviceRT::DeviceCopy(GlobalData.first, GlobalData.second, 128,
+                                MnemeDeviceRT::MemcpyHostToDeviceKind()));
   if (EC)
     LOG_FATAL("Could not update device global data");
 
@@ -332,8 +334,7 @@ int main(int argc, char **argv) {
   };
 
   llvm::SmallVector<size_t> EmptyArgSizes;
-  SnapshotInput<Vendor> InNoArgs{GVars, DeviceMemMap, EmptyArgSizes, nullptr,
-                                 nullptr};
+  SnapshotInput<Vendor> InNoArgs{GVars, Blobs, EmptyArgSizes, nullptr, nullptr};
 
   ResetBlobBase();
   std::filesystem::path SparseBestSnapshotFN("./test.best.sparse.mneme");
@@ -364,10 +365,10 @@ int main(int argc, char **argv) {
   // Alternating changes force many one-byte diff ranges, making the bytes
   // snapshot smaller than the diff snapshot.
   for (size_t I = 0; I < 128; ++I) {
-    BlobData.second[I] = (I % 2 == 0) ? (PrologueBlob[I] ^ 0xff)
-                                      : PrologueBlob[I];
-    GlobalData.second[I] = (I % 2 == 0) ? (PrologueGlobal[I] ^ 0xff)
-                                        : PrologueGlobal[I];
+    BlobData.second[I] =
+        (I % 2 == 0) ? (PrologueBlob[I] ^ 0xff) : PrologueBlob[I];
+    GlobalData.second[I] =
+        (I % 2 == 0) ? (PrologueGlobal[I] ^ 0xff) : PrologueGlobal[I];
   }
 
   EC = MnemeDeviceRT::DeviceErrorCheck(
@@ -480,15 +481,69 @@ int main(int argc, char **argv) {
     return 0;
   }();
 
+  // Reachability selection over fake addresses; it never touches the device.
+  auto ValidateReachableSelection = [&]() {
+    constexpr uintptr_t A = 0x1000, B = 0x2000, C = 0x3000, G = 0x5000;
+    llvm::DenseMap<void *, MnemeMemoryBlobDevice> Tracked;
+    Tracked.try_emplace(
+        reinterpret_cast<void *>(A),
+        MnemeMemoryBlobDevice(4096, reinterpret_cast<void *>(A), 256));
+    Tracked.try_emplace(
+        reinterpret_cast<void *>(B),
+        MnemeMemoryBlobDevice(4096, reinterpret_cast<void *>(B), 100));
+    Tracked.try_emplace(
+        reinterpret_cast<void *>(C),
+        MnemeMemoryBlobDevice(4096, reinterpret_cast<void *>(C), 64));
+    proteus::runtime::GlobalMetadataMap Globals;
+    Globals.try_emplace("G", proteus::runtime::GlobalMetadata{
+                                 nullptr, reinterpret_cast<void *>(G), 64});
+
+    uintptr_t IntoA = A + 16;
+    // One past B's actual (page-rounded) extent, which is also C's base.
+    struct {
+      int32_t Pad;
+      uintptr_t OnePastB;
+    } Aggregate{0, B + 4096};
+    uintptr_t Null = 0;
+    uintptr_t Untracked = 0x9999;
+    uint64_t IntegerLikeC = C;
+    uintptr_t IntoGlobal = G + 16;
+    void *SelArgs[] = {&IntoA,     &Aggregate,    &Null,
+                       &Untracked, &IntegerLikeC, &IntoGlobal};
+    llvm::SmallVector<llvm::SmallVector<size_t>> Offsets = {{0}, {8}, {0},
+                                                            {0}, {},  {0}};
+
+    auto Selected = selectReachableBlobs<Vendor>(Tracked, Offsets, SelArgs,
+                                                 Globals, "TestKernel");
+    llvm::SmallVector<void *> Expected = {reinterpret_cast<void *>(A),
+                                          reinterpret_cast<void *>(B),
+                                          reinterpret_cast<void *>(C)};
+    if (Selected != Expected) {
+      std::cerr << "Reachable selection picked " << Selected.size()
+                << " blobs, expected A, B and C\n";
+      return 512;
+    }
+
+    auto Resolved = resolveBlobs<Vendor>(Tracked, Selected);
+    if (Resolved.size() != 3 || Resolved[0]->getSize() != 256 ||
+        Resolved[1]->getSize() != 100 || Resolved[2]->getSize() != 64) {
+      std::cerr << "Resolved blobs do not match the selection\n";
+      return 512;
+    }
+    return 0;
+  }();
+
   auto Ret = ValidateGlobalMem | ValidateDeviceMem | ValidateKernelArgs |
              ValidateDiffGlobalMem | ValidateDiffDeviceMem |
              ValidateDiffKernelArgs | ValidateBestSparse |
-             ValidateBestFragmented | ValidateMeasure | ValidateHeaderParse;
+             ValidateBestFragmented | ValidateMeasure | ValidateHeaderParse |
+             ValidateReachableSelection;
 
   delete[] GlobalData.second;
   delete[] BlobData.second;
 
-  EC = MnemeDeviceRT::DeviceErrorCheck(MnemeDeviceRT::DeviceFree(GlobalData.first));
+  EC = MnemeDeviceRT::DeviceErrorCheck(
+      MnemeDeviceRT::DeviceFree(GlobalData.first));
   if (EC)
     LOG_FATAL("Could not release device memory\n");
 
