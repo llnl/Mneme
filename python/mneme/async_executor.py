@@ -398,7 +398,7 @@ class TuneWorkerHandle:
 
             # Wait for worker to initialize
             if not self._state.is_set():
-                shutdown_requested.wait(timeout=0.5)
+                self._state.wait(timeout=0.5)
                 continue
 
             self._startup_failures = 0
@@ -422,6 +422,10 @@ class TuneWorkerHandle:
             self._try_receive(timeout=0)
             if self.current is not None:
                 self._fail_current()
+
+    def _wake_for_shutdown(self):
+        # Release the startup wait. The monitor checks shutdown again before dispatching.
+        self._state.set()
 
     def join(self):
         """Wait for the monitor thread to shut down after the queue is closed."""
@@ -599,6 +603,8 @@ class AsyncReplayExecutor:
         with self._lock:
             self.global_q.shutdown()
             self._fail_pending_futures(_SHUTDOWN_ERROR)
+        for w in self.workers:
+            w._wake_for_shutdown()
         for w in self.workers:
             w.join()
         logger.debug(f"[{self.__class__.__name__}] Done Shutdown")
