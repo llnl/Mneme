@@ -119,22 +119,27 @@ An optional label for identifying the buffer. Mneme does not interpret it.
 
 To annotate an interior pointer into a larger allocation,
 or to give the fields of one allocation different tolerances,
-pass the size of the region in bytes:
+pass the region as a `mneme::Span` of `count` elements.
+The span sets `builtin` from its element type:
 
 ```cpp
 double *d_field = base + offset;
 
-mneme::annotate(d_field, count * sizeof(double), mneme::Metadata{
-    .builtin        = mneme::BuiltinDType::F64,
+mneme::annotate(mneme::Span(d_field, count), mneme::Metadata{
     .threshold      = 1e-12,
     .threshold_kind = mneme::ThresholdKind::Relative,
     .norm           = mneme::Norm::L2,
 });
 ```
 
+- A `mneme::Span` can also be built from a C array
+  or from anything with `data()` and `size()`, such as `std::vector`.
 - Where annotations overlap, the later one wins,
   so annotate the whole allocation first and its regions after it.
 - Each region is checked on its own, with its own norm.
-- The region must lie inside the allocation and cover whole elements,
+- The region must lie inside the allocation,
   and it cannot start or end inside an element of an earlier annotation.
   Recording aborts otherwise.
+- An element type with no `builtin` value is a compile error.
+  For such data, pass the size in bytes instead,
+  `mneme::annotate(ptr, nbytes, md)`, and set `builtin` yourself.
