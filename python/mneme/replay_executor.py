@@ -343,7 +343,6 @@ class BaseExecutor:
         result: ExperimentResult,
         config: ExperimentConfiguration,
         ir_module: ModuleRef,
-        purge_autoinit: bool,
     ):
         """
         Apply optimization passes to the IR module prior to code generation.
@@ -367,8 +366,6 @@ class BaseExecutor:
         ir_module : ModuleRef
             The intermediate representation to be optimized. The module is mutated
             in-place by the underlying JIT subsystem.
-        purge_autoinit : bool
-            Whether to run the ``purge-autoinit`` pass before ``config.passes``.
 
         Notes
         -----
@@ -378,10 +375,6 @@ class BaseExecutor:
         * This method does not return a value; the IR module is modified directly.
 
         """
-        # purge-autoinit runs as its own pipeline because prefixing it to
-        # config.passes would change how LLVM infers the nesting of a flat list.
-        if purge_autoinit:
-            jit.optimize(ir_module, self.device_arch, "purge-autoinit", config.codegen_opt)
         jit.optimize(ir_module, self.device_arch, config.passes, config.codegen_opt)
 
     @tracing.traced("ir.codegen")
@@ -499,61 +492,8 @@ class BaseExecutor:
         ir_module: ModuleRef,
         track: bool,
     ) -> MemBufferRef:
-        """
-        Build the executable device kernel from the given IR module.
-
-        This method runs the full compilation pipeline on the provided IR module:
-        preprocessing, optimization, and final code generation. The resulting
-        device-ready binary is returned as a :class:`MemBufferRef`. When tracking
-        is enabled, additional metadata such as object size is recorded into the
-        provided :class:`ExperimentResult`.
-
-        The build process consists of the following stages:
-
-        1. **IR preprocessing**
-           Applies specialization, dimension-dependent transformations, and optional
-           launch-bound insertion. This step updates the internal code hash and
-           prepares the IR for optimization.
-
-        2. **Optimization**
-           Runs the configured optimization passes (e.g., ``O3`` or user-defined
-           pipelines). If profiling is enabled, optimization timing is recorded in
-           the experiment result.
-
-        3. **Code generation**
-           Lowers the optimized IR into a device-executable artifact. The resulting
-           binary is wrapped in a :class:`MemBufferRef`. When ``track=True``,
-           the size of the generated object code is stored in ``result.obj_size``.
-
-        Parameters
-        ----------
-        result : ExperimentResult
-            Result object to be populated with build metrics such as optimization
-            time and object size.
-        config : ExperimentConfiguration
-            Configuration controlling specialization, optimization pipeline, and
-            code-generation strategy.
-        ir_module : ModuleRef
-            Intermediate representation on which the build pipeline operates.
-            The module may be transformed during preprocessing and optimization.
-        track : bool
-            Whether to collect profiling information and resource-usage statistics
-            during the build process. A tracked build also runs ``purge-autoinit``
-            before the optimization pipeline.
-
-        Returns
-        -------
-        MemBufferRef
-            A memory buffer containing the compiled device module produced by the
-            code-generation stage.
-
-        Notes
-        -----
-        * This method does not execute the kernel; execution occurs in :meth:`_run`.
-        * Tracking is optional but recommended when performance analysis is needed.
-        """
-        self._preprocess_ir(result, config, ir_module, profile=track)
-        self._optimize(result, config, ir_module, purge_autoinit=track, profile=track)
+        """Optimize a preprocessed module and compile it to a device object."""
+        self._optimize(result, config, ir_module, profile=track)
         mem_buffer = self._codegen(result, config, ir_module, profile=track)
         if track:
             result.obj_size = mem_buffer.get_size()
@@ -650,68 +590,26 @@ class BaseExecutor:
         config: ExperimentConfiguration,
         ir_module: ModuleRef,
     ) -> ModuleRef:
-        """
-        Execute a single Mneme experiment using the given configuration and IR module.
-
-        This method performs the full record/replay experiment pipeline, including
-        verification, IR cleanup, code generation, and timed execution. It returns
-        both the populated experiment result and the transformed IR module.
-
-        The execution consists of three stages:
-
-        1. **Verification pass**
-           A clone of the input IR module is built and executed once without
-           instrumentation. This ensures the recorded prologue and epilogue states
-           match, allowing the system to validate kernel determinism and correctness.
-
-        2. **IR sanitization**
-           The tracked build runs the ``purge-autoinit`` pass before the optimization
-           pipeline, removing automatically inserted Clang initialization code. Only
-           IR regions explicitly marked by Clang are removed to avoid disturbing user
-           code.
-
-        3. **Instrumented execution**
-           The cleaned up version of the kernel is built with tracking enabled.
-           The kernel is executed ``iterations + 2`` times to allow downstream
-           statistical metrics to be computed reliably. Execution time, resource
-           usage, and other experiment metrics are accumulated into the resulting
-           :class:`ExperimentResult`.
-
-        Parameters
-        ----------
-        result : ExperimentResult
-            The container to store all the collected/counted values to.
-        config : ExperimentConfiguration
-            The experiment configuration controlling launch parameters, specialization,
-            and code generation settings.
-        ir_module : ModuleRef
-            The LLVM-like intermediate representation module on which the experiment
-            is executed. The module is cloned and the ``ir_module`` is not modified.
-
-        Returns
-        -------
-        (ExperimentResult, ModuleRef)
-            A tuple containing:
-
-            * **ExperimentResult** – Populated result object containing verification
-              status, execution metrics, and profiling data.
-            * **ModuleRef** – The transformed IR module after auto-initialization
-              removal and other modifications performed during execution.
-
-        Raises
-        ------
-        RuntimeError
-            If internal prologue or epilogue state is unexpectedly ``None``.
-        """
+        """Verify the recorded execution, then time the kernel with auto-init purged."""
         if self._prologue._state is None or self._epilogue._state is None:
             raise RuntimeError("States should never be none when executing a kernel")
 
-        # NOTE: 1. First we need to verify.
-        with tracing.span("execution.verification"):
-            with tracing.span("ir.clone"):
-                ver_mod = ir_module.clone()
+        with tracing.span("ir.clone"):
+            timing_mod = ir_module.clone()
+        self._preprocess_ir(result, config, timing_mod, profile=True)
+        with tracing.span("ir.purge_autoinit") as event:
+            changed = timing_mod.purge_auto_init()
+            event.annotate(changed=changed)
 
-            mem_buffer = self._build(result, config, ver_mod, False)
+        with tracing.span("execution.verification"):
+            # Only reconstruct the initialized module when the purge removed code.
+            ver_mod = timing_mod
+            if changed:
+                with tracing.span("ir.clone"):
+                    ver_mod = ir_module.clone()
+                self._preprocess_ir(result, config, ver_mod, profile=False)
+
+            mem_buffer = self._build(result, config, ver_mod, track=not changed)
             self._run(
                 result, config, mem_buffer, self.prologue, self.epilogue,
                 True, False, 1,
@@ -724,14 +622,9 @@ class BaseExecutor:
             )
             return ver_mod
 
-        # NOTE: 2-3. Build and run with tracking on. The tracked build first runs the
-        # purge-autoinit pass (registered via Proteus' JIT pass plugin API) to strip
-        # the Clang-inserted auto-init memsets; verification above ran without it.
         with tracing.span("execution.tracked"):
-            with tracing.span("ir.clone"):
-                ir_module = ir_module.clone()
-
-            mem_buffer = self._build(result, config, ir_module, True)
+            if changed:
+                mem_buffer = self._build(result, config, timing_mod, track=True)
             self._run(
                 result, config, mem_buffer, self.prologue, self.epilogue,
                 False, True, self._iterations + self._warmup,
@@ -739,7 +632,7 @@ class BaseExecutor:
 
         result.executed = True
 
-        return ir_module
+        return timing_mod
 
 
 class TuneWorker(BaseExecutor):
