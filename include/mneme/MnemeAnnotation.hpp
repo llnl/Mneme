@@ -3,7 +3,7 @@
 // mneme_annotate.h - User-facing annotation API for Mneme
 //
 // This header declares mneme::annotate(ptr, Metadata{...}) and sub-region
-// annotation overloads such as mneme::annotate(ptr, nbytes, Metadata{...}).
+// overloads such as mneme::annotate(Span(ptr, count), Metadata{...}).
 // It is intentionally *interface-only*: no lambdas / comparators yet.
 //
 // Example:
@@ -19,8 +19,8 @@
 // You can also use the typed helper:
 //   mneme::annotate<double>(p, mneme::Metadata{ .threshold = 0.1 });
 //
-// Or annotate a sub-region explicitly:
-//   mneme::annotate(p, 128 * sizeof(double),
+// Or annotate a sub-region of 128 elements:
+//   mneme::annotate(mneme::Span(p + 64, 128),
 //                   mneme::Metadata{ .threshold = 0.1 });
 //
 //===----------------------------------------------------------------------===//
@@ -30,6 +30,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 namespace mneme {
 
@@ -113,7 +114,11 @@ inline bool operator!=(const Metadata &LHS, const Metadata &RHS) {
 
 // --------- Builtin dtype mapping helpers (optional sugar) ------------------
 
-template <class T> struct builtin_dtype_of {
+namespace detail {
+struct unmapped_builtin_dtype {};
+} // namespace detail
+
+template <class T> struct builtin_dtype_of : detail::unmapped_builtin_dtype {
   static constexpr BuiltinDType value = BuiltinDType::U8;
 };
 
@@ -149,6 +154,60 @@ template <> struct builtin_dtype_of<std::uint64_t> {
   static constexpr BuiltinDType value = BuiltinDType::U64;
 };
 
+// Whether T has a specialization of builtin_dtype_of, rather than falling back
+// to U8.
+template <class T>
+struct has_builtin_dtype
+    : std::bool_constant<!std::is_base_of_v<detail::unmapped_builtin_dtype,
+                                            builtin_dtype_of<T>>> {};
+
+template <class T>
+inline constexpr bool has_builtin_dtype_v = has_builtin_dtype<T>::value;
+
+// A view of Count contiguous elements of type T starting at Data.
+template <class T> class Span {
+  template <class Container>
+  using ElementOf =
+      std::remove_pointer_t<decltype(std::declval<Container &>().data())>;
+
+  template <class Container>
+  using EnableIfContainerOf = std::enable_if_t<
+      !std::is_same_v<std::remove_cv_t<Container>, Span> &&
+      std::is_convertible_v<ElementOf<Container> (*)[], T (*)[]> &&
+      std::is_convertible_v<decltype(std::declval<Container &>().size()),
+                            std::size_t>>;
+
+public:
+  constexpr Span(T *Data, std::size_t Count) : Data(Data), Count(Count) {}
+
+  template <std::size_t N>
+  constexpr Span(T (&Array)[N]) : Data(Array), Count(N) {}
+
+  template <class Container, class = EnableIfContainerOf<Container>>
+  constexpr Span(Container &C) : Data(C.data()), Count(C.size()) {}
+
+  template <class U,
+            class = std::enable_if_t<std::is_convertible_v<U (*)[], T (*)[]>>>
+  constexpr Span(const Span<U> &Other)
+      : Data(Other.data()), Count(Other.size()) {}
+
+  constexpr T *data() const { return Data; }
+  constexpr std::size_t size() const { return Count; }
+  constexpr std::size_t size_bytes() const { return Count * sizeof(T); }
+
+  constexpr Span subspan(std::size_t Offset, std::size_t SubCount) const {
+    return Span(Data + Offset, SubCount);
+  }
+
+private:
+  T *Data;
+  std::size_t Count;
+};
+
+template <class Container>
+Span(Container &) -> Span<
+    std::remove_pointer_t<decltype(std::declval<Container &>().data())>>;
+
 // --------- User-facing API ------------------------------------------------
 
 // Primary user API: annotate a pointer with metadata.
@@ -167,6 +226,17 @@ inline void annotate(T *ptr, Metadata md = {}) {
   // If they *did* specify Custom, we don't override anything here.
   md.builtin = builtin_dtype_of<std::remove_cv_t<T>>::value;
   annotate(static_cast<const void *>(ptr), std::move(md));
+}
+
+// Annotate the elements Region views, with builtin set from T.
+template <class T> inline void annotate(Span<T> Region, Metadata Md) {
+  static_assert(has_builtin_dtype_v<std::remove_cv_t<T>>,
+                "mneme::annotate(Span<T>, Metadata): T has no BuiltinDType "
+                "mapping; use annotate(const void *, std::size_t bytes, "
+                "Metadata) and set Metadata::builtin explicitly");
+  Md.builtin = builtin_dtype_of<std::remove_cv_t<T>>::value;
+  annotate(static_cast<const void *>(Region.data()), Region.size_bytes(),
+           std::move(Md));
 }
 
 } // namespace mneme

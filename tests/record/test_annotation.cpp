@@ -5,12 +5,35 @@
 // RUN: rm -rf "%t.$$.mneme"
 // clang-format on
 
+#include <array>
 #include <iostream>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeAnnotation.hpp"
 
 using namespace mneme;
+
+static_assert(
+    std::is_same_v<decltype(Span(std::declval<float *>(), 4)), Span<float>>);
+static_assert(std::is_same_v<decltype(Span(std::declval<const double *>(), 4)),
+                             Span<const double>>);
+static_assert(
+    std::is_same_v<decltype(Span(std::declval<std::vector<double> &>())),
+                   Span<double>>);
+static_assert(std::is_convertible_v<Span<float>, Span<const float>>);
+static_assert(!std::is_convertible_v<Span<const float>, Span<float>>);
+
+constexpr float HostArray[6] = {};
+static_assert(std::is_same_v<decltype(Span(HostArray)), Span<const float>>);
+static_assert(Span(HostArray).size_bytes() == 6 * sizeof(float));
+static_assert(Span(HostArray).subspan(2, 3).data() == HostArray + 2);
+static_assert(Span(HostArray).subspan(2, 3).size_bytes() == 3 * sizeof(float));
+
+constexpr std::array<std::int32_t, 5> HostStdArray = {};
+static_assert(Span(HostStdArray).size_bytes() == 5 * sizeof(std::int32_t));
 
 #ifdef MNEME_ENABLE_HIP
 using MnemeDeviceRT = DeviceTraits<DeviceVendors::HIP>;
@@ -46,9 +69,8 @@ int main() {
                              .tag = std::string("test_ptr"),
                          });
 
-  mneme::annotate(d_alias, AliasLen * sizeof(float),
+  mneme::annotate(mneme::Span(d_alias, AliasLen),
                   mneme::Metadata{
-                      .builtin = mneme::BuiltinDType::F32,
                       .threshold = 0.002,
                       .threshold_kind = mneme::ThresholdKind::Relative,
                       .norm = mneme::Norm::L2,
