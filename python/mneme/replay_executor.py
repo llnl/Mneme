@@ -35,6 +35,7 @@ import os
 from datetime import datetime, timezone
 from multiprocessing import Event, Queue
 from pathlib import Path
+from time import perf_counter
 from typing import Optional, Sequence, Tuple
 
 from mneme import tracing
@@ -665,7 +666,9 @@ class BaseExecutor:
             timing_mod = ir_module.clone()
         self._preprocess_ir(result, config, timing_mod, profile=True)
         with tracing.span("ir.purge_autoinit") as event:
+            purge_start = perf_counter()
             changed = timing_mod.purge_auto_init()
+            purge_time = perf_counter() - purge_start
             event.annotate(changed=changed)
 
         with tracing.span("execution.verification"):
@@ -677,6 +680,8 @@ class BaseExecutor:
                 self._preprocess_ir(result, config, ver_mod, profile=False)
 
             mem_buffer = self._build(result, config, ver_mod, track=not changed)
+            if not changed:
+                result.opt_time += purge_time
             self._run(
                 result, config, mem_buffer, self.prologue, self.epilogue,
                 True, False, 1,
@@ -692,6 +697,7 @@ class BaseExecutor:
         with tracing.span("execution.tracked"):
             if changed:
                 mem_buffer = self._build(result, config, timing_mod, track=True)
+                result.opt_time += purge_time
             self._run(
                 result, config, mem_buffer, self.prologue, self.epilogue,
                 False, True, self._iterations + self._warmup,
