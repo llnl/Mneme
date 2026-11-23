@@ -149,10 +149,28 @@ mneme::annotate(d_output, mneme::Metadata{
 });
 ```
 
-Annotations must be applied **before** the kernel launch they should
-affect.  You can update the annotation on the same pointer between
-launches to record different tolerance policies for different dynamic
-instances of the same kernel.
+For cases where the pointer you want to annotate is an interior pointer
+into a larger allocation, use the sub-region annotation feature and
+pass a `mneme::Span` over the elements of the logical field you want
+Mneme to verify.  The span sets `builtin` from its element type:
 
-For the full API reference, supported data types, threshold semantics,
-and a complete example, see **[Usage → Verification](verification.md)**.
+
+```cpp
+double* d_alias = base + offset;
+
+mneme::annotate(mneme::Span(d_alias, count), mneme::Metadata{
+    .threshold      = 1e-6,
+    .threshold_kind = mneme::ThresholdKind::Relative,
+    .norm           = mneme::Norm::Linf,
+    .tag            = std::string("alias_region"),
+});
+```
+
+Annotate **before** the kernel launch the annotation should affect.
+To use different tolerances for different launches of the same kernel,
+annotate again between them.
+Where annotations overlap, the later one wins,
+so annotate the whole allocation first and its sub-regions after it.
+
+For the supported data types and threshold semantics,
+see **[Usage → Verification](verification.md)**.

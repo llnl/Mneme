@@ -7,11 +7,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallVector.h>
 #include <memory>
 #include <optional>
 #include <random>
+#include <string>
+#include <vector>
 
 using namespace mneme;
 
@@ -70,7 +71,19 @@ int main(int argc, char **argv) {
   Md.threshold = 0.5;
   Md.threshold_kind = ThresholdKind::Relative;
   Md.tag = std::string("Test");
-  Blob.setMetadata(Md);
+  if (Blob.setAnnotation({0, Blob.getSize()}, Md) != AnnotationStatus::Ok)
+    LOG_FATAL("Could not set whole-blob annotation");
+
+  mneme::Metadata RegionMd;
+  RegionMd.builtin = BuiltinDType::U8;
+  RegionMd.norm = Norm::None;
+  RegionMd.threshold = 0.0;
+  RegionMd.threshold_kind = ThresholdKind::Absolute;
+  RegionMd.tag = std::string("Region");
+  if (Blob.setAnnotation({16, 32}, RegionMd) != AnnotationStatus::Ok)
+    LOG_FATAL("Could not set region annotation");
+  const std::vector<MemoryAnnotation> ExpectedAnnotations{
+      {{0, 16}, Md}, {{16, 32}, RegionMd}, {{48, 80}, Md}};
 
   Blob.setHostData(std::unique_ptr<uint8_t[]>(new uint8_t[128]));
 
@@ -93,7 +106,7 @@ int main(int argc, char **argv) {
   // Create a raw_svector_ostream using the buffer
   proteus::runtime::GlobalMetadataMap GVars;
   GVars.try_emplace("Test", GV);
-  llvm::DenseMap<void *, MnemeMemoryBlobDevice> DeviceMemMap;
+  BlobsByAddress<Vendor> DeviceMemMap;
   DeviceMemMap.try_emplace((void *)BlobData.first, std::move(Blob));
   std::filesystem::path SnapshotFN("./test.mneme");
 
@@ -133,7 +146,7 @@ int main(int argc, char **argv) {
   auto ValidateDeviceMem = [&]() {
     for (auto &RKV : ReadDeviceMemMap) {
       auto &RBlob = RKV.second;
-      if (!DeviceMemMap.contains(RKV.first)) {
+      if (!DeviceMemMap.count(RKV.first)) {
         std::cerr << "Address does not exist in Device Map " << std::hex
                   << RKV.first << std::dec << "\n";
         return 1;
@@ -153,28 +166,35 @@ int main(int argc, char **argv) {
         return 1;
       }
 
-      if (RBlob.getMetadata().builtin != BuiltinDType::F64) {
+      const auto &RBlobMd = RBlob.annotationAt(0).MD;
+
+      if (RBlobMd.builtin != BuiltinDType::F64) {
         std::cerr << "Metadata builtin differs\n";
         return 1;
       }
 
-      if (RBlob.getMetadata().norm != Norm::L2) {
+      if (RBlobMd.norm != Norm::L2) {
         std::cerr << "Metadata norm differs\n";
         return 1;
       }
 
-      if (RBlob.getMetadata().threshold != 0.5) {
+      if (RBlobMd.threshold != 0.5) {
         std::cerr << "Metadata threshold differs\n";
         return 1;
       }
 
-      if (RBlob.getMetadata().threshold_kind != ThresholdKind::Relative) {
+      if (RBlobMd.threshold_kind != ThresholdKind::Relative) {
         std::cerr << "Metadata threshold_kind differs\n";
         return 1;
       }
 
-      if (RBlob.getMetadata().tag.value() != "Test") {
+      if (RBlobMd.tag.value() != "Test") {
         std::cerr << "Metadata tag differs\n";
+        return 1;
+      }
+
+      if (RBlob.getAnnotations() != ExpectedAnnotations) {
+        std::cerr << "Annotations differ\n";
         return 1;
       }
 
@@ -288,12 +308,17 @@ int main(int argc, char **argv) {
       return 16;
     }
 
-    if (RBlob.getMetadata().builtin != BuiltinDType::F64 ||
-        RBlob.getMetadata().norm != Norm::L2 ||
-        RBlob.getMetadata().threshold != 0.5 ||
-        RBlob.getMetadata().threshold_kind != ThresholdKind::Relative ||
-        RBlob.getMetadata().tag.value() != "Test") {
+    const auto &RBlobMd = RBlob.annotationAt(0).MD;
+    if (RBlobMd.builtin != BuiltinDType::F64 || RBlobMd.norm != Norm::L2 ||
+        RBlobMd.threshold != 0.5 ||
+        RBlobMd.threshold_kind != ThresholdKind::Relative ||
+        RBlobMd.tag.value() != "Test") {
       std::cerr << "Diff blob metadata differs\n";
+      return 16;
+    }
+
+    if (RBlob.getAnnotations() != ExpectedAnnotations) {
+      std::cerr << "Diff annotations differ\n";
       return 16;
     }
 
@@ -353,6 +378,44 @@ int main(int argc, char **argv) {
       std::cerr << "Best sparse snapshot did not reconstruct epilogue data\n";
       return 64;
     }
+    return 0;
+  }();
+
+  // Replay reads a blob's annotations before it maps or allocates the blob's
+  // memory, so mapping and allocating must keep them.
+  auto ValidateAnnotationPreservationAcrossReplaySetup = [&]() {
+    auto PrologueIt = ReadDeviceMemMap.find((void *)BlobData.first);
+    if (PrologueIt == ReadDeviceMemMap.end()) {
+      std::cerr << "Prologue snapshot missing blob for preservation test\n";
+      return 1024;
+    }
+
+    auto &MappedBlob = PrologueIt->second;
+    MappedBlob.mapInto((void *)BlobData.first);
+    if (MappedBlob.getAnnotations() != ExpectedAnnotations) {
+      std::cerr << "Annotations changed across mapInto()\n";
+      return 1024;
+    }
+    MappedBlob.release();
+
+    auto DiffIt = DiffDeviceMemMap.find((void *)BlobData.first);
+    if (DiffIt == DiffDeviceMemMap.end()) {
+      std::cerr << "Diff snapshot missing blob for preservation test\n";
+      return 1024;
+    }
+
+    auto &AllocatedBlob = DiffIt->second;
+    EC = MnemeDeviceRT::DeviceErrorCheck(
+        AllocatedBlob.allocate(AllocatedBlob.getSize()));
+    if (EC) {
+      std::cerr << "Could not allocate blob during preservation test\n";
+      return 1024;
+    }
+    if (AllocatedBlob.getAnnotations() != ExpectedAnnotations) {
+      std::cerr << "Annotations changed across allocate()\n";
+      return 1024;
+    }
+    AllocatedBlob.release();
     return 0;
   }();
 
@@ -466,16 +529,93 @@ int main(int argc, char **argv) {
 
     auto [PrologueHeader, PrologueOffset] = parseFilePrefix(SnapshotFN);
     if (PrologueHeader.Kind != SnapshotKind::Bytes ||
-        PrologueHeader.Version != 0 || PrologueOffset != 16) {
-      std::cerr << "Prologue file did not parse as {Bytes, 0, 16}\n";
+        PrologueHeader.Version != 1 || PrologueOffset != 16) {
+      std::cerr << "Prologue file did not parse as {Bytes, 1, 16}\n";
       return 256;
     }
 
     auto [DiffFileHeader, DiffFileOffset] = parseFilePrefix(DiffSnapshotFN);
     if (DiffFileHeader.Kind != SnapshotKind::Diff ||
-        DiffFileHeader.Version != 1 || DiffFileOffset != 16) {
-      std::cerr << "Diff file did not parse as {Diff, 1, 16}\n";
+        DiffFileHeader.Version != 2 || DiffFileOffset != 16) {
+      std::cerr << "Diff file did not parse as {Diff, 2, 16}\n";
       return 256;
+    }
+    return 0;
+  }();
+
+  // The writers only produce the newest layouts, so hand-build a bytes
+  // version 0 prologue and a diff version 1 epilogue to keep the older readers
+  // covered.
+  auto ValidateOlderLayouts = [&]() {
+    std::vector<uint8_t> OldData(128);
+    initializeRandomBuffer(OldData.data(), OldData.size());
+    void *OldAddr = reinterpret_cast<void *>(0x1000);
+
+    auto writeFile = [](const std::filesystem::path &Path,
+                        const std::string &Bytes) {
+      std::ofstream Out(Path, std::ios::binary);
+      Out.write(Bytes.data(), Bytes.size());
+    };
+
+    std::string BytesV0;
+    {
+      llvm::raw_string_ostream OS(BytesV0);
+      BytesReaderV0<Vendor>::Layout.write(OS);
+      util::writeScalar(OS, size_t{0});
+      util::writeScalar(OS, size_t{1});
+      BlobHeader{128, 128, OldAddr}.write(OS);
+      util::writeBytes(OS, llvm::ArrayRef<uint8_t>(OldData));
+      metadata::serialize(OS, Md);
+      util::writeScalar(OS, size_t{0});
+    }
+    std::filesystem::path BytesV0FN("./test.bytes-v0.mneme");
+    writeFile(BytesV0FN, BytesV0);
+
+    auto V0Snap = SnapshotFormatRegistry<Vendor>::open(BytesV0FN.string())
+                      ->read(KernelName, BaseSnapshotSource<Vendor>());
+    auto V0It = V0Snap.DeviceMemory.find(OldAddr);
+    if (V0It == V0Snap.DeviceMemory.end()) {
+      std::cerr << "Bytes v0 snapshot is missing its blob\n";
+      return 2048;
+    }
+    const std::vector<MemoryAnnotation> ExpectedV0{{{0, 128}, Md}};
+    if (V0It->second.getAnnotations() != ExpectedV0 ||
+        std::memcmp(V0It->second.getHostData(), OldData.data(), 128) != 0) {
+      std::cerr << "Bytes v0 snapshot did not decode its blob\n";
+      return 2048;
+    }
+
+    std::string DiffV1;
+    {
+      llvm::raw_string_ostream OS(DiffV1);
+      DiffReaderV1<Vendor>::Layout.write(OS);
+      util::writeScalar(OS, size_t{0});
+      util::writeScalar(OS, size_t{1});
+      BlobHeader{128, 128, OldAddr}.write(OS);
+      metadata::serialize(OS, RegionMd);
+      util::writeScalar(OS, size_t{1});
+      util::writeScalar(OS, size_t{8});
+      util::writeScalar(OS, size_t{2});
+      util::writeBytes(OS, llvm::StringRef("\xab\xcd", 2));
+    }
+    std::filesystem::path DiffV1FN("./test.diff-v1.mneme");
+    writeFile(DiffV1FN, DiffV1);
+
+    auto V1Snap =
+        SnapshotFormatRegistry<Vendor>::open(DiffV1FN.string())
+            ->read(KernelName, BaseSnapshotSource<Vendor>(BytesV0FN.string()));
+    auto V1It = V1Snap.DeviceMemory.find(OldAddr);
+    if (V1It == V1Snap.DeviceMemory.end()) {
+      std::cerr << "Diff v1 snapshot is missing its blob\n";
+      return 2048;
+    }
+    OldData[8] = 0xab;
+    OldData[9] = 0xcd;
+    const std::vector<MemoryAnnotation> ExpectedV1{{{0, 128}, RegionMd}};
+    if (V1It->second.getAnnotations() != ExpectedV1 ||
+        std::memcmp(V1It->second.getHostData(), OldData.data(), 128) != 0) {
+      std::cerr << "Diff v1 snapshot did not decode its blob\n";
+      return 2048;
     }
     return 0;
   }();
@@ -483,7 +623,9 @@ int main(int argc, char **argv) {
   auto Ret = ValidateGlobalMem | ValidateDeviceMem | ValidateKernelArgs |
              ValidateDiffGlobalMem | ValidateDiffDeviceMem |
              ValidateDiffKernelArgs | ValidateBestSparse |
-             ValidateBestFragmented | ValidateMeasure | ValidateHeaderParse;
+             ValidateBestFragmented | ValidateMeasure | ValidateHeaderParse |
+             ValidateAnnotationPreservationAcrossReplaySetup |
+             ValidateOlderLayouts;
 
   delete[] GlobalData.second;
   delete[] BlobData.second;
@@ -497,5 +639,5 @@ int main(int argc, char **argv) {
   if (EC)
     LOG_FATAL("Could not release device memory\n");
 
-  return Ret;
+  return Ret != 0;
 }

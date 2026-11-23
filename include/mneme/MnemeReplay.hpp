@@ -37,7 +37,7 @@ public:
 
 protected:
   std::shared_ptr<KernelInfo> KInfo;
-  llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> DeviceMemoryState;
+  BlobsByAddress<VendorTypes> DeviceMemoryState;
   std::unordered_map<std::string, ReplayGlobalVar> GlobalVars;
   std::unique_ptr<void *[]> Args;
 
@@ -93,8 +93,7 @@ public:
     DeviceMemoryState.clear();
   }
 
-  const llvm::DenseMap<void *, MnemeMemoryBlob<VendorTypes>> &
-  getDeviceMemory() const {
+  const BlobsByAddress<VendorTypes> &getDeviceMemory() const {
     return DeviceMemoryState;
   }
 
