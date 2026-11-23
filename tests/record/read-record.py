@@ -19,8 +19,11 @@ from pathlib import Path
 #   uint64  TotalBlobs
 #   for each blob:
 #     uint64 ActualSize; uint64 Size; void* DevAddr; char[Size] data
-#     Metadata: uint8 builtin; double threshold; uint8 threshold_kind;
-#               uint8 norm; uint64 tag_len; char[tag_len] tag
+#     uint64 NumAnnotations
+#     for each annotation:
+#       uint64 Offset; uint64 Extent;
+#       Metadata: uint8 builtin; double threshold; uint8 threshold_kind;
+#                 uint8 norm; uint64 tag_len; char[tag_len] tag
 #   uint64  NumArgs
 #   for each arg: uint64 ArgSize; char[ArgSize] data
 # ---------------------------------------------------------------------------
@@ -37,7 +40,7 @@ def _payload_offset(data):
 
 
 def _parse_prologue_metadata(filename):
-    """Return a list of Metadata dicts for every blob in a prologue file."""
+    """Return a list of annotation dicts for every blob in a prologue file."""
     with open(filename, "rb") as f:
         data = f.read()
     off = _payload_offset(data)
@@ -79,19 +82,23 @@ def _parse_prologue_metadata(filename):
         size = u64()
         skip(8)                 # dev_addr
         skip(size)              # blob data
-        builtin       = u8()
-        threshold     = dbl()
-        threshold_kind = u8()
-        norm          = u8()
-        tag_len       = u64()
-        tag = None
-        if tag_len:
-            tag = data[off:off + tag_len].decode("utf-8", errors="replace")
-            skip(tag_len)
-        results.append(
-            dict(builtin=builtin, threshold=threshold,
-                 threshold_kind=threshold_kind, norm=norm, tag=tag)
-        )
+        for _ in range(u64()):
+            offset = u64()
+            extent = u64()
+            builtin = u8()
+            threshold = dbl()
+            threshold_kind = u8()
+            norm = u8()
+            tag_len = u64()
+            tag = None
+            if tag_len:
+                tag = data[off:off + tag_len].decode("utf-8", errors="replace")
+                skip(tag_len)
+            results.append(
+                dict(offset=offset, extent=extent,
+                     builtin=builtin, threshold=threshold,
+                     threshold_kind=threshold_kind, norm=norm, tag=tag)
+            )
     return results
 
 data_dir = sys.argv[1] if len(sys.argv) > 1 else "."
@@ -192,7 +199,12 @@ for fn in sorted(glob.glob(os.path.join(data_dir, "*.json"))):
                     ]
                     if md["tag"] is not None:
                         parts.append(f"tag={md['tag']}")
-                    print("BlobAnnotation:", " ".join(parts))
+                    print(
+                        "Annotation:",
+                        f"offset={md['offset']}",
+                        f"extent={md['extent']}",
+                        " ".join(parts),
+                    )
         except Exception as e:
             print(f"Warning: could not parse prologue metadata: {e}",
                   file=sys.stderr)

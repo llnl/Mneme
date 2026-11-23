@@ -2,7 +2,8 @@
 //===----------------------------------------------------------------------===//
 // mneme_annotate.h - User-facing annotation API for Mneme
 //
-// This header declares mneme::annotate(ptr, Metadata{...}) and related types.
+// This header declares mneme::annotate(ptr, Metadata{...}) and sub-region
+// annotation overloads such as mneme::annotate(ptr, nbytes, Metadata{...}).
 // It is intentionally *interface-only*: no lambdas / comparators yet.
 //
 // Example:
@@ -18,8 +19,13 @@
 // You can also use the typed helper:
 //   mneme::annotate<double>(p, mneme::Metadata{ .threshold = 0.1 });
 //
+// Or annotate a sub-region explicitly:
+//   mneme::annotate(p, 128 * sizeof(double),
+//                   mneme::Metadata{ .threshold = 0.1 });
+//
 //===----------------------------------------------------------------------===//
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -41,6 +47,29 @@ enum class BuiltinDType : std::uint8_t {
   F32,
   F64,
 };
+
+// The size in bytes of one element of builtin, or 0 if builtin is not one of
+// the enumerators, as when it was read from a corrupt file.
+constexpr std::size_t builtinByteWidth(BuiltinDType builtin) {
+  switch (builtin) {
+  case BuiltinDType::U8:
+  case BuiltinDType::I8:
+    return 1;
+  case BuiltinDType::U16:
+  case BuiltinDType::I16:
+  case BuiltinDType::F16:
+    return 2;
+  case BuiltinDType::U32:
+  case BuiltinDType::I32:
+  case BuiltinDType::F32:
+    return 4;
+  case BuiltinDType::U64:
+  case BuiltinDType::I64:
+  case BuiltinDType::F64:
+    return 8;
+  }
+  return 0;
+}
 
 // How to interpret `threshold`.
 enum class ThresholdKind : std::uint8_t {
@@ -71,6 +100,16 @@ struct Metadata {
   // Optional user tag (for reporting / grouping). Not interpreted by Mneme.
   std::optional<std::string> tag = std::nullopt;
 };
+
+inline bool operator==(const Metadata &LHS, const Metadata &RHS) {
+  return LHS.builtin == RHS.builtin && LHS.threshold == RHS.threshold &&
+         LHS.threshold_kind == RHS.threshold_kind && LHS.norm == RHS.norm &&
+         LHS.tag == RHS.tag;
+}
+
+inline bool operator!=(const Metadata &LHS, const Metadata &RHS) {
+  return !(LHS == RHS);
+}
 
 // --------- Builtin dtype mapping helpers (optional sugar) ------------------
 
@@ -115,13 +154,15 @@ template <> struct builtin_dtype_of<std::uint64_t> {
 // Primary user API: annotate a pointer with metadata.
 void annotate(const void *ptr, Metadata md);
 
-// Convenience overload for non-const pointers.
-void annotate(void *ptr, Metadata md);
+// Annotate a sub-region beginning at ptr and spanning bytes bytes.
+void annotate(const void *ptr, std::size_t bytes, Metadata md);
 
 // Typed helper: sets builtin dtype automatically when T maps to a known
 // BuiltinDType. If T is unknown, this will leave builtin=Unknown (still useful
 // if you set dtype=Custom later).
-template <class T> inline void annotate(T *ptr, Metadata md = {}) {
+template <class T,
+          std::enable_if_t<!std::is_void_v<std::remove_cv_t<T>>, int> = 0>
+inline void annotate(T *ptr, Metadata md = {}) {
   // If the user didn't specify dtype explicitly, keep default Builtin.
   // If they *did* specify Custom, we don't override anything here.
   md.builtin = builtin_dtype_of<std::remove_cv_t<T>>::value;

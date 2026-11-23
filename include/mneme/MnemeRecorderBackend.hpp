@@ -54,6 +54,8 @@ public:
   virtual ~RecorderBackend() = default;
 
   virtual bool setMetadataForPointer(const void *ptr, Metadata md) = 0;
+  virtual bool setMetadataForRegion(const void *ptr, size_t bytes,
+                                    Metadata md) = 0;
   virtual bool getMetadataForPointer(const void *ptr, Metadata &md) const = 0;
   virtual bool eraseMetadataForPointer(const void *ptr) = 0;
 

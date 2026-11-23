@@ -380,8 +380,8 @@ static void run_pair_case(BuiltinDType dtype, T a, T b, ThresholdKind tk,
   md.threshold_kind = tk;
   md.norm = norm;
   md.threshold = threshold;
-  A.setMetadata(md);
-  B.setMetadata(md);
+  A.setAnnotation({0, A.getSize()}, md);
+  B.setAnnotation({0, B.getSize()}, md);
 
   CompareResult r = compareDeviceBlobs(
       reinterpret_cast<const char *>(A.getBlobAddr()),
