@@ -265,13 +265,11 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
     with executor:
         result = mod.ExperimentResult()
         config = mod.ExperimentConfiguration()
-        executor._execute(result, config, FakeModule())
+        executor._execute(result, config, mod.parse_assembly(""))
 
     assert result.verified is verified
     assert result.executed
-    assert calls == [
-        "default<O3>", "codegen", "purge-autoinit", "default<O3>", "codegen"
-    ]
+    assert calls == ["default<O3>", "codegen"]
     assert [call[-1] for call in function.profile_calls] == [1, 5]
     names = {event["name"] for event in events}
     assert {
@@ -303,12 +301,14 @@ def test_trace_flushes_when_an_executor_stage_raises(monkeypatch):
     executor.open()
     flushes.clear()
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("build failed")
 
     monkeypatch.setattr(executor, "_build", fail)
     with pytest.raises(RuntimeError, match="build failed"):
-        executor._execute(mod.ExperimentResult(), mod.ExperimentConfiguration(), FakeModule())
+        executor._execute(
+            mod.ExperimentResult(), mod.ExperimentConfiguration(), mod.parse_assembly("")
+        )
     experiment, = [e for e in events if e["name"] == "experiment"]
     assert experiment["args"]["error"] == "RuntimeError"
     assert flushes == [len(events)]
@@ -604,49 +604,26 @@ def test_preprocess_ir_calls_jit_hooks_based_on_config(monkeypatch):
 def test_build_sets_obj_size_when_track_true(monkeypatch):
     mod = _reload_with_identity_decorators(monkeypatch)
 
-    kernel = FakeKernelDescr()
-    rec = FakeRecordedExecution(kernel)
-
-    monkeypatch.setattr(
-        mod.RecordedExecution, "from_json", staticmethod(lambda _: rec), raising=True
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
     )
-    monkeypatch.setattr(mod, "set_device", lambda _: None, raising=True)
-    monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
-    monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
-
     ex = mod.BaseExecutor(record_db="x", record_id="rid")
 
-    spy = {"pre": 0, "opt": 0, "cg": 0}
-
-    def fake_pre(result, cfg, ir):
-        spy["pre"] += 1
-        return "H", ir
-
-    def fake_opt(result, cfg, ir):
-        spy["opt"] += 1
-
-    def fake_cg(result, cfg, ir):
-        spy["cg"] += 1
-        return FakeMemBuffer(size=999)
-
-    monkeypatch.setattr(
-        ex, "_preprocess_ir", lambda *a, **k: fake_pre(*a), raising=True
-    )
-    monkeypatch.setattr(ex, "_optimize", lambda *a, **k: fake_opt(*a), raising=True)
-    monkeypatch.setattr(ex, "_codegen", lambda *a, **k: fake_cg(*a), raising=True)
+    buffer = FakeMemBuffer(size=999)
+    monkeypatch.setattr(ex, "_optimize", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ex, "_codegen", lambda *args, **kwargs: buffer)
 
     res = mod.ExperimentResult()
     cfg = mod.ExperimentConfiguration()
     ir = FakeModule("x")
 
     mb = ex._build(res, cfg, ir, track=True)
-    assert isinstance(mb, FakeMemBuffer)
-    assert res.obj_size == 999
-    assert spy == {"pre": 1, "opt": 1, "cg": 1}
+    assert mb is buffer
+    assert res.obj_size == buffer.get_size()
 
     # track=False should not set obj_size
     res2 = mod.ExperimentResult()
-    mb2 = ex._build(res2, cfg, ir, track=False)
+    ex._build(res2, cfg, ir, track=False)
     assert res2.obj_size == 0
 
 
@@ -705,69 +682,67 @@ def test_run_records_resource_usage_when_track_true(monkeypatch):
     assert res.local_mem_usage == device_func.local_mem
 
 
-@pytest.mark.parametrize("short_circuit", [False, True])
-@pytest.mark.parametrize("verified", [False, True])
+@pytest.mark.parametrize(
+    "has_auto_init, verified, short_circuit",
+    [
+        pytest.param(False, True, False, id="shared-build"),
+        pytest.param(True, True, True, id="separate-builds"),
+        pytest.param(True, False, True, id="skip-timing-after-failure"),
+        pytest.param(False, False, False, id="time-after-failure"),
+    ],
+)
 def test_execute_orchestrates_verification_and_tracked_run(
-    monkeypatch, short_circuit, verified
+    monkeypatch, has_auto_init, verified, short_circuit
 ):
     mod = _reload_with_identity_decorators(monkeypatch)
-
-    shared_snap = FakeSnapshot(state="S")
-    kernel = FakeKernelDescr(prologue=shared_snap, epilogue=shared_snap)
-    rec = FakeRecordedExecution(kernel)
-
-    monkeypatch.setattr(
-        mod.RecordedExecution, "from_json", staticmethod(lambda _: rec), raising=True
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
     )
-    monkeypatch.setattr(mod, "set_device", lambda _: None, raising=True)
-    monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
-    monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
 
-    # Spy on _build and _run
-    build_calls = []
-    built_modules = []
-    run_calls = []
+    # Exercise the native purge on the same annotated IR as the LLVM pass test.
+    fixture = Path(__file__).resolve().parents[2] / "tests/pass/purge-autoinit.ll"
+    ir = mod.parse_assembly(fixture.read_text())
+    if not has_auto_init:
+        assert ir.purge_auto_init()
 
-    def fake_build(result, cfg, ir_mod, track):
-        build_calls.append((track, cfg.passes))
-        built_modules.append(ir_mod)
-        return FakeMemBuffer()
+    builds = []
+    runs = []
 
-    def fake_run(result, cfg, mem_buf, prologue, epilogue, verify, track, iters):
+    def codegen(module, arch, opt_level):
+        buffer = FakeMemBuffer()
+        builds.append((module, buffer))
+        return buffer
+
+    def fake_run(result, cfg, buffer, prologue, epilogue, verify, track, iterations):
         if verify:
             result.verified = verified
-        run_calls.append((track, iters))
+        runs.append((buffer, verify, track, iterations))
 
-    ex = mod.BaseExecutor(
+    with mod.BaseExecutor(
         record_db="x", record_id="rid", iterations=3, short_circuit=short_circuit
-    )
-    ex.open()  # load prologue/epilogue
+    ) as executor:
+        monkeypatch.setattr(mod.jit, "optimize", lambda *args: None)
+        monkeypatch.setattr(mod.jit, "codegen_object", codegen)
+        monkeypatch.setattr(executor, "_run", fake_run)
+        result = mod.ExperimentResult()
+        out_ir = executor._execute(result, mod.ExperimentConfiguration(), ir)
 
-    monkeypatch.setattr(ex, "_build", fake_build, raising=True)
-    monkeypatch.setattr(ex, "_run", fake_run, raising=True)
+    timed = verified or not short_circuit
+    assert result.verified is verified
+    assert result.executed is timed
+    assert len(builds) == (2 if has_auto_init and timed else 1)
 
-    res = mod.ExperimentResult()
-    cfg = mod.ExperimentConfiguration()
-    ir = FakeModule("root")
-
-    out_ir = ex._execute(res, cfg, ir)
-
-    timing_skipped = short_circuit and not verified
-    expected_runs = [(False, 1)]
-    expected_builds = [(False, "default<O3>")]
-    if not timing_skipped:
-        expected_runs.append((True, 5))
-        expected_builds.append((True, "default<O3>"))
-    assert run_calls == expected_runs
-    assert build_calls == expected_builds
-    assert res.executed is (not timing_skipped)
-    assert res.verified is verified
-
-    # A skipped timing run returns the verification module.
-    assert out_ir is built_modules[-1]
+    verification_ir, verification_buffer = builds[0]
+    assert ('!"auto-init"' in str(verification_ir)) is has_auto_init
+    expected_runs = [(verification_buffer, True, False, 1)]
+    if timed:
+        timing_ir, timing_buffer = builds[-1]
+        assert '!"auto-init"' not in str(timing_ir)
+        assert result.obj_size == timing_buffer.get_size()
+        expected_runs.append((timing_buffer, False, True, 5))
+    assert runs == expected_runs
+    assert out_ir is builds[-1][0]
     assert out_ir is not ir
-
-    ex.close()
 
 
 def test_executor_registers_pass_plugins_after_its_own(monkeypatch, tmp_path):
