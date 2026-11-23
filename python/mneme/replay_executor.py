@@ -492,7 +492,31 @@ class BaseExecutor:
         ir_module: ModuleRef,
         track: bool,
     ) -> MemBufferRef:
-        """Optimize a preprocessed module and compile it to a device object."""
+        """
+        Build the executable device kernel from a preprocessed IR module.
+
+        Run the configured optimization pipeline in place, then lower the
+        optimized IR to a device object. When tracking is enabled, record the
+        optimization and code generation times and the object size in bytes.
+
+        Parameters
+        ----------
+        result : ExperimentResult
+            Result object to receive ``opt_time``, ``codegen_time``, and
+            ``obj_size`` when tracking is enabled.
+        config : ExperimentConfiguration
+            Configuration controlling the optimization pipeline and code
+            generation level.
+        ir_module : ModuleRef
+            Preprocessed IR module to optimize and compile.
+        track : bool
+            Whether to record build metrics in ``result``.
+
+        Returns
+        -------
+        MemBufferRef
+            Memory buffer containing the compiled device object.
+        """
         self._optimize(result, config, ir_module, profile=track)
         mem_buffer = self._codegen(result, config, ir_module, profile=track)
         if track:
@@ -590,7 +614,50 @@ class BaseExecutor:
         config: ExperimentConfiguration,
         ir_module: ModuleRef,
     ) -> ModuleRef:
-        """Verify the recorded execution, then time the kernel with auto-init purged."""
+        """
+        Execute a single Mneme experiment with the given configuration and IR.
+
+        1. **IR preparation**
+           Clone and preprocess the input IR, recording the preprocessing time.
+           Remove Clang's annotated auto-init memsets from this copy. If the
+           purge changes the IR, preprocess a fresh clone for verification so
+           that it retains those memsets.
+
+        2. **Verification**
+           Build and run the verification kernel once, then compare its device
+           memory state with the recorded epilogue. If the purge left the IR
+           unchanged, this build collects metrics and provides the device object
+           for both verification and timing. When verification fails with short
+           circuiting enabled, skip the timed execution.
+
+        3. **Timed execution**
+           Build the purged IR with tracking enabled if verification used a
+           separate module. Run the device object for the configured iteration
+           count plus warmup iterations, collect timing and resource usage, and
+           set ``result.executed`` to ``True``.
+
+        Parameters
+        ----------
+        result : ExperimentResult
+            Result object updated in place with verification status and the
+            metrics collected during the experiment.
+        config : ExperimentConfiguration
+            Configuration controlling launch parameters, specialization,
+            optimization, and code generation.
+        ir_module : ModuleRef
+            Input LLVM IR module. All transformations operate on clones of it.
+
+        Returns
+        -------
+        ModuleRef
+            The transformed IR used to build the timed device object, or the
+            verification IR if timed execution was skipped.
+
+        Raises
+        ------
+        RuntimeError
+            If the prologue or epilogue snapshot has no underlying memory state.
+        """
         if self._prologue._state is None or self._epilogue._state is None:
             raise RuntimeError("States should never be none when executing a kernel")
 
