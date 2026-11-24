@@ -1,7 +1,7 @@
 import hashlib
 import json
 import tempfile
-from unittest.mock import patch, MagicMock
+from unittest.mock import ANY, patch, MagicMock
 import pytest
 
 from mneme.recorded_execution import (
@@ -27,33 +27,28 @@ def test_memstate_constructor_checks_file_exists():
 def test_memstate_open_initializes_and_loads():
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.return_value = "STATE"
-
             m = MemStateRef("snap.pro", "kernelA", SnapshotType.PROLOGUE)
             m.open()
 
-            fake.MnemePy_initializeMemState.assert_called_once()
-            fake.MnemePy_LoadMemState.assert_called_once_with("STATE")
+            fake.MnemePy_openMemStates.assert_called_once_with(
+                b"kernelA", b"snap.pro", None, 32 << 20, ANY, None
+            )
 
 
-def test_epilogue_memstate_without_base_passes_empty_path_to_ffi():
+def test_epilogue_memstate_without_base_passes_null_to_ffi():
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.return_value = "STATE"
-
             m = MemStateRef("snap.epi", "kernelA", SnapshotType.EPILOGUE)
             m.open()
 
-            args, _ = fake.MnemePy_initializeMemState.call_args
-            assert args[2].value == b""
-            assert args[3].value is False
+            fake.MnemePy_openMemStates.assert_called_once_with(
+                b"kernelA", None, b"snap.epi", 32 << 20, None, ANY
+            )
 
 
 def test_epilogue_memstate_passes_base_prologue_to_ffi():
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.return_value = "STATE"
-
             m = MemStateRef(
                 "snap.epi",
                 "kernelA",
@@ -62,18 +57,15 @@ def test_epilogue_memstate_passes_base_prologue_to_ffi():
             )
             m.open()
 
-            args, _ = fake.MnemePy_initializeMemState.call_args
-            assert args[1].value == b"snap.epi"
-            assert args[2].value == b"snap.pro"
-            assert args[3].value is False
+            fake.MnemePy_openMemStates.assert_called_once_with(
+                b"kernelA", b"snap.pro", b"snap.epi", 32 << 20, None, ANY
+            )
 
 
 @pytest.mark.parametrize("epilogue_fn", ["snap.bytes.epi", "snap.diff.epi"])
 def test_epilogue_formats_share_base_prologue_interface(epilogue_fn):
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.return_value = "STATE"
-
             m = MemStateRef(
                 epilogue_fn,
                 "kernelA",
@@ -82,16 +74,14 @@ def test_epilogue_formats_share_base_prologue_interface(epilogue_fn):
             )
             m.open()
 
-            args, _ = fake.MnemePy_initializeMemState.call_args
-            assert args[1].value == epilogue_fn.encode("utf-8")
-            assert args[2].value == b"snap.pro"
-            assert args[3].value is False
+            fake.MnemePy_openMemStates.assert_called_once_with(
+                b"kernelA", b"snap.pro", epilogue_fn.encode("utf-8"), 32 << 20, None, ANY
+            )
 
 
 def test_memstate_args_lazy_loaded_once():
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.return_value = "S"
             fake.MnemePy_getArgs.return_value = ["A", "B"]
 
             m = MemStateRef("snap.pro", "kernel", SnapshotType.PROLOGUE)
@@ -107,7 +97,6 @@ def test_memstate_args_lazy_loaded_once():
 def test_memstate_num_args_lazy_loaded_once():
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.return_value = "S"
             fake.MnemePy_getNumArgs.return_value = 7
 
             m = MemStateRef("snap.pro", "kernel", SnapshotType.PROLOGUE)
@@ -130,40 +119,37 @@ def test_memstate_reset_requires_load():
 def test_memstate_context_manager_calls_open_and_close():
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.return_value = "ST"
-
             m = MemStateRef("snap.pro", "kernel", SnapshotType.PROLOGUE)
 
             with m:
-                fake.MnemePy_LoadMemState.assert_called_once_with("ST")
+                handle = m._state
+                fake.MnemePy_openMemStates.assert_called_once()
 
-            fake.MnemePy_DisposeMemState.assert_called_once_with("ST")
+            fake.MnemePy_DisposeMemState.assert_called_once_with(handle)
 
 
 def test_memstate_equality_uses_ffi_compare():
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.side_effect = ["A", "B"]
             fake.MnemePy_CompareMemState.return_value = True
 
             m1 = MemStateRef("p1.pro", "k", SnapshotType.PROLOGUE).open()
             m2 = MemStateRef("p2.pro", "k", SnapshotType.PROLOGUE).open()
 
             assert m1 == m2
-            fake.MnemePy_CompareMemState.assert_called_once_with("A", "B")
+            fake.MnemePy_CompareMemState.assert_called_once_with(m1._state, m2._state)
 
 
 def test_memstate_matches_unlaunched_uses_ffi():
     with patch("mneme.recorded_execution.Path.exists", return_value=True):
         with patch("mneme.recorded_execution.ffi.lib") as fake:
-            fake.MnemePy_initializeMemState.side_effect = ["P", "E"]
             fake.MnemePy_MatchesUnlaunched.return_value = True
 
             pro = MemStateRef("p.pro", "k", SnapshotType.PROLOGUE).open()
             epi = MemStateRef("e.epi", "k", SnapshotType.EPILOGUE).open()
 
             assert pro.matches_unlaunched(epi)
-            fake.MnemePy_MatchesUnlaunched.assert_called_once_with("P", "E")
+            fake.MnemePy_MatchesUnlaunched.assert_called_once_with(pro._state, epi._state)
 
 
 # ======================================================================

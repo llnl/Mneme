@@ -629,6 +629,7 @@ def test_worker_process_receives_pass_plugins(monkeypatch):
         results_db_dir="/tmp",
         num_workers=2,
         pass_plugins=pass_plugins,
+        buffer_size=4 << 20,
     )
 
-    assert [args[-1] for args in spawned] == [pass_plugins, pass_plugins]
+    assert [args[-2:] for args in spawned] == [(pass_plugins, 4 << 20)] * 2

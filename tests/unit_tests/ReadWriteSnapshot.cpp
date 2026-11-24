@@ -560,7 +560,7 @@ int main(int argc, char **argv) {
     std::string BytesV0;
     {
       llvm::raw_string_ostream OS(BytesV0);
-      BytesReaderV0<Vendor>::Layout.write(OS);
+      snapshot_layout::BytesV0.write(OS);
       util::writeScalar(OS, size_t{0});
       util::writeScalar(OS, size_t{1});
       BlobHeader{128, 128, OldAddr}.write(OS);
@@ -588,7 +588,7 @@ int main(int argc, char **argv) {
     std::string DiffV1;
     {
       llvm::raw_string_ostream OS(DiffV1);
-      DiffReaderV1<Vendor>::Layout.write(OS);
+      snapshot_layout::DiffV1.write(OS);
       util::writeScalar(OS, size_t{0});
       util::writeScalar(OS, size_t{1});
       BlobHeader{128, 128, OldAddr}.write(OS);
