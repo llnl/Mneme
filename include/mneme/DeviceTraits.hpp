@@ -145,6 +145,12 @@ template <> struct DeviceTraits<DeviceVendors::HIP> {
 
   static hipError_t DeviceFree(void *ptr) { return hipFree(ptr); }
 
+  static auto mallocPinned(void **Ptr, size_t Size) {
+    return hipHostMalloc(Ptr, Size);
+  }
+
+  static auto freePinned(void *Ptr) { return hipHostFree(Ptr); }
+
   static hipError_t DeviceCopy(void *Dest, void *Src, size_t SizeBytes,
                                hipMemcpyKind Kind) {
     return hipMemcpy(Dest, Src, SizeBytes, Kind);
@@ -569,6 +575,12 @@ template <> struct DeviceTraits<DeviceVendors::CUDA> {
   }
 
   static DeviceError_t DeviceFree(void *ptr) { return cudaFree(ptr); }
+
+  static auto mallocPinned(void **Ptr, size_t Size) {
+    return cudaMallocHost(Ptr, Size);
+  }
+  
+  static auto freePinned(void *Ptr) { return cudaFreeHost(Ptr); }
 
   static DeviceError_t DeviceCopy(void *Dest, void *Src, size_t SizeBytes,
                                   cudaMemcpyKind Kind) {
