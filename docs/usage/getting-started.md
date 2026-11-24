@@ -180,14 +180,14 @@ The output will be similar to:
     If verified on the *Result* entry is true and executed is true, **Congratulations** you have replayed successfully a vector addition.
 
 !!! note
-    A replay executes a verification run and then a timing run. The result
-    lists the experiment fields first, then the fields of each run in chain
-    order; `runs` lists the runs that executed. The verification run produces
-    `verified` and `noop_verifies`. The timing run builds the kernel with
-    Clang's auto-initialization code removed and produces `exec_time`, the
-    resource usage fields, and `preprocess_ir_time`, `opt_time`,
-    `codegen_time` and `obj_size`. When a run did not execute, for example timing after a failed
-    verification with `--short-circuit`, its fields hold their default values.
+    `verified` says whether the replayed kernel reproduced the recorded output.
+    If `noop_verifies` is true, the recorded input already matches that output,
+    so even a kernel that does nothing would verify; treat `verified` as
+    meaningless for that recording. `exec_time` lists the measured kernel
+    execution times, and `preprocess_ir_time`, `opt_time`, `codegen_time` and
+    `obj_size` describe the build that was timed. With `--short-circuit`, a
+    replay that fails verification skips timing; `runs` lists the parts of the
+    replay that actually ran.
 
 !!! tip "Tolerance-aware verification"
     By default, replay verification uses a byte-exact comparison.  If your kernel produces floating-point results and you want to accept small numerical differences across optimization pipelines, you can annotate device buffers with `mneme::annotate()` before recording. See **[Usage → Verification](verification.md)** for the full API and examples.
