@@ -61,3 +61,17 @@ variables:
 
 tuolumne-test-python-cov:
   extends: [.base-job, .build-variants]
+
+tuolumne-python-fidelity:
+  extends: [.base-job, .fidelity-artifacts]
+  # Fidelity builds independently and never replaces an ordinary test variant.
+  parallel:
+    matrix:
+      - MNEME_CI_ROCM_VERSION: ["7.2.0"]
+        MNEME_CI_PYTHON_VERSION: ["3.10"]
+  variables:
+    MNEME_CI_FIDELITY: "1"
+    ALLOC_NAME: "${CI_PROJECT_NAME}_fidelity_${CI_JOB_ID}"
+    TUOLUMNE_JOB_ALLOC: >-
+      --job-name=${FLUX_JOB_NAME} --nodes=1 --exclusive
+      --queue=pci --time-limit=1h

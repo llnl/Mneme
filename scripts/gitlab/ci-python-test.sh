@@ -49,7 +49,7 @@ mneme_src=$test_dir/mneme_src/Mneme
 log "End copying mneme src to ${mneme_src} from ${mneme_orig_src}"
 
 if [[ "$SYS_TYPE" == "toss_4_x86_64_ib" ]]; then
-  unset CUDA_VISIBLE_DEVICES
+  # Keep the GPU slice assigned by Slurm visible to both app and replay.
   ml load cmake/3.30
   ml load cuda/12.2.2
   setup_conda_env "${test_dir}/miniforge3" "${MNEME_CI_LLVM_VERSION}" "${MNEME_CI_PYTHON_VERSION}"
@@ -90,8 +90,33 @@ log "Finalized with installation"
 log "Installing pytest"
 python -m pip install pytest pytest-cov
 
+# Fidelity jobs share build setup, then exit before ordinary test and coverage work.
+if [[ "${MNEME_CI_FIDELITY:-0}" == "1" ]]; then
+  log "Running fidelity regression suite"
+  python -m pytest -o addopts= "${mneme_src}/tests/fidelity/test_runner.py"
+
+  fidelity_output="${CI_PROJECT_DIR:-${mneme_orig_src}}/fidelity-results"
+
+  # Preserve failure status while cleaning up the temporary build.
+  fidelity_status=0
+  if [[ "${MNEME_GPU_BACKEND}" == "hip" ]]; then
+    # The selected job owns its node. Bind this regression task to one GPU
+    # and its local CPU; all native and replay subprocesses inherit placement.
+    flux run -n1 -g1 --setopt=mpibind=verbose:1 \
+      python "${mneme_src}/tests/fidelity/run.py" --output-dir "$fidelity_output" \
+      || fidelity_status=$?
+  else
+    python "${mneme_src}/tests/fidelity/run.py" --output-dir "$fidelity_output" \
+      || fidelity_status=$?
+  fi
+
+  deactivate
+  rm -rf "${test_dir}"
+  exit "$fidelity_status"
+fi
+
 log "Start running mneme tests"
-pytest -v -s ${mneme_src}/python/tests/ || exit $? 
+pytest -v -s ${mneme_src}/python/tests/ || exit $?
 log "Done with testing"
 pushd ${mneme_src}
 pytest --cov-report=xml:coverage-${CI_JOB_ID}.xml --cov-config=.coveragerc python/tests/

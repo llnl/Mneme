@@ -115,7 +115,20 @@ allocate_resources:
 # Remove only this job's clone; CI_BUILDS_DIR is shared with concurrent jobs.
 .remove-builds-dir:
   after_script:
-    - rm -rf ${CI_PROJECT_DIR}
+    # GitLab uploads artifacts after after_script. Fidelity reports must survive.
+    - |
+      if [ "${MNEME_CI_FIDELITY:-0}" != "1" ]; then
+        rm -rf "${CI_PROJECT_DIR}"
+      fi
+
+.fidelity-artifacts:
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - fidelity-results/
+    reports:
+      junit: fidelity-results/junit.xml
 
 .clean-flux-allocation:
   after_script:
