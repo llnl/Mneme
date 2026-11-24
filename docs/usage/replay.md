@@ -21,3 +21,17 @@ optimization pipelines or launch configurations.
 For a detailed explanation of the annotation API, metadata fields,
 threshold semantics, and a complete example, see
 **[Usage → Verification](verification.md)**.
+
+## Handling Large Snapshots
+
+When your prologue and epilogue snapshots are large replay startup
+time can dominate total replay time. Try setting `--epilogue-format`
+to `diff` to minimize data copied from disk and to the device. 
+Furthermore, the `--buffer-size` argument allows you to control the
+size of the pinned host buffer used to copy data to the device. You
+can try values, e.g. `4MiB`, `512KiB`, etc., to tune performance to 
+your system; the default is `32MiB`.
+
+Mneme is ultimately bottlenecked by the disk read bandwidth and host to
+device memory bandwidth. Ensure your snapshots are stored on a fast
+filesystem if possible.
