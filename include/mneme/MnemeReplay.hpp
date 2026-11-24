@@ -1,3 +1,4 @@
+#pragma once
 #include <algorithm>
 #include <cstdint>
 #include <llvm/ADT/STLExtras.h>
@@ -26,7 +27,6 @@ template <DeviceVendors VendorTypes> class EpilogueState;
 
 // Abstract base for a replay memory state. A concrete state is either a
 // prologue (kernel input state) or an epilogue (expected kernel output state).
-// Subclasses provide load(), which materializes the state onto the device.
 template <DeviceVendors VendorTypes> class ReplayMemState {
 public:
   using MnemeDeviceRT = DeviceTraits<VendorTypes>;
@@ -78,8 +78,6 @@ public:
   ReplayMemState() = delete;
   virtual ~ReplayMemState() { release(); }
 
-  virtual void load() = 0;
-
   // Restores the recorded state; work queued on Stream must finish before the
   // state is valid.
   virtual void reset(DeviceStream_t Stream) = 0;
@@ -106,6 +104,8 @@ public:
   virtual EpilogueState<VendorTypes> *asEpilogue() { return nullptr; }
 
   void **getArgs() const { return reinterpret_cast<void **>(Args.get()); }
+
+  const KernelInfo &kernelInfo() const { return *KInfo; }
 
   uint64_t getNumArgs() const { return KInfo->getNumArgs(); }
 
@@ -147,14 +147,13 @@ class PrologueState : public ReplayMemState<VendorTypes> {
   using Blob = MnemeMemoryBlob<VendorTypes>;
 
 public:
-  PrologueState(const std::string &KernelName, const std::string &SnapshotFile)
-      : ReplayMemState<VendorTypes>(
-            BaseSnapshotSource<VendorTypes>(SnapshotFile).load(KernelName)) {}
+  explicit PrologueState(Snapshot<VendorTypes> Snap)
+      : ReplayMemState<VendorTypes>(std::move(Snap)) {}
 
   // Maps every blob at its recorded address. Blobs closer than a large page
   // share one mapping, owned by the lowest blob and rounded to whole large
   // pages and driver VA blocks, or to pages if those do not fit.
-  void load() override {
+  void mapRecordedAddresses() {
     std::vector<std::pair<uintptr_t, Blob *>> Blobs;
     for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
       Blobs.emplace_back(reinterpret_cast<uintptr_t>(DevAddr), &MemBlob);
@@ -225,16 +224,6 @@ public:
       }
       I = J;
     }
-
-    // Each blob's host memory is freed as soon as its data is on the device.
-    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState) {
-      MemBlob.moveDataToDevice();
-      restore(MemBlob, nullptr);
-    }
-    auto EC = MnemeDeviceRT::DeviceErrorCheck(
-        MnemeDeviceRT::DeviceStreamSynchronize(nullptr));
-    if (EC)
-      LOG_FATAL("Could not finish loading the prologue: {}", EC.value());
   }
 
   // Restores blobs from their recorded data, queued on Stream.
@@ -261,19 +250,11 @@ private:
   }
 };
 
-// Replay state for the expected kernel output. Unlike the prologue, load()
-// only moves each blob's recorded data to the device, mapping nothing at the
-// recorded addresses.
 template <DeviceVendors VendorTypes>
 class EpilogueState : public ReplayMemState<VendorTypes> {
 public:
   explicit EpilogueState(Snapshot<VendorTypes> SnapshotState)
       : ReplayMemState<VendorTypes>(std::move(SnapshotState)) {}
-
-  void load() override {
-    for (auto &[DevAddr, MemBlob] : this->DeviceMemoryState)
-      MemBlob.moveDataToDevice();
-  }
 
   // The blobs are never written, so only the globals need restoring.
   void reset(typename DeviceTraits<VendorTypes>::DeviceStream_t) override {
@@ -356,23 +337,5 @@ private:
     return Correct;
   }
 };
-
-template <DeviceVendors VendorTypes>
-std::unique_ptr<ReplayMemState<VendorTypes>>
-makeReplayPrologueState(const std::string &KernelName,
-                        const std::string &SnapshotFile) {
-  return std::make_unique<PrologueState<VendorTypes>>(KernelName, SnapshotFile);
-}
-
-template <DeviceVendors VendorTypes>
-std::unique_ptr<ReplayMemState<VendorTypes>>
-makeReplayEpilogueState(const std::string &KernelName,
-                        const std::string &SnapshotFile,
-                        const std::string &BasePrologueFile) {
-  Snapshot<VendorTypes> Snap =
-      SnapshotFormatRegistry<VendorTypes>::open(SnapshotFile)
-          ->read(KernelName, BaseSnapshotSource<VendorTypes>(BasePrologueFile));
-  return std::make_unique<EpilogueState<VendorTypes>>(std::move(Snap));
-}
 
 } // namespace mneme

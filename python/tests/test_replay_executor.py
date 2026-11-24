@@ -66,6 +66,9 @@ class FakeKernelDescr:
         self.prologue = FakePrologueDescr(prologue or FakeSnapshot())
         self.epilogue = FakeEpilogueDescr(epilogue or FakeSnapshot())
 
+    def open_states(self, buffer_size):
+        return self.prologue.open(), self.epilogue.open()
+
 
 class FakeModule:
     def __init__(self, name="m", clone_counter=None):
@@ -273,8 +276,8 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
     assert [call[-1] for call in function.profile_calls] == [1, 5]
     names = {event["name"] for event in events}
     assert {
-        "metadata.load", "metadata.record", "snapshot.prologue.open",
-        "snapshot.epilogue.open", "verify.noop", "ir.link", "ir.clone",
+        "metadata.load", "metadata.record", "snapshot.streaming.open",
+        "verify.noop", "ir.link", "ir.clone",
         "ir.preprocess", "ir.optimize", "ir.codegen", "execution.verification",
         "execution.tracked", "verify.compare", "snapshot.cleanup", "experiment",
     } <= names
@@ -865,6 +868,7 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
             warmup,
             short_circuit,
             pass_plugins,
+            buffer_size,
         ):
             self.record_db = record_db
             self.record_id = record_id
@@ -969,6 +973,7 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
             warmup,
             short_circuit,
             pass_plugins,
+            buffer_size,
         ):
             self.device_id = device_id
 

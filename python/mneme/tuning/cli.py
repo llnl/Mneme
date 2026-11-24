@@ -3,6 +3,7 @@ import json
 from dataclasses import fields
 from typing import Any, Dict
 
+from mneme.state_loader import add_buffer_size_arg
 from mneme.pass_plugins import add_pass_plugin_args
 from mneme.tuning.session import TuneOptions, TuningSession, merge_config_and_args
 
@@ -251,6 +252,7 @@ def add_tune_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Codegen method metadata to attach to the built-in search space.",
     )
+    add_buffer_size_arg(compiler)
     add_pass_plugin_args(compiler)
 
     config_space = parser.add_argument_group("configuration-space controls")

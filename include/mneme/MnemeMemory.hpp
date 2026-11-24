@@ -184,8 +184,9 @@ template <DeviceVendors VendorTypes> class MnemeBuffer {
   }
 
 public:
-  explicit MnemeBuffer(uint64_t Size = 0)
-      : Ptr(new uint8_t[Size]), Size(Size) {}
+  explicit MnemeBuffer(uint64_t Size = 0,
+                       MemoryLocation Where = MemoryLocation::Host)
+      : Ptr(allocate(Size, Where)), Size(Size), Location(Where) {}
   MnemeBuffer(std::unique_ptr<uint8_t[]> HostData, uint64_t Size)
       : Ptr(HostData.release()), Size(Size) {}
   ~MnemeBuffer() { free(); }
@@ -389,10 +390,22 @@ public:
   }
 
   MnemeMemoryBlob(uint64_t ActualSize = 0, void *BlobAddr = nullptr,
-                  uint64_t Size = 0)
-      : ActualSize(ActualSize), BlobAddr(BlobAddr), Size(Size), Data(Size),
-        IsMapped(false) {
+                  uint64_t Size = 0,
+                  MemoryLocation Where = MemoryLocation::Host)
+      : ActualSize(ActualSize), BlobAddr(BlobAddr), Size(Size),
+        Data(Size, Where), IsMapped(false) {
     resetAnnotations();
+  }
+
+  // Delay backing allocation until the recorded VA ranges have been mapped.
+  explicit MnemeMemoryBlob(BlobHeader H)
+      : ActualSize(H.ActualSize), BlobAddr(nullptr), Size(H.Size),
+        Data(0, MemoryLocation::Device), IsMapped(false) {
+    resetAnnotations();
+  }
+  
+  void allocateDeviceData() {
+    Data = MnemeBuffer<VendorTypes>(Size, MemoryLocation::Device);
   }
 
   // Maps MapSize bytes of new device memory at exactly MapVA, owned by this
