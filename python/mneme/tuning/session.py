@@ -25,6 +25,7 @@ from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
 from mneme.pass_plugins import resolve_pass_plugins
 from mneme.recorded_execution import RecordedExecution
 from mneme.replay_executor import noop_verifies_warning
+from mneme.replay_runs import default_run_chain
 from mneme.tuning.builtin_spaces import (
     BuiltinTuneSearchSpace,
     describe_search_space,
@@ -909,11 +910,13 @@ class TuningSession:
             executor = AsyncReplayExecutor(
                 record_db=self.options.record_database,
                 record_id=self.options.record_id,
-                iterations=self.options.iterations,
                 results_db_dir=self.options.results_dir,
                 num_workers=self.options.workers,
-                warmup=self.options.warmup,
-                short_circuit=self.options.short_circuit,
+                run_chain=default_run_chain(
+                    iterations=self.options.iterations,
+                    warmup=self.options.warmup,
+                    short_circuit=self.options.short_circuit,
+                ),
                 pass_plugins=self.options.pass_plugins,
             )
         # the main tuning phase

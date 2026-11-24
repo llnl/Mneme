@@ -34,10 +34,10 @@ from mneme.llvm import utils
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
 from mneme.pass_plugins import add_pass_plugin_args
-from mneme.profile import init_profiler
 from mneme.proteus import jit
 from mneme.recorded_execution import RecordedExecution
 from mneme.replay_executor import BaseExecutor, noop_verifies_warning
+from mneme.replay_runs import default_run_chain
 from mneme.tuning.cli import add_tune_args, run_tune
 from mneme.utils import MnemeEncoder
 
@@ -746,9 +746,6 @@ class Replay(BaseExecutor):
         parser.set_defaults(func=Replay.run)
 
     def __init__(self, *args, **kwargs):
-        # NOTE: We need to instantiate the profiler here so
-        # that upcoming calls are going to be robust
-        init_profiler()
         self.grid_dim_x = kwargs.pop("grid_dim_x", None)
         self.grid_dim_y = kwargs.pop("grid_dim_y", None)
         self.grid_dim_z = kwargs.pop("grid_dim_z", None)
@@ -767,6 +764,11 @@ class Replay(BaseExecutor):
         self.codegen_opt = kwargs.pop("codegen_opt", 3)
 
         self.output_ll = kwargs.pop("output_ll", None)
+        kwargs["run_chain"] = default_run_chain(
+            iterations=kwargs.pop("iterations", 3),
+            warmup=kwargs.pop("warmup", 2),
+            short_circuit=kwargs.pop("short_circuit", False),
+        )
 
         super().__init__(*args, **kwargs)
         self._db = None
@@ -847,14 +849,6 @@ class Replay(BaseExecutor):
     def __str__(self):
         return f"{self.__class__.__name__}"
 
-    def execute(self, config, ir_module, clone=False, orig=""):
-        result = ExperimentResult()
-        generated_ir = super()._execute(result, config, ir_module)
-        if self.output_ll is not None:
-            with open(self.output_ll, "w") as fd:
-                fd.write(str(generated_ir))
-        return result
-
     @staticmethod
     def run(args, verbosity):
         kwargs = vars(args)
@@ -874,10 +868,12 @@ class Replay(BaseExecutor):
             if executor.noop_verifies:
                 print(noop_verifies_warning(executor.record_id), file=sys.stderr)
             exp = executor.get_mneme_config(executor.passes)
-            res = executor.execute(
-                exp,
-                root_ir.clone(),
-                True,
+            outcome = executor.execute(exp, root_ir.clone())
+            if executor.output_ll is not None:
+                with open(executor.output_ll, "w") as fd:
+                    fd.write(str(outcome.last_artifact.ir_module))
+            res = ExperimentResult(
+                outcome.results.values(), executed=outcome.executed_every_run
             )
             out = {"Replay-config": exp.to_dict(), "Result": res.to_dict()}
             print(

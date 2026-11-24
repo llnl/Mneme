@@ -16,6 +16,7 @@ Public API:
   - :func:`init_profiler`        Initialize (load) the profiling library.
   - :func:`gpu_profile_start`    Start profiling for a kernel name, returns correlation id.
   - :func:`gpu_profile_stop`     Stop profiling and return recorded timestamps/records.
+  - :class:`GpuKernelTimer`      Time the kernel launches issued inside a ``with`` block.
 
 Notes:
   - This is an internal module; callers are expected to call :func:`init_profiler`
@@ -143,3 +144,35 @@ def init_profiler() -> None:
     to :func:`gpu_profile_start` / :func:`gpu_profile_stop`.
     """
     _init_profile()
+
+
+class GpuKernelTimer:
+    """
+    Context manager measuring the GPU execution time of kernel launches.
+
+    The launches of ``kernel_name`` issued inside the ``with`` block are timed by
+    the native profiler. After the block exits normally, ``measurements`` holds
+    one entry per launch.
+
+    Parameters
+    ----------
+    kernel_name : str
+        Kernel name used as a label by the profiling backend.
+    launches : int
+        Number of launches of the kernel issued inside the block.
+    """
+
+    def __init__(self, kernel_name: str, launches: int):
+        self._kernel_name = kernel_name
+        self._launches = launches
+        self._correlation_id = None
+        self.measurements = []
+
+    def __enter__(self):
+        self._correlation_id = gpu_profile_start(self._kernel_name)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            self.measurements = gpu_profile_stop(self._correlation_id, self._launches)
+        return False

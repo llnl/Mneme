@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import pytest
 
+from mneme import replay_runs
+from mneme.mneme_types import BuildStats
+from mneme.replay_runs import BuildArtifact, BuildVariant, TimingRun, VerificationRun
 from mneme.tuning.session import classify_result
 
 
@@ -127,6 +130,22 @@ class FakeDeviceModule:
         return self._device_func
 
 
+class FakeGpuKernelTimer:
+    """Stands in for GpuKernelTimer: one fake measurement per launch."""
+
+    def __init__(self, kernel_name, launches):
+        self.kernel_name = kernel_name
+        self.launches = launches
+        self.measurements = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.measurements = list(range(self.launches))
+        return False
+
+
 class FakeRecordedExecution:
     def __init__(self, kernel_descr=None, kernel_instances=None):
         self.kernel_instances = (
@@ -153,36 +172,20 @@ class FakeRecordedExecution:
 
 
 # --------------------------
-# Helper: import module with patched decorators
+# Helper: import module with the current tracing state
 # --------------------------
 
 
-def _reload_with_identity_decorators(monkeypatch):
+def _reload_executor_module(monkeypatch):
     """
-    cond_time/cond_gpu_time are decorators imported into the module namespace at import time.
-    For testability we reload the module after patching mneme.utils.cond_time/cond_gpu_time
-    to identity decorators.
+    tracing.traced decorators are applied at import time, so the module is
+    reloaded after a test enables tracing. The profiler is stubbed because
+    executors prepare their run chain's process on construction.
     """
-    # Patch mneme.utils BEFORE importing replay_executor
-    utils_mod = importlib.import_module("mneme.utils")
-
-    def identity_decorator(_field):
-        def deco(fn):
-            # Accept and ignore 'profile' kwarg; BaseExecutor._build passes it.
-            def wrapper(*args, **kwargs):
-                kwargs.pop("profile", None)
-                return fn(*args, **kwargs)
-
-            return wrapper
-
-        return deco
-
-    monkeypatch.setattr(utils_mod, "cond_time", identity_decorator, raising=True)
-    monkeypatch.setattr(utils_mod, "cond_gpu_time", identity_decorator, raising=True)
-
-    # Now reload target module so the decorators wrap with the identity versions.
     mod = importlib.import_module(MODULE_PATH)
     mod = importlib.reload(mod)
+    monkeypatch.setattr(replay_runs, "init_profiler", lambda: None, raising=True)
+    monkeypatch.setattr(replay_runs, "GpuKernelTimer", FakeGpuKernelTimer, raising=True)
     monkeypatch.setattr(mod.jit, "register_pass_plugin", lambda path: None, raising=True)
     monkeypatch.setattr(mod.jit, "check_pass_plugin", lambda path: None, raising=True)
     return mod
@@ -237,7 +240,7 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
     """make sure tracing properly capturs the expected stages"""
 
     events, flushes = _capture_tracing(monkeypatch)
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     class Snapshot(FakeSnapshot):
         def __eq__(self, other):
@@ -257,18 +260,21 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
     monkeypatch.setattr(mod.jit, "codegen_object", codegen)
     function = FakeDeviceFunction()
     monkeypatch.setattr(
-        mod.DeviceModule, "from_MemBuffer",
+        replay_runs.DeviceModule, "from_MemBuffer",
         lambda _: FakeDeviceModule(device_func=function),
     )
-    executor = mod.BaseExecutor(record_db=record_db, record_id="rid", iterations=3)
+    executor = mod.BaseExecutor(
+        record_db=record_db,
+        record_id="rid",
+        run_chain=replay_runs.default_run_chain(iterations=3),
+    )
     executor.link_ir()
     with executor:
-        result = mod.ExperimentResult()
         config = mod.ExperimentConfiguration()
-        executor._execute(result, config, FakeModule())
+        outcome = executor.execute(config, FakeModule())
 
-    assert result.verified is verified
-    assert result.executed
+    assert outcome.results["verification"].verified is verified
+    assert outcome.executed_every_run
     assert calls == [
         "default<O3>", "codegen", "purge-autoinit", "default<O3>", "codegen"
     ]
@@ -278,7 +284,7 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
         "metadata.load", "metadata.record", "snapshot.prologue.open",
         "snapshot.epilogue.open", "verify.noop", "ir.link", "ir.clone",
         "ir.preprocess", "ir.optimize", "ir.codegen", "execution.verification",
-        "execution.tracked", "verify.compare", "snapshot.cleanup", "experiment",
+        "execution.timing", "verify.compare", "snapshot.cleanup", "experiment",
     } <= names
     for name in ("metadata.load", "metadata.record"):
         metadata, = [event for event in events if event["name"] == name]
@@ -288,6 +294,8 @@ def test_trace_pipeline_covers_stages_and_preserves_execution(
     assert experiment["args"]["configuration"] == config.to_dict()
     comparison, = [e for e in events if e["name"] == "verify.compare"]
     assert comparison["args"]["verified"] is verified
+    timing, = [e for e in events if e["name"] == "execution.timing"]
+    assert timing["args"] == {"iterations": 3, "warmup": 2}
     assert len(flushes) >= 5
 
 
@@ -295,7 +303,7 @@ def test_trace_flushes_when_an_executor_stage_raises(monkeypatch):
     """make sure trace files are still flushed after an exception"""
 
     events, flushes = _capture_tracing(monkeypatch)
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
     _patch_executor_init_dependencies(
         monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
     )
@@ -306,9 +314,9 @@ def test_trace_flushes_when_an_executor_stage_raises(monkeypatch):
     def fail(*args):
         raise RuntimeError("build failed")
 
-    monkeypatch.setattr(executor, "_build", fail)
+    monkeypatch.setattr(executor, "build", fail)
     with pytest.raises(RuntimeError, match="build failed"):
-        executor._execute(mod.ExperimentResult(), mod.ExperimentConfiguration(), FakeModule())
+        executor.execute(mod.ExperimentConfiguration(), FakeModule())
     experiment, = [e for e in events if e["name"] == "experiment"]
     assert experiment["args"]["error"] == "RuntimeError"
     assert flushes == [len(events)]
@@ -316,12 +324,18 @@ def test_trace_flushes_when_an_executor_stage_raises(monkeypatch):
 
 
 def test_baseexecutor_init_sets_gpu_affinity_and_loads_records(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     calls = {"set_device": [], "get_arch": 0, "get_count": 0, "from_json": []}
+    device_calls = []
 
     def fake_set_device(d):
         calls["set_device"].append(d)
+        device_calls.append("set_device")
+
+    monkeypatch.setattr(
+        replay_runs, "init_profiler", lambda: device_calls.append("init_profiler")
+    )
 
     def fake_get_arch():
         calls["get_arch"] += 1
@@ -345,8 +359,9 @@ def test_baseexecutor_init_sets_gpu_affinity_and_loads_records(monkeypatch):
         mod.RecordedExecution, "from_json", staticmethod(fake_from_json), raising=True
     )
 
+    run_chain = replay_runs.default_run_chain(iterations=5)
     ex = mod.BaseExecutor(
-        record_db="db.json", record_id="rid", device_id=3, iterations=5
+        record_db="db.json", record_id="rid", device_id=3, run_chain=run_chain
     )
 
     assert ex.records is rec
@@ -356,11 +371,12 @@ def test_baseexecutor_init_sets_gpu_affinity_and_loads_records(monkeypatch):
     assert ex.num_devices == 8
     assert calls["set_device"] == [3]
     assert calls["from_json"] == ["db.json"]
-    assert ex._iterations == 5
+    assert ex.run_chain is run_chain
+    assert device_calls == ["init_profiler", "set_device"]
 
 
 def test_baseexecutor_infers_single_record_id(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     kernel = FakeKernelDescr()
     rec = FakeRecordedExecution(kernel_instances={"only-rid": kernel})
@@ -379,7 +395,7 @@ def test_baseexecutor_infers_single_record_id(monkeypatch):
 def test_baseexecutor_rejects_ambiguous_record_id(
     monkeypatch, record_ids, expected_count
 ):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     kernel_instances = {record_id: FakeKernelDescr() for record_id in record_ids}
     rec = FakeRecordedExecution(kernel_instances=kernel_instances)
@@ -401,7 +417,7 @@ def test_baseexecutor_rejects_ambiguous_record_id(
 
 
 def test_baseexecutor_uses_explicit_record_id_with_multiple_instances(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     first = FakeKernelDescr(kernel_name="first")
     selected = FakeKernelDescr(kernel_name="selected")
@@ -420,7 +436,7 @@ def test_baseexecutor_uses_explicit_record_id_with_multiple_instances(monkeypatc
 def test_open_close_context_manager_opens_and_closes_resources(
     monkeypatch, noop_verifies
 ):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     kernel = FakeKernelDescr(
         prologue=FakeSnapshot(state="P", noop_verifies=noop_verifies),
@@ -448,7 +464,7 @@ def test_open_close_context_manager_opens_and_closes_resources(
 
 
 def test_link_ir_forwards_prune_and_internalize(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     kernel = FakeKernelDescr()
     rec = FakeRecordedExecution(kernel)
@@ -496,7 +512,7 @@ def test_set_new_ir_parses_and_prunes_replacement_ir(
     expected_parser,
     expected_data,
 ):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     kernel = FakeKernelDescr(kernel_name="K")
     rec = FakeRecordedExecution(kernel)
@@ -547,7 +563,7 @@ def test_set_new_ir_parses_and_prunes_replacement_ir(
 
 
 def test_preprocess_ir_calls_jit_hooks_based_on_config(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     # Setup executor with prologue/epilogue loaded
     pro = FakeSnapshot(state="P", args=[1, 2], num_args=2)
@@ -591,9 +607,8 @@ def test_preprocess_ir_calls_jit_hooks_based_on_config(monkeypatch):
         min_blocks_per_sm=2,
     )
     ir = FakeModule("root")
-    res = mod.ExperimentResult()
 
-    code_hash, out_ir = ex._preprocess_ir(res, cfg, ir)
+    code_hash, out_ir = ex._preprocess_ir(cfg, ir)
     assert out_ir is ir
     assert code_hash == "H0|A|D|L"
     assert [c[0] for c in calls] == ["args", "dims", "lb"]
@@ -601,177 +616,182 @@ def test_preprocess_ir_calls_jit_hooks_based_on_config(monkeypatch):
     ex.close()
 
 
-def test_build_sets_obj_size_when_track_true(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
-
-    kernel = FakeKernelDescr()
-    rec = FakeRecordedExecution(kernel)
-
-    monkeypatch.setattr(
-        mod.RecordedExecution, "from_json", staticmethod(lambda _: rec), raising=True
+@pytest.mark.parametrize("purge_autoinit", [False, True])
+def test_build_measures_stages_and_obj_size(monkeypatch, purge_autoinit):
+    mod = _reload_executor_module(monkeypatch)
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
     )
-    monkeypatch.setattr(mod, "set_device", lambda _: None, raising=True)
-    monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
-    monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
-
     ex = mod.BaseExecutor(record_db="x", record_id="rid")
 
     spy = {"pre": 0, "opt": 0, "cg": 0}
+    optimize_purges = []
 
-    def fake_pre(result, cfg, ir):
+    def fake_pre(cfg, ir):
         spy["pre"] += 1
         return "H", ir
 
-    def fake_opt(result, cfg, ir):
+    def fake_opt(cfg, ir, purge_autoinit):
         spy["opt"] += 1
+        optimize_purges.append(purge_autoinit)
 
-    def fake_cg(result, cfg, ir):
+    def fake_cg(cfg, ir):
         spy["cg"] += 1
         return FakeMemBuffer(size=999)
 
-    monkeypatch.setattr(
-        ex, "_preprocess_ir", lambda *a, **k: fake_pre(*a), raising=True
-    )
-    monkeypatch.setattr(ex, "_optimize", lambda *a, **k: fake_opt(*a), raising=True)
-    monkeypatch.setattr(ex, "_codegen", lambda *a, **k: fake_cg(*a), raising=True)
+    monkeypatch.setattr(ex, "_preprocess_ir", fake_pre, raising=True)
+    monkeypatch.setattr(ex, "_optimize", fake_opt, raising=True)
+    monkeypatch.setattr(ex, "_codegen", fake_cg, raising=True)
+    monkeypatch.setattr(mod.time, "perf_counter", iter([1.0, 3.0, 6.0, 10.0]).__next__)
 
-    res = mod.ExperimentResult()
     cfg = mod.ExperimentConfiguration()
     ir = FakeModule("x")
 
-    mb = ex._build(res, cfg, ir, track=True)
-    assert isinstance(mb, FakeMemBuffer)
-    assert res.obj_size == 999
-    assert spy == {"pre": 1, "opt": 1, "cg": 1}
-
-    # track=False should not set obj_size
-    res2 = mod.ExperimentResult()
-    mb2 = ex._build(res2, cfg, ir, track=False)
-    assert res2.obj_size == 0
-
-
-def test_run_records_resource_usage_when_track_true(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
-
-    kernel = FakeKernelDescr(kernel_name="K")
-    rec = FakeRecordedExecution(kernel)
-
-    monkeypatch.setattr(
-        mod.RecordedExecution, "from_json", staticmethod(lambda _: rec), raising=True
+    artifact = ex.build(cfg, ir, BuildVariant(purge_autoinit=purge_autoinit))
+    assert isinstance(artifact.object, FakeMemBuffer)
+    assert artifact.ir_module is not ir
+    assert artifact.stats == BuildStats(
+        preprocess_ir_time=2.0, opt_time=3.0, codegen_time=4.0, obj_size=999
     )
-    monkeypatch.setattr(mod, "set_device", lambda _: None, raising=True)
-    monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
-    monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
+    assert spy == {"pre": 1, "opt": 1, "cg": 1}
+    assert optimize_purges == [purge_autoinit]
 
-    # Provide prologue/epilogue states expected by _run_kernel
+
+def test_runs_record_resource_usage_and_noop_verifies(monkeypatch):
+    mod = _reload_executor_module(monkeypatch)
+    _patch_executor_init_dependencies(
+        monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr(kernel_name="K"))
+    )
+
+    class Snapshot(FakeSnapshot):
+        def __eq__(self, other):
+            return True
+
     ex = mod.BaseExecutor(record_db="x", record_id="rid")
-    ex._prologue = FakeSnapshot(state="P")
-    ex._epilogue = FakeSnapshot(state="E")
+    ex._prologue = Snapshot(state="P")
+    ex._epilogue = Snapshot(state="E")
+    ex.noop_verifies = True
 
     device_func = FakeDeviceFunction()
-    fake_dev_mod = FakeDeviceModule(device_func=device_func, kernel_name="K")
-
     monkeypatch.setattr(
-        mod.DeviceModule,
+        replay_runs.DeviceModule,
         "from_MemBuffer",
-        staticmethod(lambda mb: fake_dev_mod),
+        staticmethod(lambda mb: FakeDeviceModule(device_func=device_func)),
         raising=True,
     )
 
-    run_kernel_calls = []
+    built_variants = []
 
-    def fake_run_kernel(
-        result, config, kernel_name, device_func_in, iterations, **kwargs
-    ):
-        run_kernel_calls.append((kernel_name, iterations, kwargs.get("profile")))
-        # Exercise the DeviceFunction.profile is called by BaseExecutor._run_kernel,
-        # but here we shortcut; BaseExecutor._run uses this method.
+    def fake_build(cfg, root_ir, variant):
+        built_variants.append(variant)
+        return BuildArtifact(variant, root_ir, FakeMemBuffer(), BuildStats(obj_size=999))
 
-    monkeypatch.setattr(ex, "_run_kernel", fake_run_kernel, raising=True)
+    monkeypatch.setattr(ex, "build", fake_build, raising=True)
+    experiment = replay_runs.ReplayExperiment(
+        ex, mod.ExperimentConfiguration(), FakeModule()
+    )
 
-    res = mod.ExperimentResult()
-    cfg = mod.ExperimentConfiguration()
-    mb = FakeMemBuffer()
-    prologue = FakeMemStateRef()
-    epilogue = FakeMemStateRef()
+    verification = VerificationRun().execute(experiment)
+    TimingRun(iterations=1, warmup=0).execute(experiment)
+    timing = TimingRun(iterations=5, warmup=2).execute(experiment)
 
-    ex.noop_verifies = True
-    ex._run(res, cfg, mb, prologue, epilogue, verify=True, track=True, iterations=7)
-
-    assert run_kernel_calls == [("K", 7, True)]
-    assert res.noop_verifies is True
-    assert res.reg_usage == device_func.reg_usage
-    assert res.const_mem_usage == device_func.const_mem
-    assert res.local_mem_usage == device_func.local_mem
+    # Each variant is built once per experiment; the second timing run reuses it.
+    assert built_variants == [
+        BuildVariant(purge_autoinit=False), BuildVariant(purge_autoinit=True)
+    ]
+    assert [call[2:4] for call in device_func.profile_calls] == [("P", "E")] * 3
+    assert [call[-1] for call in device_func.profile_calls] == [1, 1, 7]
+    assert verification.verified is True
+    assert verification.noop_verifies is True
+    assert timing.exec_time == list(range(7))
+    assert timing.build.obj_size == 999
+    assert timing.reg_usage == device_func.reg_usage
+    assert timing.const_mem_usage == device_func.const_mem
+    assert timing.local_mem_usage == device_func.local_mem
 
 
 @pytest.mark.parametrize("short_circuit", [False, True])
 @pytest.mark.parametrize("verified", [False, True])
-def test_execute_orchestrates_verification_and_tracked_run(
+def test_execute_orchestrates_verification_and_timing_run(
     monkeypatch, short_circuit, verified
 ):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
-    shared_snap = FakeSnapshot(state="S")
+    class Snapshot(FakeSnapshot):
+        def __eq__(self, other):
+            return verified
+
+    shared_snap = Snapshot(state="S")
     kernel = FakeKernelDescr(prologue=shared_snap, epilogue=shared_snap)
-    rec = FakeRecordedExecution(kernel)
+    _patch_executor_init_dependencies(monkeypatch, mod, FakeRecordedExecution(kernel))
 
+    device_func = FakeDeviceFunction()
     monkeypatch.setattr(
-        mod.RecordedExecution, "from_json", staticmethod(lambda _: rec), raising=True
+        replay_runs.DeviceModule,
+        "from_MemBuffer",
+        staticmethod(lambda mb: FakeDeviceModule(device_func=device_func)),
+        raising=True,
     )
-    monkeypatch.setattr(mod, "set_device", lambda _: None, raising=True)
-    monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
-    monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
 
-    # Spy on _build and _run
     build_calls = []
-    built_modules = []
-    run_calls = []
+    artifacts = []
 
-    def fake_build(result, cfg, ir_mod, track):
-        build_calls.append((track, cfg.passes))
-        built_modules.append(ir_mod)
-        return FakeMemBuffer()
-
-    def fake_run(result, cfg, mem_buf, prologue, epilogue, verify, track, iters):
-        if verify:
-            result.verified = verified
-        run_calls.append((track, iters))
+    def fake_build(cfg, root_ir, variant):
+        build_calls.append((variant.purge_autoinit, cfg.passes))
+        artifact = BuildArtifact(variant, root_ir.clone(), FakeMemBuffer(), BuildStats())
+        artifacts.append(artifact)
+        return artifact
 
     ex = mod.BaseExecutor(
-        record_db="x", record_id="rid", iterations=3, short_circuit=short_circuit
+        record_db="x",
+        record_id="rid",
+        run_chain=replay_runs.default_run_chain(
+            iterations=3, short_circuit=short_circuit
+        ),
     )
     ex.open()  # load prologue/epilogue
 
-    monkeypatch.setattr(ex, "_build", fake_build, raising=True)
-    monkeypatch.setattr(ex, "_run", fake_run, raising=True)
+    monkeypatch.setattr(ex, "build", fake_build, raising=True)
 
-    res = mod.ExperimentResult()
     cfg = mod.ExperimentConfiguration()
     ir = FakeModule("root")
 
-    out_ir = ex._execute(res, cfg, ir)
+    outcome = ex.execute(cfg, ir)
 
     timing_skipped = short_circuit and not verified
-    expected_runs = [(False, 1)]
+    expected_launches = [1]
     expected_builds = [(False, "default<O3>")]
     if not timing_skipped:
-        expected_runs.append((True, 5))
+        expected_launches.append(5)
         expected_builds.append((True, "default<O3>"))
-    assert run_calls == expected_runs
+    assert [call[-1] for call in device_func.profile_calls] == expected_launches
     assert build_calls == expected_builds
-    assert res.executed is (not timing_skipped)
-    assert res.verified is verified
+    assert outcome.executed_every_run is (not timing_skipped)
+    assert outcome.results["verification"].verified is verified
+    assert ("timing" in outcome.results) is (not timing_skipped)
 
-    # A skipped timing run returns the verification module.
-    assert out_ir is built_modules[-1]
-    assert out_ir is not ir
+    # A skipped timing run leaves the verification build as the last one.
+    assert outcome.last_artifact is artifacts[-1]
+    assert outcome.last_artifact.ir_module is not ir
 
     ex.close()
 
 
+@pytest.mark.parametrize(
+    "runs, message",
+    [
+        ((), "at least one run"),
+        ((TimingRun(), VerificationRun(), TimingRun(warmup=0)), "repeated: timing"),
+    ],
+    ids=["empty", "repeated-kind"],
+)
+def test_run_chain_rejects_empty_or_repeated_kinds(runs, message):
+    with pytest.raises(ValueError, match=message):
+        replay_runs.RunChain(runs)
+
+
 def test_executor_registers_pass_plugins_after_its_own(monkeypatch, tmp_path):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
     _patch_executor_init_dependencies(
         monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
     )
@@ -786,7 +806,7 @@ def test_executor_registers_pass_plugins_after_its_own(monkeypatch, tmp_path):
 
 
 def test_executor_rejects_missing_pass_plugin(monkeypatch, tmp_path):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
     _patch_executor_init_dependencies(
         monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr())
     )
@@ -797,7 +817,7 @@ def test_executor_rejects_missing_pass_plugin(monkeypatch, tmp_path):
 
 
 def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     kernel = FakeKernelDescr()
     rec = FakeRecordedExecution(kernel)
@@ -809,31 +829,24 @@ def test_tuneworker_process_payload_sets_timestamps_and_gpu_id(monkeypatch):
     monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
     monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
 
-    # Avoid actual profiler init
-    monkeypatch.setattr(mod, "init_profiler", lambda: None, raising=True)
+    worker = mod.TuneWorker(record_db="x", record_id="rid", device_id=2)
 
-    worker = mod.TuneWorker(record_db="x", record_id="rid", device_id=2, iterations=3)
+    # Patch execute to avoid deeper pipeline.
+    def fake_execute(self, cfg, ir_mod):
+        return replay_runs.ChainOutcome({}, True, None)
 
-    # Patch _execute to avoid deeper pipeline; return a module
-    def fake_execute(self, result, cfg, ir_mod):
-        result.executed = True
-        return FakeModule("gen")
+    monkeypatch.setattr(mod.BaseExecutor, "execute", fake_execute, raising=True)
 
-    monkeypatch.setattr(mod.BaseExecutor, "_execute", fake_execute, raising=True)
-
-    res, out_ir = worker.process_payload(
-        FakeModule("root"), mod.ExperimentConfiguration()
-    )
+    res = worker.process_payload(FakeModule("root"), mod.ExperimentConfiguration())
 
     assert res.gpu_id == 2
     assert res.start_time != ""
     assert res.end_time != ""
     assert res.executed is True
-    assert isinstance(out_ir, FakeModule)
 
 
 def test_tuneworker_process_payload_reports_invalid_pipeline(monkeypatch):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     kernel = FakeKernelDescr()
     rec = FakeRecordedExecution(kernel)
@@ -844,18 +857,17 @@ def test_tuneworker_process_payload_reports_invalid_pipeline(monkeypatch):
     monkeypatch.setattr(mod, "set_device", lambda _: None, raising=True)
     monkeypatch.setattr(mod, "get_device_arch", lambda: "sm", raising=True)
     monkeypatch.setattr(mod, "get_device_count", lambda: 1, raising=True)
-    monkeypatch.setattr(mod, "init_profiler", lambda: None, raising=True)
 
-    worker = mod.TuneWorker(record_db="x", record_id="rid", device_id=2, iterations=3)
+    worker = mod.TuneWorker(record_db="x", record_id="rid", device_id=2)
 
-    def fake_execute(self, result, cfg, ir_mod):
+    def fake_execute(self, cfg, ir_mod):
         raise mod.jit.InvalidPassPipelineError(
             "Invalid LLVM pass pipeline 'defualt<O3>': unknown pass name 'defualt<O3>'"
         )
 
-    monkeypatch.setattr(mod.BaseExecutor, "_execute", fake_execute, raising=True)
+    monkeypatch.setattr(mod.BaseExecutor, "execute", fake_execute, raising=True)
 
-    res, _ = worker.process_payload(FakeModule("root"), mod.ExperimentConfiguration())
+    res = worker.process_payload(FakeModule("root"), mod.ExperimentConfiguration())
 
     assert res.failed is True
     assert res.executed is False
@@ -866,7 +878,7 @@ def test_tuneworker_process_payload_reports_invalid_pipeline(monkeypatch):
 @pytest.mark.parametrize("short_circuit", [False, True])
 def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circuit):
     events, flushes = _capture_tracing(monkeypatch)
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     # Save the real staticmethod BEFORE monkeypatching the class name.
     real_run = mod.TuneWorker.run
@@ -881,22 +893,11 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
     pass_plugins = ["/path/libMyPass.so"]
 
     class FakeWorker:
-        def __init__(
-            self,
-            record_db,
-            record_id,
-            device_id,
-            iterations,
-            warmup,
-            short_circuit,
-            pass_plugins,
-        ):
+        def __init__(self, record_db, record_id, device_id, run_chain, pass_plugins):
             self.record_db = record_db
             self.record_id = record_id
             self.device_id = device_id
-            self.iterations = iterations
-            self.warmup = warmup
-            worker_options.append((short_circuit, pass_plugins))
+            worker_options.append((run_chain, pass_plugins))
 
         def link_ir(self):
             return FakeModule("root_ir")
@@ -913,8 +914,7 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
 
         def process_payload(self, ir_module, config):
             process_ir_names.append(ir_module.name)
-            res = mod.ExperimentResult(executed=True, verified=True)
-            return res, FakeModule("ir_out")
+            return mod.ExperimentResult(executed=True, verified=True)
 
     # Replace TuneWorker constructor used inside run()
     monkeypatch.setattr(
@@ -943,6 +943,8 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
     )
     req_q.put({"payload": "terminate"})
 
+    run_chain = replay_runs.default_run_chain(iterations=3, short_circuit=short_circuit)
+
     # Call the saved real staticmethod
     real_run(
         request_q=req_q,
@@ -950,14 +952,13 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
         record_db="db.json",
         record_id="rid",
         device_id=0,
-        iterations=3,
         results_db_dir=str(tmp_path),
         state=state,
-        short_circuit=short_circuit,
+        run_chain=run_chain,
         pass_plugins=pass_plugins,
     )
 
-    assert worker_options == [(short_circuit, pass_plugins)]
+    assert worker_options == [(run_chain, pass_plugins)]
     assert state.set_called == 1
     assert set_ir_calls == ["replacement asm"]
     assert process_ir_names == ["replacement_ir_clone"]
@@ -972,7 +973,7 @@ def test_tuneworker_run_process_and_terminate(monkeypatch, tmp_path, short_circu
 
 
 def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
-    mod = _reload_with_identity_decorators(monkeypatch)
+    mod = _reload_executor_module(monkeypatch)
 
     real_run = mod.TuneWorker.run
 
@@ -985,16 +986,7 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
     )
 
     class FakeWorker:
-        def __init__(
-            self,
-            record_db,
-            record_id,
-            device_id,
-            iterations,
-            warmup,
-            short_circuit,
-            pass_plugins,
-        ):
+        def __init__(self, record_db, record_id, device_id, run_chain, pass_plugins):
             self.device_id = device_id
 
         def link_ir(self):
@@ -1034,9 +1026,9 @@ def test_tuneworker_run_logs_failed_set_ir(monkeypatch, tmp_path):
         record_db="db.json",
         record_id="rid",
         device_id=3,
-        iterations=3,
         results_db_dir=str(tmp_path),
         state=state,
+        run_chain=replay_runs.default_run_chain(),
     )
 
     assert state.set_called == 1

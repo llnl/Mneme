@@ -6,6 +6,7 @@ import pytest
 
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
 from mneme.futures import EvalFuture
+from mneme.replay_runs import default_run_chain
 from mneme.async_executor import (
     pop,
     TuneWorkerHandle,
@@ -131,8 +132,8 @@ def handle(monkeypatch):
         record_db="db",
         record_id="rid",
         device_id=0,
-        iterations=3,
         results_db_dir="/tmp",
+        run_chain=default_run_chain(iterations=3),
     )
     return h
 
@@ -349,8 +350,8 @@ def test_startup_failures_stop_respawning_after_limit(monkeypatch):
         record_db="db",
         record_id="rid",
         device_id=0,
-        iterations=3,
         results_db_dir="/tmp",
+        run_chain=default_run_chain(iterations=3),
         max_startup_failures=3,
         on_startup_failure_limit=lambda worker, error: failures.append(
             (worker.idx, error)
@@ -419,9 +420,10 @@ def test_submit_after_executor_broken_returns_failed_future(monkeypatch):
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("pass_run_chain", [False, True], ids=["keywords", "run_chain"])
 @pytest.mark.parametrize("short_circuit", [False, True])
-def test_async_executor_preserves_short_circuit_on_worker_respawn(
-    monkeypatch, short_circuit
+def test_async_executor_preserves_run_chain_on_worker_respawn(
+    monkeypatch, short_circuit, pass_run_chain
 ):
     import mneme.async_executor as mod
 
@@ -429,7 +431,7 @@ def test_async_executor_preserves_short_circuit_on_worker_respawn(
 
     def make_process(target, args, daemon):
         options = inspect.signature(target).bind(*args).arguments
-        worker_options.append(options["short_circuit"])
+        worker_options.append(options["run_chain"])
         return DummyProcess()
 
     monkeypatch.setattr(mod.threading, "Thread", NoopThread, raising=True)
@@ -437,13 +439,18 @@ def test_async_executor_preserves_short_circuit_on_worker_respawn(
     monkeypatch.setattr(mod, "ProcessEvent", DummyEvent)
     monkeypatch.setattr(mod, "ProcessQueue", DummyQueue)
 
+    run_chain = default_run_chain(iterations=3, short_circuit=short_circuit)
+    run_options = (
+        {"run_chain": run_chain}
+        if pass_run_chain
+        else {"iterations": 3, "short_circuit": short_circuit}
+    )
     exe = mod.AsyncReplayExecutor(
         record_db="db",
         record_id="rid",
-        iterations=3,
         results_db_dir="/tmp",
         num_workers=1,
-        short_circuit=short_circuit,
+        **run_options,
     )
     worker = exe.workers[0]
     worker._state.set()
@@ -458,7 +465,24 @@ def test_async_executor_preserves_short_circuit_on_worker_respawn(
     monkeypatch.setattr(worker, "_spawn_process", stop_after_respawn)
     worker._shadow_process_loop()
 
-    assert worker_options == [short_circuit, short_circuit]
+    assert worker_options == [run_chain, run_chain]
+
+
+@pytest.mark.parametrize(
+    "run_options, message",
+    [
+        ({"run_chain": default_run_chain(), "iterations": 3}, "not both"),
+        ({"run_chain": default_run_chain(), "warmup": 0}, "not both"),
+        ({"run_chain": default_run_chain(), "short_circuit": False}, "not both"),
+        ({}, "needs run_chain or iterations"),
+    ],
+)
+def test_async_executor_rejects_ambiguous_run_options(run_options, message):
+    with pytest.raises(ValueError, match=message):
+        AsyncReplayExecutor(
+            record_db="db", record_id="rid", results_db_dir="/tmp", num_workers=0,
+            **run_options,
+        )
 
 
 def test_async_executor_submit(monkeypatch):

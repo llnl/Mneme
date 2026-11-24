@@ -12,6 +12,7 @@ from typing import Callable, Dict, Optional, Sequence, Union
 from mneme.futures import EvalFuture
 from mneme.mneme_logging import logger
 from mneme.replay_executor import TuneWorker
+from mneme.replay_runs import RunChain, default_run_chain
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
 
 
@@ -130,14 +131,12 @@ class TuneWorkerHandle:
         record_db: str,
         record_id: str,
         device_id: int,
-        iterations: int,
         results_db_dir: str,
-        warmup: int = 2,
+        run_chain: RunChain,
         max_startup_failures: int = 3,
         on_startup_failure_limit: Optional[
             Callable[["TuneWorkerHandle", str], None]
         ] = None,
-        short_circuit: bool = False,
         pass_plugins: Sequence[str] = (),
     ):
         """
@@ -156,17 +155,13 @@ class TuneWorkerHandle:
             Identifier of the recorded kernel instance inside ``record_db``.
         device_id : int
             Device id (GPU index) assigned to the underlying worker process.
-        iterations : int
-            Number of kernel iterations used by the worker for the tracked execution.
         results_db_dir : str
             Directory where the worker writes logs and optional artifacts.
-        warmup : int
-            Number of warmup iterations executed before measured iterations.
+        run_chain : RunChain
+            Runs the worker executes for every experiment.
         max_startup_failures : int
             Maximum number of consecutive worker exits before readiness before this
             handle stops respawning the worker.
-        short_circuit : bool
-            Whether to skip timing runs when verification fails.
         pass_plugins : Sequence[str]
             Pass plugin libraries the worker loads into the JIT.
 
@@ -187,10 +182,8 @@ class TuneWorkerHandle:
         self.record_db = record_db
         self.record_id = record_id
         self.device_id = device_id
-        self.iterations = iterations
         self.results_db_dir = results_db_dir
-        self.warmup = warmup
-        self.short_circuit = short_circuit
+        self.run_chain = run_chain
         self.pass_plugins = pass_plugins
         self.max_startup_failures = max_startup_failures
         self._startup_failures = 0
@@ -236,11 +229,9 @@ class TuneWorkerHandle:
                 self.record_db,
                 self.record_id,
                 self.device_id,
-                self.iterations,
                 self.results_db_dir,
                 self._state,
-                self.warmup,
-                self.short_circuit,
+                self.run_chain,
                 self.pass_plugins,
             ),
             daemon=False,
@@ -457,16 +448,23 @@ class AsyncReplayExecutor:
         self,
         record_db: str,
         record_id: str,
-        iterations: int,
-        results_db_dir: str,
-        num_workers: int,
-        warmup: int = 2,
+        iterations: Optional[int] = None,
+        results_db_dir: Optional[str] = None,
+        num_workers: Optional[int] = None,
+        warmup: Optional[int] = None,
         max_startup_failures: int = 3,
-        short_circuit: bool = False,
+        short_circuit: Optional[bool] = None,
         pass_plugins: Sequence[str] = (),
+        *,
+        run_chain: Optional[RunChain] = None,
     ):
         """
         Construct an asynchronous executor with a fixed-size worker pool.
+
+        The runs of every experiment are given either as ``run_chain`` or by
+        ``iterations`` (required then), ``warmup`` (default 2) and
+        ``short_circuit`` (default ``False``), which build
+        :func:`~mneme.replay_runs.default_run_chain`.
 
         Parameters
         ----------
@@ -474,31 +472,72 @@ class AsyncReplayExecutor:
             Path to the recorded execution database/file.
         record_id : str
             Identifier of the recorded kernel instance inside ``record_db``.
-        iterations : int
-            Number of kernel iterations performed by each worker per tracked run.
+        iterations : int, optional
+            Number of measured launches of the timing run.
         results_db_dir : str
             Directory where workers write logs and optional output artifacts.
+            Required.
         num_workers : int
-            Number of worker processes to launch.
-        warmup : int
-            Number of warmup iterations each worker executes before measured iterations.
+            Number of worker processes to launch. Required.
+        warmup : int, optional
+            Number of launches of the timing run before the measured ones.
         max_startup_failures : int
             Maximum number of consecutive pre-readiness startup failures allowed per
             worker before that worker stops respawning.
-        short_circuit : bool
-            Whether to skip timing runs when verification fails.
+        short_circuit : bool, optional
+            Whether to skip the timing run when verification fails.
         pass_plugins : Sequence[str]
             Pass plugin libraries every worker loads into the JIT.
+        run_chain : RunChain, optional
+            Runs every worker executes per experiment. Mutually exclusive with
+            ``iterations``, ``warmup`` and ``short_circuit``.
+
+        Raises
+        ------
+        TypeError
+            If ``results_db_dir`` or ``num_workers`` is missing.
+        ValueError
+            If ``run_chain`` is given together with ``iterations``, ``warmup`` or
+            ``short_circuit``, or if neither ``run_chain`` nor ``iterations`` is
+            given.
         """
+        if results_db_dir is None:
+            raise TypeError(
+                "AsyncReplayExecutor.__init__() missing required argument: "
+                "'results_db_dir'"
+            )
+        if num_workers is None:
+            raise TypeError(
+                "AsyncReplayExecutor.__init__() missing required argument: "
+                "'num_workers'"
+            )
+        run_options = {
+            name: value
+            for name, value in (
+                ("iterations", iterations),
+                ("warmup", warmup),
+                ("short_circuit", short_circuit),
+            )
+            if value is not None
+        }
+        if run_chain is not None and run_options:
+            raise ValueError(
+                "AsyncReplayExecutor takes either run_chain or "
+                "iterations/warmup/short_circuit, not both; got run_chain and "
+                f"{', '.join(run_options)}"
+            )
+        if run_chain is None:
+            if iterations is None:
+                raise ValueError("AsyncReplayExecutor needs run_chain or iterations")
+            run_chain = default_run_chain(**run_options)
+
         self.global_q = _WorkQueue()
         self._futures: Dict[int, EvalFuture] = {}
         self._next_id = 0
         self._lock = threading.Lock()
         self._ir_revision = 0
         self._ir_data = None
-        self.iterations = iterations
-        self.warmup = warmup
-        self.short_circuit = short_circuit
+        self.run_chain = run_chain
         self.max_startup_failures = max_startup_failures
         self._num_workers = num_workers
         self._failed_workers = set()
@@ -513,12 +552,10 @@ class AsyncReplayExecutor:
                     record_db,
                     record_id,
                     i,
-                    iterations,
                     results_db_dir,
-                    warmup=warmup,
+                    run_chain,
                     max_startup_failures=max_startup_failures,
                     on_startup_failure_limit=self._handle_startup_failure_limit,
-                    short_circuit=short_circuit,
                     pass_plugins=pass_plugins,
                 )
             )

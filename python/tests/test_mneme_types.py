@@ -4,7 +4,10 @@ import copy
 from mneme.mneme_types import (
     dim3,
     ExperimentConfiguration,
+    BuildStats,
     ExperimentResult,
+    TimingResult,
+    VerificationResult,
     _to_serializable,
 )
 
@@ -179,8 +182,35 @@ def test_experiment_configuration_hash_deterministic_across_dict_key_order():
     assert h1 == h2
 
 
-def test_experiment_result_to_dict_from_dict_roundtrip_and_defaults():
-    r = ExperimentResult(
+PRE_RUN_CHAIN_RESULT = {
+    "preprocess_ir_time": 0.5,
+    "opt_time": 1.5,
+    "codegen_time": 2.5,
+    "obj_size": 4096,
+    "exec_time": [7, 8, 9],
+    "verified": True,
+    "noop_verifies": True,
+    "executed": True,
+    "failed": False,
+    "start_time": "2025-01-01T00:00:00",
+    "end_time": "2025-01-01T00:00:01",
+    "gpu_id": 1,
+    "const_mem_usage": 1,
+    "local_mem_usage": 2,
+    "reg_usage": 3,
+    "error": "",
+}
+
+VERIFICATION_BUILD_FIELDS = {
+    "verification_preprocess_ir_time",
+    "verification_opt_time",
+    "verification_codegen_time",
+    "verification_obj_size",
+}
+
+
+def _flat_result():
+    return ExperimentResult(
         preprocess_ir_time=1.0,
         opt_time=2.0,
         codegen_time=3.0,
@@ -197,14 +227,94 @@ def test_experiment_result_to_dict_from_dict_roundtrip_and_defaults():
         reg_usage=3,
         error="",
     )
+
+
+def _short_circuited_result():
+    verification = VerificationResult(build=BuildStats(opt_time=1.0, obj_size=8))
+    return ExperimentResult([verification], executed=False)
+
+
+@pytest.mark.parametrize(
+    "make_result, executed_runs",
+    [
+        (_flat_result, {"verification", "timing"}),
+        (_short_circuited_result, {"verification"}),
+        (
+            lambda: ExperimentResult.from_dict(PRE_RUN_CHAIN_RESULT),
+            {"verification", "timing"},
+        ),
+    ],
+    ids=["both-runs", "timing-short-circuited", "legacy-dict"],
+)
+def test_experiment_result_to_dict_from_dict_roundtrip_and_defaults(
+    make_result, executed_runs
+):
+    r = make_result()
     d = r.to_dict()
     json.dumps(d)  # serializable
 
     r2 = ExperimentResult.from_dict(d)
     assert r2 == r
+    assert set(r2.runs) == executed_runs
+    if "timing" in executed_runs:
+        assert r2.exec_time is r2.timing.exec_time
 
-    # Ensure exec_time default_factory gives independent lists
-    a = ExperimentResult()
-    b = ExperimentResult()
-    a.exec_time.append(1)
-    assert b.exec_time == []
+    # to_dict and from_dict copy, so neither side aliases the other.
+    d["exec_time"].append(-1)
+    r2.to_dict()["exec_time"].append(-2)
+    assert -1 not in r2.exec_time and -2 not in r2.exec_time
+    assert -1 not in r.exec_time
+
+
+def test_experiment_result_serializes_each_run_build_under_its_own_fields():
+    verification = VerificationResult(
+        build=BuildStats(
+            preprocess_ir_time=1.0, opt_time=2.0, codegen_time=3.0, obj_size=4
+        ),
+        verified=True,
+        noop_verifies=False,
+    )
+    timing = TimingResult(
+        build=BuildStats(
+            preprocess_ir_time=5.0, opt_time=6.0, codegen_time=7.0, obj_size=8
+        ),
+        exec_time=[10, 11],
+        reg_usage=12,
+    )
+    d = ExperimentResult([verification, timing], executed=True).to_dict()
+
+    assert set(d) == set(PRE_RUN_CHAIN_RESULT) | VERIFICATION_BUILD_FIELDS
+    assert {name: d[name] for name in VERIFICATION_BUILD_FIELDS} == {
+        "verification_preprocess_ir_time": 1.0,
+        "verification_opt_time": 2.0,
+        "verification_codegen_time": 3.0,
+        "verification_obj_size": 4,
+    }
+    assert (d["preprocess_ir_time"], d["opt_time"], d["codegen_time"]) == (5.0, 6.0, 7.0)
+    assert d["obj_size"] == 8
+    restored = ExperimentResult.from_dict(d)
+    assert restored.verification == verification
+    assert restored.timing == timing
+
+    skipped = ExperimentResult([verification]).to_dict()
+    assert skipped["exec_time"] == []
+    assert (skipped["obj_size"], skipped["opt_time"], skipped["reg_usage"]) == (0, 0.0, 0)
+
+
+def test_experiment_result_from_dict_loads_pre_run_chain_results():
+    r = ExperimentResult.from_dict(PRE_RUN_CHAIN_RESULT)
+
+    assert r.verification == VerificationResult(verified=True, noop_verifies=True)
+    assert r.timing == TimingResult(
+        build=BuildStats(
+            preprocess_ir_time=0.5, opt_time=1.5, codegen_time=2.5, obj_size=4096
+        ),
+        exec_time=[7, 8, 9],
+        const_mem_usage=1,
+        local_mem_usage=2,
+        reg_usage=3,
+    )
+    assert (r.verified, r.exec_time, r.opt_time, r.gpu_id) == (True, [7, 8, 9], 1.5, 1)
+    assert r.to_dict() == dict(
+        PRE_RUN_CHAIN_RESULT, **{name: 0 for name in VERIFICATION_BUILD_FIELDS}
+    )

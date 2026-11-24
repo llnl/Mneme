@@ -14,13 +14,11 @@ At a high level, an "experiment" in Mneme is:
   3) Link recorded LLVM IR modules into a single IR module suitable for replay.
   4) Apply optional IR specializations (arguments, launch dims, launch bounds).
   5) Run an optimization pipeline and generate a device object.
-  6) Load the object onto the GPU, run the kernel, and optionally profile.
-  7) Verify correctness by comparing epilogue vs prologue expectations.
+  6) Execute a chain of runs (see :mod:`mneme.replay_runs`): by default a
+     verification run that compares the device memory with the recorded
+     epilogue, then a timing run that collects timing/resource metrics.
 
-The pipeline is intentionally organized so that:
-  * verification can be done with minimal instrumentation,
-  * tracked runs collect timing/resource metrics, and
-  * worker processes can amortize initialization costs by reusing a single executor.
+Worker processes amortize initialization costs by reusing a single executor.
 
 Public API
 ----------
@@ -32,29 +30,30 @@ TuneWorker:
 """
 
 import os
+import time
 from datetime import datetime, timezone
 from multiprocessing import Event, Queue
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
 from mneme import tracing
-from mneme.device import (
-    DeviceFunction,
-    DeviceModule,
-    get_device_arch,
-    get_device_count,
-    set_device,
-)
+from mneme.device import get_device_arch, get_device_count, set_device
 from mneme.llvm._lib_path_config import MNEME_PASS_PLUGIN_LIB
 from mneme.llvm.buffer import MemBufferRef
 from mneme.llvm.module import ModuleRef, parse_assembly, parse_bitcode
 from mneme.mneme_logging import logger
-from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
+from mneme.mneme_types import BuildStats, ExperimentConfiguration, ExperimentResult
 from mneme.pass_plugins import resolve_pass_plugins
-from mneme.profile import init_profiler
 from mneme.proteus import jit
-from mneme.recorded_execution import RecordedExecution, MemStateRef
-from mneme.utils import cond_gpu_time, cond_time
+from mneme.recorded_execution import RecordedExecution
+from mneme.replay_runs import (
+    BuildArtifact,
+    BuildVariant,
+    ChainOutcome,
+    ReplayExperiment,
+    RunChain,
+    default_run_chain,
+)
 
 
 def noop_verifies_warning(record_id: str) -> str:
@@ -76,7 +75,7 @@ class BaseExecutor:
       * one kernel instance inside that database (record_id), inferred when the
         database contains exactly one instance,
       * one GPU device (device_id),
-      * and an iteration count for measured runs.
+      * and the run chain every experiment executes (run_chain).
 
     Responsibilities
     ---------------
@@ -90,8 +89,8 @@ class BaseExecutor:
         - _preprocess_ir(): apply specialization transforms and compute a variant hash
         - _optimize(): run pass pipeline / O-level selection
         - _codegen(): lower to a device object (MemBufferRef)
-        - _run(): load object, resolve kernel, execute and optionally profile
-        - _execute(): orchestrate verification + cleanup + tracked run
+        - build(): run the three stages on a clone of the IR and measure them
+        - execute(): execute the run chain on one configuration
 
     Lifecycle
     ---------
@@ -109,7 +108,7 @@ class BaseExecutor:
     ------------------
     * A BaseExecutor instance is intended to be used within a single process.
       (Workers should construct one executor per worker process.)
-    * open() must be called before any execution; _execute() assumes prologue and
+    * open() must be called before any execution; execute() assumes prologue and
       epilogue states are loaded.
     * link_ir() returns a linked IR module representing the recorded kernel; callers
       should clone before mutation if reusing across experiments.
@@ -120,12 +119,19 @@ class BaseExecutor:
         self,
         record_db: str = "",
         record_id: Optional[str] = None,
-        iterations: int = 3,
+        run_chain: Optional[RunChain] = None,
         device_id: int = 0,
-        warmup: int = 2,
-        short_circuit: bool = False,
         pass_plugins: Sequence[str] = (),
     ):
+        """
+        Parameters
+        ----------
+        run_chain : RunChain, optional
+            Runs every experiment executes; ``default_run_chain()`` when omitted.
+            The chain prepares the process before any device call.
+        """
+        self.run_chain = run_chain if run_chain is not None else default_run_chain()
+        self.run_chain.prepare_process()
         self.record_db = record_db
         self.device_id = device_id
         with tracing.span(
@@ -150,9 +156,6 @@ class BaseExecutor:
         self._epilogue = None
         self._prologue = None
         self.noop_verifies = False
-        self._iterations = iterations
-        self._warmup = warmup
-        self._short_circuit = short_circuit
         self.num_devices = get_device_count()
         set_device(device_id)
         logger.debug(
@@ -245,10 +248,8 @@ class BaseExecutor:
         return new_ir
 
     @tracing.traced("ir.preprocess")
-    @cond_time("preprocess_ir_time")
     def _preprocess_ir(
         self,
-        result: ExperimentResult,
         config: ExperimentConfiguration,
         llvm_ir: ModuleRef,
     ) -> Tuple[str, ModuleRef]:
@@ -283,9 +284,6 @@ class BaseExecutor:
 
         Parameters
         ----------
-        result : ExperimentResult
-            The experiment result object that may be updated during preprocessing.
-            (Currently unused directly, but modified by the decorator (``cond_time``)).
         config : ExperimentConfiguration
             Configuration controlling which IR specializations are applied.
         llvm_ir : ModuleRef
@@ -337,10 +335,8 @@ class BaseExecutor:
         return code_hash, llvm_ir
 
     @tracing.traced("ir.optimize")
-    @cond_time("opt_time")
     def _optimize(
         self,
-        result: ExperimentResult,
         config: ExperimentConfiguration,
         ir_module: ModuleRef,
         purge_autoinit: bool,
@@ -356,9 +352,6 @@ class BaseExecutor:
 
         Parameters
         ----------
-        result : ExperimentResult
-            The experiment result object. Although not modified directly in this
-            method, it is modified by the decorator (``cond_time``).
         config : ExperimentConfiguration
             Configuration controlling the optimization pipeline. Relevant fields
             include:
@@ -385,10 +378,8 @@ class BaseExecutor:
         jit.optimize(ir_module, self.device_arch, config.passes, config.codegen_opt)
 
     @tracing.traced("ir.codegen")
-    @cond_time("codegen_time")
     def _codegen(
         self,
-        result: ExperimentResult,
         config: ExperimentConfiguration,
         ir_module: ModuleRef,
     ) -> MemBufferRef:
@@ -403,9 +394,6 @@ class BaseExecutor:
 
         Parameters
         ----------
-        result : ExperimentResult
-            Experiment result object. Not modified directly by this method, but
-            modified from the decorator (``cond_time``).
         config : ExperimentConfiguration
             Experiment configuration specifying code-generation parameters:
             * ``codegen_opt`` – Optimization level for the code-generation backend.
@@ -433,270 +421,95 @@ class BaseExecutor:
             ir_module, self.device_arch, config.codegen_opt
         )
 
-    @cond_gpu_time("exec_time")
-    def _run_kernel(
-        self,
-        result: ExperimentResult,
-        config: ExperimentConfiguration,
-        kernel_name: str,
-        device_func: DeviceFunction,
-        iterations: int,
-    ) -> None:
-        """
-        Execute the kernel on the device using the provided launch configuration.
-
-        This method invokes the device-level profiling interface to run the kernel
-        for the specified number of iterations. Launch parameters (grid, block, and
-        shared memory), as well as the recorded prologue and epilogue states, are
-        passed directly to the device runtime. Profiling results—such as execution
-        times—are captured internally by the device function object and propagated
-        into the associated :class:`ExperimentResult`.
-
-        Parameters
-        ----------
-        result : ExperimentResult
-            The result object that accumulates execution metrics. Although this
-            method does not write to it directly, profiling performed by the device
-            backend updates fields that will later be reflected in the result through
-            the ``cond_gpu_time`` decorator.
-        config : ExperimentConfiguration
-            Experiment configuration specifying launch parameters, shared-memory
-            requirements, and specialization settings.
-        kernel_name: str
-            The name of the kernel to be executed. The parameter is not directly used by the function,
-            but it is actually used by the ``decorator``.
-        device_func : DeviceFunction
-            The device-side kernel entry point obtained from the compiled module.
-            Must support the ``profile`` interface for execution and timing.
-        iterations : int
-            Number of times the kernel should be executed. Typically more than one
-            iteration is used for performance characterization and variance analysis.
-
-        Notes
-        -----
-        * Actual execution and profiling of the kernel is handled by
-          ``device_func.profile``.
-        * Both prologue and epilogue states are forwarded to the device runtime so
-          that Mneme’s record–replay mechanism can validate kernel behavior and
-          collect replay-specific metrics.
-        * Errors raised by the device runtime will propagate upward to the caller.
-
-        """
-        device_func.profile(
-            config.grid,
-            config.block,
-            self._prologue._state,
-            self._epilogue._state,
-            config.shared_mem,
-            iterations,
-        )
-
     @tracing.traced("ir.build")
-    def _build(
+    def build(
         self,
-        result: ExperimentResult,
         config: ExperimentConfiguration,
-        ir_module: ModuleRef,
-        track: bool,
-    ) -> MemBufferRef:
+        root_ir: ModuleRef,
+        variant: BuildVariant,
+    ) -> BuildArtifact:
         """
-        Build the executable device kernel from the given IR module.
+        Build the device kernel for ``config`` from a clone of ``root_ir``.
 
-        This method runs the full compilation pipeline on the provided IR module:
-        preprocessing, optimization, and final code generation. The resulting
-        device-ready binary is returned as a :class:`MemBufferRef`. When tracking
-        is enabled, additional metadata such as object size is recorded into the
-        provided :class:`ExperimentResult`.
-
-        The build process consists of the following stages:
+        The build runs three timed stages on the clone:
 
         1. **IR preprocessing**
            Applies specialization, dimension-dependent transformations, and optional
-           launch-bound insertion. This step updates the internal code hash and
-           prepares the IR for optimization.
+           launch-bound insertion.
 
         2. **Optimization**
-           Runs the configured optimization passes (e.g., ``O3`` or user-defined
-           pipelines). If profiling is enabled, optimization timing is recorded in
-           the experiment result.
+           Runs ``purge-autoinit`` first when ``variant.purge_autoinit`` is set,
+           then the configured optimization passes (e.g., ``O3`` or user-defined
+           pipelines).
 
         3. **Code generation**
-           Lowers the optimized IR into a device-executable artifact. The resulting
-           binary is wrapped in a :class:`MemBufferRef`. When ``track=True``,
-           the size of the generated object code is stored in ``result.obj_size``.
+           Lowers the optimized IR into a device-executable object.
 
         Parameters
         ----------
-        result : ExperimentResult
-            Result object to be populated with build metrics such as optimization
-            time and object size.
         config : ExperimentConfiguration
             Configuration controlling specialization, optimization pipeline, and
             code-generation strategy.
-        ir_module : ModuleRef
-            Intermediate representation on which the build pipeline operates.
-            The module may be transformed during preprocessing and optimization.
-        track : bool
-            Whether to collect profiling information and resource-usage statistics
-            during the build process. A tracked build also runs ``purge-autoinit``
-            before the optimization pipeline.
+        root_ir : ModuleRef
+            IR of the recorded kernel. It is cloned and not modified.
+        variant : BuildVariant
+            How the run that asked for this build wants the kernel built.
 
         Returns
         -------
-        MemBufferRef
-            A memory buffer containing the compiled device module produced by the
-            code-generation stage.
-
-        Notes
-        -----
-        * This method does not execute the kernel; execution occurs in :meth:`_run`.
-        * Tracking is optional but recommended when performance analysis is needed.
+        BuildArtifact
+            The transformed IR, the device object, and the stage times and object
+            size.
         """
-        self._preprocess_ir(result, config, ir_module, profile=track)
-        self._optimize(result, config, ir_module, purge_autoinit=track, profile=track)
-        mem_buffer = self._codegen(result, config, ir_module, profile=track)
-        if track:
-            result.obj_size = mem_buffer.get_size()
-        return mem_buffer
+        with tracing.span("ir.clone"):
+            ir_module = root_ir.clone()
 
-    @tracing.traced("execution.run")
-    def _run(
-        self,
-        result: ExperimentResult,
-        config: ExperimentConfiguration,
-        mem_buffer: MemBufferRef,
-        prologue: MemStateRef,
-        epilogue: MemStateRef,
-        verify: bool,
-        track: bool,
-        iterations: int,
-    ):
-        """
-        Execute a compiled kernel on the device and optionally collect resource-usage
-        metadata.
+        start = time.perf_counter()
+        self._preprocess_ir(config, ir_module)
+        preprocessed = time.perf_counter()
+        self._optimize(config, ir_module, purge_autoinit=variant.purge_autoinit)
+        optimized = time.perf_counter()
+        mem_buffer = self._codegen(config, ir_module)
+        generated = time.perf_counter()
 
-        This method loads the device module from the provided memory buffer, extracts
-        the kernel function, and executes it for the requested number of iterations.
-        When ``track`` is enabled, the kernel launch is profiled and register usage,
-        local memory usage, and constant memory usage are recorded into the provided
-        :class:`ExperimentResult` object.
-
-        Parameters
-        ----------
-        result : ExperimentResult
-            Result object that will be populated with execution metrics and resource
-            usage information.
-        config : ExperimentConfiguration
-            The configuration controlling launch parameters such as grid, block,
-            specialization settings, and shared-memory use.
-        mem_buffer : MemBufferRef
-            Memory buffer containing the device-side compiled module from which the
-            kernel function is loaded.
-        track : bool
-            If ``True``, profiling and resource-usage tracking are enabled for the
-            kernel execution. This populates register usage, constant memory usage,
-            and local memory usage in the experiment result.
-        iterations : int
-            Number of times the kernel should be executed. Typically more than one
-            run is used when statistical accuracy is required.
-
-        Notes
-        -----
-        * The device module is managed via a context manager to ensure allocation and
-          cleanup follow the device runtime’s requirements.
-        * Resource usage fields are only updated when ``track=True``.
-        * Actual execution is delegated to :meth:`_run_kernel`.
-
-        ------
-        """
-        with DeviceModule.from_MemBuffer(mem_buffer) as DeviceObj:
-            device_func = DeviceObj.get_function(self.kernel_descr.kernel_name)
-            self._run_kernel(
-                result,
-                config,
-                self.kernel_descr.kernel_name,
-                device_func,
-                iterations,
-                profile=track,
-            )
-            if verify:
-                with tracing.span("verify.compare") as event:
-                    result.verified = prologue == epilogue
-                    result.noop_verifies = self.noop_verifies
-
-                    event.annotate(
-                        verified=result.verified, noop_verifies=result.noop_verifies
-                    )
-
-            if track:
-                result.reg_usage = device_func.reg_usage
-                result.const_mem_usage = device_func.const_mem
-                result.local_mem_usage = device_func.local_mem
+        stats = BuildStats(
+            preprocess_ir_time=preprocessed - start,
+            opt_time=optimized - preprocessed,
+            codegen_time=generated - optimized,
+            obj_size=mem_buffer.get_size(),
+        )
+        return BuildArtifact(variant, ir_module, mem_buffer, stats)
 
     @tracing.traced(
         "experiment",
-        attributes=lambda self, result, config, ir_module: {
+        attributes=lambda self, config, root_ir: {
             "record_id": self.record_id,
             "config_hash": config.hash(),
             "configuration": config.to_dict(),
-            "warmup": self._warmup,
-            "iterations": self._iterations,
         },
         flush_after=True,
     )
-    def _execute(
+    def execute(
         self,
-        result: ExperimentResult,
         config: ExperimentConfiguration,
-        ir_module: ModuleRef,
-    ) -> ModuleRef:
+        root_ir: ModuleRef,
+    ) -> ChainOutcome:
         """
-        Execute a single Mneme experiment using the given configuration and IR module.
-
-        This method performs the full record/replay experiment pipeline, including
-        verification, IR cleanup, code generation, and timed execution. It returns
-        both the populated experiment result and the transformed IR module.
-
-        The execution consists of three stages:
-
-        1. **Verification pass**
-           A clone of the input IR module is built and executed once without
-           instrumentation. This ensures the recorded prologue and epilogue states
-           match, allowing the system to validate kernel determinism and correctness.
-
-        2. **IR sanitization**
-           The tracked build runs the ``purge-autoinit`` pass before the optimization
-           pipeline, removing automatically inserted Clang initialization code. Only
-           IR regions explicitly marked by Clang are removed to avoid disturbing user
-           code.
-
-        3. **Instrumented execution**
-           The cleaned up version of the kernel is built with tracking enabled.
-           The kernel is executed ``iterations + 2`` times to allow downstream
-           statistical metrics to be computed reliably. Execution time, resource
-           usage, and other experiment metrics are accumulated into the resulting
-           :class:`ExperimentResult`.
+        Execute the run chain on one configuration of the recorded kernel.
 
         Parameters
         ----------
-        result : ExperimentResult
-            The container to store all the collected/counted values to.
         config : ExperimentConfiguration
             The experiment configuration controlling launch parameters, specialization,
             and code generation settings.
-        ir_module : ModuleRef
-            The LLVM-like intermediate representation module on which the experiment
-            is executed. The module is cloned and the ``ir_module`` is not modified.
+        root_ir : ModuleRef
+            IR of the recorded kernel. Every build clones it; it is not modified.
 
         Returns
         -------
-        (ExperimentResult, ModuleRef)
-            A tuple containing:
-
-            * **ExperimentResult** – Populated result object containing verification
-              status, execution metrics, and profiling data.
-            * **ModuleRef** – The transformed IR module after auto-initialization
-              removal and other modifications performed during execution.
+        ChainOutcome
+            The results of the runs that executed, whether every run executed,
+            and the build the last run used.
 
         Raises
         ------
@@ -706,40 +519,7 @@ class BaseExecutor:
         if self._prologue._state is None or self._epilogue._state is None:
             raise RuntimeError("States should never be none when executing a kernel")
 
-        # NOTE: 1. First we need to verify.
-        with tracing.span("execution.verification"):
-            with tracing.span("ir.clone"):
-                ver_mod = ir_module.clone()
-
-            mem_buffer = self._build(result, config, ver_mod, False)
-            self._run(
-                result, config, mem_buffer, self.prologue, self.epilogue,
-                True, False, 1,
-            )
-
-        if self._short_circuit and not result.verified:
-            logger.warning(
-                f"Verification failed for record {self.record_id} under config {config}. "
-                "Skipping tracked execution."
-            )
-            return ver_mod
-
-        # NOTE: 2-3. Build and run with tracking on. The tracked build first runs the
-        # purge-autoinit pass (registered via Proteus' JIT pass plugin API) to strip
-        # the Clang-inserted auto-init memsets; verification above ran without it.
-        with tracing.span("execution.tracked"):
-            with tracing.span("ir.clone"):
-                ir_module = ir_module.clone()
-
-            mem_buffer = self._build(result, config, ir_module, True)
-            self._run(
-                result, config, mem_buffer, self.prologue, self.epilogue,
-                False, True, self._iterations + self._warmup,
-            )
-
-        result.executed = True
-
-        return ir_module
+        return self.run_chain.execute(ReplayExperiment(self, config, root_ir))
 
 
 class TuneWorker(BaseExecutor):
@@ -752,7 +532,7 @@ class TuneWorker(BaseExecutor):
     kernel under a given :class:`ExperimentConfiguration`.
 
     A worker process typically:
-      1) Initializes profiling and selects a GPU device.
+      1) Prepares the process for its run chain and selects a GPU device.
       2) Loads the recorded execution (record DB + record ID).
       3) Links the recorded LLVM IR into a single module (``link_ir``).
       4) Enters a message-processing loop (see :meth:`run`) to evaluate configurations.
@@ -761,81 +541,46 @@ class TuneWorker(BaseExecutor):
     -----
     * The public entry point for the worker process is :meth:`run`, which is designed
       to be used as a multiprocessing target.
-    * Per-request execution is handled by :meth:`process_payload`, which builds,
-      verifies, and runs the kernel according to the provided configuration.
+    * Per-request execution is handled by :meth:`process_payload`, which executes
+      the run chain under the provided configuration.
+    * The worker process should construct a single TuneWorker and reuse it for
+      multiple requests to amortize startup overhead.
     """
-
-    def __init__(self, *args, **kwargs):
-        """
-        Construct a TuneWorker and initialize worker-local profiling.
-
-        This constructor initializes the Mneme profiler (for timing breakdowns) and
-        then delegates initialization to :class:`BaseExecutor`. The base class sets
-        device affinity, loads the recorded execution, and prepares prologue/epilogue
-        descriptors.
-
-        Notes
-        -----
-        * The worker process should typically construct a single TuneWorker instance
-          and reuse it for multiple requests to amortize startup overhead.
-        * ``init_profiler()`` is required to be executed once by every OS process executing it
-            multiple times results to undefined behavior.
-        """
-        init_profiler()
-        super().__init__(*args, **kwargs)
 
     def process_payload(
         self, ir_module, config: ExperimentConfiguration
-    ) -> Tuple[ExperimentResult, ModuleRef]:
+    ) -> ExperimentResult:
         """
-        Execute one tuning request: build, verify, and run the kernel under ``config``.
-
-        This method is the unit of work performed by a worker in response to a tuning
-        request. It executes the full Mneme record–replay pipeline using the provided
-        IR module and configuration:
-
-          1) Records the experiment start timestamp.
-          2) Invokes the base executor pipeline (see :meth:`BaseExecutor._execute`),
-             which performs verification, IR sanitization, compilation, and timed execution.
-          3) Records the experiment end timestamp and annotates the result with the GPU id.
-          4) Returns both the populated :class:`ExperimentResult` and the transformed IR.
+        Execute one tuning request: run the chain on the kernel under ``config``.
 
         Parameters
         ----------
         ir_module : ModuleRef
-            Root IR module (or clone) used as input for this experiment. The module
-            is cloned internally and transformed as part of the execution pipeline.
+            Root IR module (or clone) used as input for this experiment. Every
+            build clones it.
         config : ExperimentConfiguration
             Configuration describing launch parameters, specialization options, and
             code-generation controls for this experiment.
 
         Returns
         -------
-        (ExperimentResult, ModuleRef)
-            A tuple containing:
-
-            * **ExperimentResult** – result object populated with timing, verification
-              status, and device resource usage.
-            * **ModuleRef** – the transformed IR module after preprocessing and
-              auto-initialization removal.
-
-        Notes
-        -----
-        * This method is expected to be called repeatedly within the worker loop;
-          callers should pass a cloned IR module to avoid cross-experiment mutation.
-        * Timestamps are recorded in ISO 8601 format using UTC time.
+        ExperimentResult
+            The results of the runs that executed, with start and end timestamps
+            (ISO 8601, UTC) and the GPU id. An invalid pass pipeline is reported
+            as a failed result instead of raising.
         """
-        result = ExperimentResult()
-        result.start_time = datetime.now(timezone.utc).isoformat()
+        start_time = datetime.now(timezone.utc).isoformat()
         try:
-            generated_ir = super()._execute(result, config, ir_module)
+            outcome = self.execute(config, ir_module)
+            result = ExperimentResult(
+                outcome.results.values(), executed=outcome.executed_every_run
+            )
         except jit.InvalidPassPipelineError as error:
-            result.failed = True
-            result.error = str(error)
-            generated_ir = ir_module
+            result = ExperimentResult(failed=True, error=str(error))
+        result.start_time = start_time
         result.end_time = datetime.now(timezone.utc).isoformat()
         result.gpu_id = self.device_id
-        return result, generated_ir
+        return result
 
     @staticmethod
     @tracing.traced("worker", flush_after=True)
@@ -845,11 +590,9 @@ class TuneWorker(BaseExecutor):
         record_db: str,
         record_id: str,
         device_id: int,
-        iterations: int,
         results_db_dir: str,
         state: Event,
-        warmup: int = 2,
-        short_circuit: bool = False,
+        run_chain: RunChain,
         pass_plugins: Sequence[str] = (),
     ):
         """
@@ -889,14 +632,8 @@ class TuneWorker(BaseExecutor):
             Identifier of the recorded kernel instance inside ``record_db``.
         device_id : int
             GPU device index to which this worker process is pinned.
-        iterations : int
-            Number of kernel iterations to execute during the tracked run (the full
-            execution may include additional runs for verification/warmup depending
-            on the executor pipeline).
-        warmup : int
-            Number of warmup iterations to execute before measured iterations.
-        short_circuit : bool
-            Whether to skip timing runs when verification fails.
+        run_chain : RunChain
+            Runs every experiment executes.
         pass_plugins : Sequence[str]
             Pass plugin libraries the worker loads into the JIT.
         results_db_dir : str
@@ -926,9 +663,7 @@ class TuneWorker(BaseExecutor):
             record_db=record_db,
             record_id=record_id,
             device_id=device_id,
-            iterations=iterations,
-            warmup=warmup,
-            short_circuit=short_circuit,
+            run_chain=run_chain,
             pass_plugins=pass_plugins,
         )
         # Open GPU memory, setup prologue epilogue and create a single
@@ -967,10 +702,9 @@ class TuneWorker(BaseExecutor):
                         with tracing.span("ir.clone"):
                             request_ir = root_ir.clone()
 
-                        exp, ir = worker.process_payload(
+                        exp = worker.process_payload(
                             request_ir, ExperimentConfiguration.from_dict(msg["data"])
                         )
-                    # final = resdb.save_ir(ir, exp.hash())
                     logger.debug(
                         f"Worker {worker.device_id} finalized processing request {msg['exp_id']}"
                     )
