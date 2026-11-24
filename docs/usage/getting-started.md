@@ -140,6 +140,14 @@ The output will be similar to:
     "internalize": true
   },
   "Result": {
+    "executed": true,
+    "failed": false,
+    "start_time": "",
+    "end_time": "",
+    "gpu_id": 0,
+    "error": "",
+    "verified": true,
+    "noop_verifies": false,
     "preprocess_ir_time": 9.2298723757267e-06,
     "opt_time": 0.006206092890352011,
     "codegen_time": 0.01226967596448958,
@@ -151,17 +159,9 @@ The output will be similar to:
       83360,
       76520
     ],
-    "verified": true,
-    "noop_verifies": false,
-    "executed": true,
-    "failed": false,
-    "start_time": "",
-    "end_time": "",
-    "gpu_id": 0,
     "const_mem_usage": -1,
     "local_mem_usage": 0,
     "reg_usage": 12,
-    "error": "",
     "runs": [
       "verification",
       "timing"
@@ -180,11 +180,13 @@ The output will be similar to:
     If verified on the *Result* entry is true and executed is true, **Congratulations** you have replayed successfully a vector addition.
 
 !!! note
-    A replay executes a verification run and then a timing run; `runs` lists
-    the runs that executed. The timing run builds the kernel with Clang's
-    auto-initialization code removed and produces `exec_time`, the resource
-    usage fields, and `preprocess_ir_time`, `opt_time`, `codegen_time` and
-    `obj_size`. When a run did not execute, for example timing after a failed
+    A replay executes a verification run and then a timing run. The result
+    lists the experiment fields first, then the fields of each run in chain
+    order; `runs` lists the runs that executed. The verification run produces
+    `verified` and `noop_verifies`. The timing run builds the kernel with
+    Clang's auto-initialization code removed and produces `exec_time`, the
+    resource usage fields, and `preprocess_ir_time`, `opt_time`,
+    `codegen_time` and `obj_size`. When a run did not execute, for example timing after a failed
     verification with `--short-circuit`, its fields hold their default values.
 
 !!! tip "Tolerance-aware verification"

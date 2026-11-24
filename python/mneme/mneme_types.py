@@ -227,43 +227,11 @@ class BuildStats:
     obj_size: int = 0
 
 
+_BUILD_STAT_NAMES = tuple(f.name for f in fields(BuildStats))
 _EXPERIMENT_FIELDS = ("executed", "failed", "start_time", "end_time", "gpu_id", "error")
-# The flat keys every result writes, in the order results have always had.
-_LEGACY_KEYS = (
-    "preprocess_ir_time",
-    "opt_time",
-    "codegen_time",
-    "obj_size",
-    "exec_time",
-    "verified",
-    "noop_verifies",
-    "executed",
-    "failed",
-    "start_time",
-    "end_time",
-    "gpu_id",
-    "const_mem_usage",
-    "local_mem_usage",
-    "reg_usage",
-    "error",
-)
-# The run fields among the legacy keys, written under their own names. The
-# legacy build keys hold the timing run's build. Every other run field and
-# build measurement is written as ``<kind>_<name>``.
-_UNPREFIXED_FIELDS = frozenset(
-    {
-        ("verification", "verified"),
-        ("verification", "noop_verifies"),
-        ("timing", "exec_time"),
-        ("timing", "const_mem_usage"),
-        ("timing", "local_mem_usage"),
-        ("timing", "reg_usage"),
-    }
-)
-_UNPREFIXED_BUILD_KIND = "timing"
-_LEGACY_KINDS = ("verification", "timing")
 _RUNS_KEY = "runs"
 _RUN_RESULT_TYPES: Dict[str, type] = {}
+_RUN_RESULT_KEY_OWNERS: Dict[str, type] = {}
 
 
 @dataclass
@@ -273,40 +241,52 @@ class RunResult:
 
     Every subclass names the run ``kind`` it belongs to and is registered under
     it with :func:`register_run_result`. In the flat :class:`ExperimentResult`
-    dictionary, a result writes each of its fields as ``<kind>_<field>`` and,
-    when ``build`` is set, each build measurement as ``<kind>_<measurement>``
-    (for a kind ``profiling``: ``profiling_counters``, ``profiling_opt_time``).
-    The verification and timing results keep the key names they have always
-    had.
+    dictionary, a result writes each of its fields under the key
+    :meth:`output_key` gives the field's name. A subclass that reports a build
+    declares a field ``build`` of type ``Optional[BuildStats]``; it is written
+    as one key per measurement, named by :meth:`output_key` of the measurement
+    name, and not at all while it is ``None``. Runs that ask for the same build
+    share it, so a run reports the build only when its result is meant to
+    account for it.
 
     Attributes
     ----------
-    build : BuildStats or None
-        Measurements of the build this run launched, or ``None`` when the run
-        does not report them. Runs that ask for the same build share it, so a
-        run reports the build only when its result is meant to account for it.
+    always_written : bool
+        Class attribute. Whether an experiment result writes this kind's keys
+        with their default values when the run did not execute. Off by default:
+        a kind's keys are then written only when its run executed.
     """
 
     kind: ClassVar[str]
+    always_written: ClassVar[bool] = False
+    unrecorded_build_hint: ClassVar[str] = "the run did not report its build"
 
-    build: Optional[BuildStats] = None
+    @classmethod
+    def output_key(cls, name: str) -> str:
+        """
+        The flat result key of field or build measurement ``name``.
+
+        The default is ``name`` itself. Keys must be unique among all
+        registered kinds and the experiment's own fields, so a kind overrides
+        this to name keys that would otherwise collide.
+        """
+        return name
+
+    @classmethod
+    def _reports_build(cls) -> bool:
+        return any(f.name == "build" for f in fields(cls))
 
     @classmethod
     def _field_keys(cls) -> Dict[str, str]:
         return {
-            f.name: (
-                f.name
-                if (cls.kind, f.name) in _UNPREFIXED_FIELDS
-                else f"{cls.kind}_{f.name}"
-            )
-            for f in fields(cls)
-            if f.name != "build"
+            f.name: cls.output_key(f.name) for f in fields(cls) if f.name != "build"
         }
 
     @classmethod
     def _build_keys(cls) -> Dict[str, str]:
-        prefix = "" if cls.kind == _UNPREFIXED_BUILD_KIND else f"{cls.kind}_"
-        return {f.name: prefix + f.name for f in fields(BuildStats)}
+        if not cls._reports_build():
+            return {}
+        return {name: cls.output_key(name) for name in _BUILD_STAT_NAMES}
 
     @classmethod
     def _flat_keys(cls) -> List[str]:
@@ -314,10 +294,14 @@ class RunResult:
 
     def to_flat(self) -> Dict[str, Any]:
         """This result's flat fields, with build measurements if ``build`` is set."""
-        flat = {key: getattr(self, name) for name, key in self._field_keys().items()}
-        if self.build is not None:
-            for name, key in self._build_keys().items():
-                flat[key] = getattr(self.build, name)
+        flat = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if f.name != "build":
+                flat[self.output_key(f.name)] = value
+            elif value is not None:
+                for name in _BUILD_STAT_NAMES:
+                    flat[self.output_key(name)] = getattr(value, name)
         return flat
 
     @classmethod
@@ -340,8 +324,12 @@ class RunResult:
 
     @classmethod
     def _flat_values_are_defaults(cls, data: Mapping[str, Any]) -> bool:
-        defaults = cls(build=BuildStats()).to_flat()
-        return all(data[key] == value for key, value in defaults.items() if key in data)
+        defaults = cls(build=BuildStats()) if cls._reports_build() else cls()
+        return all(
+            data[key] == value
+            for key, value in defaults.to_flat().items()
+            if key in data
+        )
 
 
 def register_run_result(cls):
@@ -351,8 +339,8 @@ def register_run_result(cls):
     Apply it above ``@dataclass``. Only registered result kinds can be stored in
     an :class:`ExperimentResult` or loaded by :meth:`ExperimentResult.from_dict`.
     Defining the class raises ``TypeError`` if the kind is already registered,
-    if two of its fields map to the same flat key, or if a flat key is one that
-    the verification and timing results or the experiment use.
+    if two of its fields map to the same flat key, or if one of its keys is
+    written by another registered kind or by the experiment itself.
     """
     if cls.kind in _RUN_RESULT_TYPES:
         raise TypeError(f"Run result kind {cls.kind!r} is already registered")
@@ -362,17 +350,23 @@ def register_run_result(cls):
         raise TypeError(
             f"Run kind {cls.kind!r} maps more than one field to: {', '.join(repeated)}"
         )
-    if cls.kind not in _LEGACY_KINDS:
-        reserved = set(_LEGACY_KEYS) | {_RUNS_KEY}
-        for kind in _LEGACY_KINDS:
-            reserved.update(_RUN_RESULT_TYPES[kind]._flat_keys())
-        taken = sorted(set(keys) & reserved)
-        if taken:
-            raise TypeError(
-                f"Run kind {cls.kind!r} maps fields to reserved result keys: "
-                f"{', '.join(taken)}"
-            )
+    collisions = []
+    for key in keys:
+        if key in _EXPERIMENT_FIELDS:
+            collisions.append(f"{key!r} (an ExperimentResult field)")
+        elif key == _RUNS_KEY:
+            collisions.append(f"{key!r} (the ExperimentResult list of executed runs)")
+        elif key in _RUN_RESULT_KEY_OWNERS:
+            owner = _RUN_RESULT_KEY_OWNERS[key]
+            collisions.append(f"{key!r} (run kind {owner.kind!r})")
+    if collisions:
+        raise TypeError(
+            f"Run kind {cls.kind!r} writes result keys that are already taken: "
+            f"{', '.join(collisions)}; override {cls.__name__}.output_key to "
+            "name them"
+        )
     _RUN_RESULT_TYPES[cls.kind] = cls
+    _RUN_RESULT_KEY_OWNERS.update(dict.fromkeys(keys, cls))
     return cls
 
 
@@ -382,8 +376,8 @@ class VerificationResult(RunResult):
     """
     Result of a verification run.
 
-    ``build`` is set only when the run was constructed with
-    ``VerificationRun(record_build_stats=True)``.
+    Its fields are written under their own names and its build measurements as
+    ``verification_<measurement>``.
 
     Attributes
     ----------
@@ -392,12 +386,25 @@ class VerificationResult(RunResult):
     noop_verifies : bool
         Whether the recorded input alone matches the recorded output, meaning a
         kernel that does nothing would also verify.
+    build : BuildStats or None
+        Measurements of the verification build, set only when the run was
+        constructed with ``VerificationRun(record_build_stats=True)``.
     """
 
     kind: ClassVar[str] = "verification"
+    always_written: ClassVar[bool] = True
+    unrecorded_build_hint: ClassVar[str] = (
+        "only a verification run constructed with "
+        "VerificationRun(record_build_stats=True) records it"
+    )
 
     verified: bool = False
     noop_verifies: bool = False
+    build: Optional[BuildStats] = None
+
+    @classmethod
+    def output_key(cls, name: str) -> str:
+        return f"verification_{name}" if name in _BUILD_STAT_NAMES else name
 
 
 @register_run_result
@@ -405,6 +412,8 @@ class VerificationResult(RunResult):
 class TimingResult(RunResult):
     """
     Result of a timing run.
+
+    Its fields and build measurements are written under their own names.
 
     Attributes
     ----------
@@ -422,19 +431,13 @@ class TimingResult(RunResult):
     """
 
     kind: ClassVar[str] = "timing"
+    always_written: ClassVar[bool] = True
 
     build: BuildStats = field(default_factory=BuildStats)
     exec_time: List[int] = field(default_factory=list)
     const_mem_usage: int = 0
     local_mem_usage: int = 0
     reg_usage: int = 0
-
-
-_LEGACY_FIELD_OWNERS: Dict[str, type] = {
-    key: result_type
-    for result_type in (VerificationResult, TimingResult)
-    for key in result_type._flat_keys()
-}
 
 
 class ExperimentResult:
@@ -445,36 +448,38 @@ class ExperimentResult:
     each run that executed, by kind, in chain order.
 
     :meth:`to_dict` writes one flat dictionary; this flat form is what crosses
-    process boundaries and what tuning persists. It holds:
+    process boundaries and what tuning persists. It holds, in this order:
 
-    - The experiment fields and the verification and timing fields listed
-      below, always. A run that did not execute writes its default values.
-    - ``verification_preprocess_ir_time``, ``verification_opt_time``,
-      ``verification_codegen_time`` and ``verification_obj_size``, when the
-      verification run recorded its build.
-    - ``<kind>_<name>`` for each field and build measurement of a run of any
-      other kind that executed (see :class:`RunResult`).
+    - The experiment fields (``executed``, ``failed``, ``start_time``,
+      ``end_time``, ``gpu_id``, ``error``).
+    - The keys of each run that executed, in chain order, named by its result
+      type (see :class:`RunResult`).
+    - The keys of each kind whose result type sets ``always_written`` but whose
+      run did not execute, with their default values. The verification and
+      timing results set it, so their fields are always present.
     - ``runs``: the kinds of the runs that executed, in chain order.
 
-    :meth:`from_dict` reads ``runs`` to know which runs executed. A dictionary
-    without it, written before run chains existed, is read as having a
-    verification or timing run when any of that run's fields differs from its
-    default. Such a dictionary whose verification failed with
-    ``noop_verifies`` false therefore reads as having no verification run;
-    its flat reads return the same values either way.
+    With the default chain, verification writes ``verified`` and
+    ``noop_verifies``, plus ``verification_preprocess_ir_time``,
+    ``verification_opt_time``, ``verification_codegen_time`` and
+    ``verification_obj_size`` when it recorded its build; timing writes
+    ``preprocess_ir_time``, ``opt_time``, ``codegen_time``, ``obj_size``,
+    ``exec_time``, ``const_mem_usage``, ``local_mem_usage`` and ``reg_usage``.
 
-    The verification and timing fields can be read directly on the experiment
-    result (``result.exec_time``, ``result.verified``): ``verified``,
-    ``noop_verifies`` and the ``verification_`` build measurements come from
-    the verification run; ``exec_time``, ``reg_usage``, ``const_mem_usage``,
-    ``local_mem_usage`` and the un-prefixed build measurements
-    (``preprocess_ir_time``, ``opt_time``, ``codegen_time``, ``obj_size``)
-    come from the timing run. Reading one of an executed run returns the
-    stored value; reading one of a run that did not execute returns a fresh
-    default. Reading a ``verification_`` build measurement that was not
-    recorded raises ``AttributeError``. These fields cannot be assigned on the
-    experiment result; set them on the run result. Results of other kinds are
-    read through ``runs``.
+    :meth:`from_dict` reads ``runs`` to know which runs executed. A dictionary
+    without it, written before run chains existed, is read as having a run of
+    a kind when any of that kind's keys holds a value other than its default.
+    Such a dictionary whose verification failed with ``noop_verifies`` false
+    therefore reads as having no verification run; its flat reads return the
+    same values either way.
+
+    Every run result key can be read directly on the experiment result
+    (``result.exec_time``, ``result.verified``). Reading one of an executed run
+    returns the stored value; reading one of a run that did not execute
+    returns a fresh default if its kind is always written and raises
+    ``AttributeError`` otherwise, as does reading a build measurement that was
+    not recorded. These keys cannot be assigned on the experiment result; set
+    them on the run result.
 
     Attributes
     ----------
@@ -514,9 +519,9 @@ class ExperimentResult:
             Typed results of the runs that executed, at most one per kind, in
             chain order.
         run_fields
-            Verification and timing fields by their flat names (see the class
-            docstring), read the way :meth:`from_dict` reads a dictionary
-            without ``runs``. A kind cannot be given both ways.
+            Run result fields by their flat keys, read the way
+            :meth:`from_dict` reads a dictionary without ``runs``. A kind
+            cannot be given both ways.
         """
         self.runs: Dict[str, RunResult] = {}
         for run_result in runs:
@@ -535,15 +540,14 @@ class ExperimentResult:
         self.gpu_id = gpu_id
         self.error = error
 
-        unknown = sorted(set(run_fields) - set(_LEGACY_FIELD_OWNERS))
+        unknown = sorted(set(run_fields) - set(_RUN_RESULT_KEY_OWNERS))
         if unknown:
             raise TypeError(f"Unknown experiment result fields: {', '.join(unknown)}")
-        for kind in _LEGACY_KINDS:
-            result_type = _RUN_RESULT_TYPES[kind]
+        for kind, result_type in _RUN_RESULT_TYPES.items():
             given = {
-                name: value
-                for name, value in run_fields.items()
-                if _LEGACY_FIELD_OWNERS[name] is result_type
+                key: value
+                for key, value in run_fields.items()
+                if _RUN_RESULT_KEY_OWNERS[key] is result_type
             }
             if not given:
                 continue
@@ -555,24 +559,29 @@ class ExperimentResult:
                 self.runs[kind] = result_type.from_flat(given)
 
     def __getattr__(self, name: str) -> Any:
-        owner = _LEGACY_FIELD_OWNERS.get(name)
+        owner = _RUN_RESULT_KEY_OWNERS.get(name)
         if owner is None:
             raise AttributeError(
                 f"{type(self).__name__!r} object has no attribute {name!r}"
             )
-        run_result = self.__dict__.get("runs", {}).get(owner.kind) or owner()
+        run_result = self.__dict__.get("runs", {}).get(owner.kind)
+        if run_result is None:
+            if not owner.always_written:
+                raise AttributeError(
+                    f"{name!r} belongs to the {owner.kind!r} run, which did not execute"
+                )
+            run_result = owner()
         flat = run_result.to_flat()
         if name not in flat:
             raise AttributeError(
-                f"{name!r} was not recorded; only a verification run constructed "
-                "with VerificationRun(record_build_stats=True) records it"
+                f"{name!r} was not recorded; {owner.unrecorded_build_hint}"
             )
         return flat[name]
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name in _LEGACY_FIELD_OWNERS:
+        if name in _RUN_RESULT_KEY_OWNERS:
             raise AttributeError(
-                f"{name!r} belongs to the {_LEGACY_FIELD_OWNERS[name].kind!r} run "
+                f"{name!r} belongs to the {_RUN_RESULT_KEY_OWNERS[name].kind!r} run "
                 "result; set it there"
             )
         super().__setattr__(name, value)
@@ -600,6 +609,13 @@ class ExperimentResult:
     def __repr__(self) -> str:
         fields_repr = ", ".join(f"{k}={v!r}" for k, v in self.__dict__.items())
         return f"ExperimentResult({fields_repr})"
+
+    def _unexecuted_defaults(self) -> Dict[str, Any]:
+        flat: Dict[str, Any] = {}
+        for kind, result_type in _RUN_RESULT_TYPES.items():
+            if result_type.always_written and kind not in self.runs:
+                flat.update(result_type().to_flat())
+        return flat
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ExperimentResult":
@@ -634,7 +650,7 @@ class ExperimentResult:
             name: data.pop(name) for name in _EXPERIMENT_FIELDS if name in data
         }
         runs = []
-        owned_keys = set(_LEGACY_KEYS)
+        owned_keys = set()
         for kind in kinds:
             result_type = _RUN_RESULT_TYPES.get(kind)
             if result_type is None:
@@ -645,10 +661,11 @@ class ExperimentResult:
                 )
             runs.append(result_type.from_flat(data))
             owned_keys.update(result_type._flat_keys())
-        unknown = sorted(set(data) - owned_keys)
+        result = cls(runs, **experiment_fields)
+        unknown = sorted(set(data) - owned_keys - set(result._unexecuted_defaults()))
         if unknown:
             raise TypeError(f"Unknown experiment result fields: {', '.join(unknown)}")
-        return cls(runs, **experiment_fields)
+        return result
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -659,29 +676,10 @@ class ExperimentResult:
         dict
             A JSON-/YAML-serializable dictionary representation of the result
             (see the class docstring for its keys).
-
-        Raises
-        ------
-        ValueError
-            If two runs of the result map a field to the same key.
         """
-        legacy: Dict[str, Any] = {}
-        for kind in _LEGACY_KINDS:
-            run_result = self.runs.get(kind) or _RUN_RESULT_TYPES[kind]()
-            legacy.update(run_result.to_flat())
-        for name in _EXPERIMENT_FIELDS:
-            legacy[name] = getattr(self, name)
-        flat = {key: legacy.pop(key) for key in _LEGACY_KEYS}
-        flat.update(legacy)
-        for kind, run_result in self.runs.items():
-            if kind in _LEGACY_KINDS:
-                continue
-            for key, value in run_result.to_flat().items():
-                if key in flat:
-                    raise ValueError(
-                        f"Result key {key!r} of run kind {kind!r} is already "
-                        "written by another run of this result"
-                    )
-                flat[key] = value
+        flat = {name: getattr(self, name) for name in _EXPERIMENT_FIELDS}
+        for run_result in self.runs.values():
+            flat.update(run_result.to_flat())
+        flat.update(self._unexecuted_defaults())
         flat[_RUNS_KEY] = list(self.runs)
         return copy.deepcopy(flat)

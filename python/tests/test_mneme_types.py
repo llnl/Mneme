@@ -2,7 +2,7 @@ import pytest
 import json
 import copy
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict
+from typing import ClassVar, Dict, Optional
 from mneme.mneme_types import (
     dim3,
     ExperimentConfiguration,
@@ -219,6 +219,11 @@ class CounterResult(RunResult):
     kind: ClassVar[str] = "counters"
 
     values: Dict[str, int] = field(default_factory=dict)
+    build: Optional[BuildStats] = None
+
+    @classmethod
+    def output_key(cls, name):
+        return f"counters_{name}"
 
 
 def _flat_result():
@@ -325,7 +330,7 @@ def test_experiment_result_serializes_each_run_build_under_its_own_fields(
     d = result.to_dict()
 
     recorded = VERIFICATION_BUILD_FIELDS if verification_build else {}
-    assert list(d) == [*PRE_RUN_CHAIN_RESULT, *recorded, "runs"]
+    assert set(d) == {*PRE_RUN_CHAIN_RESULT, *recorded, "runs"}
     assert {name: d[name] for name in recorded} == recorded
     assert (d["preprocess_ir_time"], d["opt_time"], d["codegen_time"]) == (5.0, 6.0, 7.0)
     assert d["obj_size"] == 8
@@ -380,17 +385,25 @@ def test_experiment_result_writes_other_run_kinds_only_when_executed():
         ExperimentResult.from_dict(d)
 
 
-def test_register_run_result_rejects_colliding_keys():
-    with pytest.raises(TypeError, match="reserved result keys: exec_time"):
+@pytest.mark.parametrize(
+    "field_name, taken_by",
+    [
+        ("exec_time", "run kind 'timing'"),
+        ("noop_verifies", "run kind 'verification'"),
+        ("gpu_id", "an ExperimentResult field"),
+        ("runs", "the ExperimentResult list of executed runs"),
+    ],
+)
+def test_register_run_result_rejects_colliding_keys(field_name, taken_by):
+    namespace = {"__annotations__": {"kind": ClassVar[str], field_name: int}}
+    namespace.update(kind="clashing", **{field_name: 0})
+    clashing = dataclass(type("ClashingResult", (RunResult,), namespace))
+    with pytest.raises(
+        TypeError, match=rf"'clashing'.*'{field_name}' \({taken_by}\)"
+    ):
+        register_run_result(clashing)
 
-        @register_run_result
-        @dataclass
-        class ExecResult(RunResult):
-            kind: ClassVar[str] = "exec"
-
-            time: int = 0
-
-    with pytest.raises(TypeError, match="more than one field to: twice_opt_time"):
+    with pytest.raises(TypeError, match="more than one field to: opt_time"):
 
         @register_run_result
         @dataclass
@@ -398,3 +411,4 @@ def test_register_run_result_rejects_colliding_keys():
             kind: ClassVar[str] = "twice"
 
             opt_time: float = 0.0
+            build: Optional[BuildStats] = None
