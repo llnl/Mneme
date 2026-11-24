@@ -11,6 +11,7 @@
 ::: mneme.cli
 ::: mneme.device
 ::: mneme.replay_executor
+::: mneme.replay_runs
 ::: mneme.async_executor
 ::: mneme.mneme_types
 ::: mneme.profile
