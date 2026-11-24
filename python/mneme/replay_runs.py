@@ -199,11 +199,14 @@ class VerificationRun(ReplayRun):
     ----------
     short_circuit : bool
         Whether a failed verification skips the runs after this one.
+    record_build_stats : bool
+        Whether the result reports the measurements of the verification build.
     """
 
     kind: ClassVar[str] = VerificationResult.kind
 
     short_circuit: bool = False
+    record_build_stats: bool = False
 
     def execute(self, experiment: ReplayExperiment) -> VerificationResult:
         artifact = experiment.build(BuildVariant(purge_autoinit=False))
@@ -215,7 +218,7 @@ class VerificationRun(ReplayRun):
                     verified=verified, noop_verifies=experiment.noop_verifies
                 )
         return VerificationResult(
-            build=artifact.stats,
+            build=artifact.stats if self.record_build_stats else None,
             verified=verified,
             noop_verifies=experiment.noop_verifies,
         )

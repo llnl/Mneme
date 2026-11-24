@@ -140,12 +140,10 @@ The output will be similar to:
     "internalize": true
   },
   "Result": {
-    "verified": true,
-    "noop_verifies": false,
-    "verification_preprocess_ir_time": 5.659996531903744e-06,
-    "verification_opt_time": 0.007318433956243098,
-    "verification_codegen_time": 0.014848478022031486,
-    "verification_obj_size": 4792,
+    "preprocess_ir_time": 9.2298723757267e-06,
+    "opt_time": 0.006206092890352011,
+    "codegen_time": 0.01226967596448958,
+    "obj_size": 4792,
     "exec_time": [
       84040,
       82561,
@@ -153,19 +151,21 @@ The output will be similar to:
       83360,
       76520
     ],
-    "const_mem_usage": -1,
-    "local_mem_usage": 0,
-    "reg_usage": 12,
-    "preprocess_ir_time": 9.2298723757267e-06,
-    "opt_time": 0.006206092890352011,
-    "codegen_time": 0.01226967596448958,
-    "obj_size": 4792,
+    "verified": true,
+    "noop_verifies": false,
     "executed": true,
     "failed": false,
     "start_time": "",
     "end_time": "",
     "gpu_id": 0,
-    "error": ""
+    "const_mem_usage": -1,
+    "local_mem_usage": 0,
+    "reg_usage": 12,
+    "error": "",
+    "runs": [
+      "verification",
+      "timing"
+    ]
   }
 }
 ```
@@ -180,11 +180,12 @@ The output will be similar to:
     If verified on the *Result* entry is true and executed is true, **Congratulations** you have replayed successfully a vector addition.
 
 !!! note
-    A replay builds the kernel twice: once for the verification run and once,
-    with Clang's auto-initialization code removed, for the timing run that
-    produces `exec_time`. The `verification_`-prefixed fields measure the first
-    build; `preprocess_ir_time`, `opt_time`, `codegen_time` and `obj_size`
-    measure the second.
+    A replay executes a verification run and then a timing run; `runs` lists
+    the runs that executed. The timing run builds the kernel with Clang's
+    auto-initialization code removed and produces `exec_time`, the resource
+    usage fields, and `preprocess_ir_time`, `opt_time`, `codegen_time` and
+    `obj_size`. When a run did not execute, for example timing after a failed
+    verification with `--short-circuit`, its fields hold their default values.
 
 !!! tip "Tolerance-aware verification"
     By default, replay verification uses a byte-exact comparison.  If your kernel produces floating-point results and you want to accept small numerical differences across optimization pipelines, you can annotate device buffers with `mneme::annotate()` before recording. See **[Usage → Verification](verification.md)** for the full API and examples.

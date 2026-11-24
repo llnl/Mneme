@@ -4,7 +4,11 @@ import threading
 
 import pytest
 
-from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
+from mneme.mneme_types import (
+    ExperimentConfiguration,
+    ExperimentResult,
+    VerificationResult,
+)
 from mneme.futures import EvalFuture
 from mneme.replay_runs import default_run_chain
 from mneme.async_executor import (
@@ -142,15 +146,19 @@ def test_process_result_sets_future(handle):
     future = EvalFuture(7, ExperimentConfiguration())
     handle.current = future
 
+    # A failed verification without build stats still arrives as executed.
+    sent = ExperimentResult([VerificationResult(verified=False)], executed=False)
     msg = {
         "exp_id": 7,
-        "data": ExperimentResult(executed=True).to_dict(),
+        "data": sent.to_dict(),
     }
 
     handle._process_result(msg)
 
     assert future.done()
-    assert future.result().executed is True
+    assert future.result() == sent
+    assert future.result().verification is not None
+    assert future.result().timing is None
     assert handle.current is None
 
 

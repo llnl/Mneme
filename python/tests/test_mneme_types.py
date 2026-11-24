@@ -1,14 +1,18 @@
 import pytest
 import json
 import copy
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
 from mneme.mneme_types import (
     dim3,
     ExperimentConfiguration,
     BuildStats,
     ExperimentResult,
+    RunResult,
     TimingResult,
     VerificationResult,
     _to_serializable,
+    register_run_result,
 )
 
 
@@ -202,11 +206,19 @@ PRE_RUN_CHAIN_RESULT = {
 }
 
 VERIFICATION_BUILD_FIELDS = {
-    "verification_preprocess_ir_time",
-    "verification_opt_time",
-    "verification_codegen_time",
-    "verification_obj_size",
+    "verification_preprocess_ir_time": 1.0,
+    "verification_opt_time": 2.0,
+    "verification_codegen_time": 3.0,
+    "verification_obj_size": 4,
 }
+
+
+@register_run_result
+@dataclass
+class CounterResult(RunResult):
+    kind: ClassVar[str] = "counters"
+
+    values: Dict[str, int] = field(default_factory=dict)
 
 
 def _flat_result():
@@ -237,14 +249,38 @@ def _short_circuited_result():
 @pytest.mark.parametrize(
     "make_result, executed_runs",
     [
-        (_flat_result, {"verification", "timing"}),
-        (_short_circuited_result, {"verification"}),
+        (_flat_result, ["verification", "timing"]),
+        (_short_circuited_result, ["verification"]),
+        (
+            lambda: ExperimentResult([VerificationResult(verified=False)]),
+            ["verification"],
+        ),
+        (
+            lambda: ExperimentResult(
+                [VerificationResult(verified=True), CounterResult(values={})],
+                executed=True,
+            ),
+            ["verification", "counters"],
+        ),
         (
             lambda: ExperimentResult.from_dict(PRE_RUN_CHAIN_RESULT),
-            {"verification", "timing"},
+            ["verification", "timing"],
+        ),
+        (
+            lambda: ExperimentResult.from_dict(
+                dict(PRE_RUN_CHAIN_RESULT, **VERIFICATION_BUILD_FIELDS)
+            ),
+            ["verification", "timing"],
         ),
     ],
-    ids=["both-runs", "timing-short-circuited", "legacy-dict"],
+    ids=[
+        "both-runs",
+        "timing-short-circuited",
+        "failed-verification-without-build",
+        "other-kind-with-default-values",
+        "legacy-dict",
+        "legacy-dict-with-verification-build",
+    ],
 )
 def test_experiment_result_to_dict_from_dict_roundtrip_and_defaults(
     make_result, executed_runs
@@ -252,10 +288,11 @@ def test_experiment_result_to_dict_from_dict_roundtrip_and_defaults(
     r = make_result()
     d = r.to_dict()
     json.dumps(d)  # serializable
+    assert d["runs"] == executed_runs
 
     r2 = ExperimentResult.from_dict(d)
     assert r2 == r
-    assert set(r2.runs) == executed_runs
+    assert list(r2.runs) == executed_runs
     if "timing" in executed_runs:
         assert r2.exec_time is r2.timing.exec_time
 
@@ -266,13 +303,16 @@ def test_experiment_result_to_dict_from_dict_roundtrip_and_defaults(
     assert -1 not in r.exec_time
 
 
-def test_experiment_result_serializes_each_run_build_under_its_own_fields():
+@pytest.mark.parametrize(
+    "verification_build",
+    [None, BuildStats(1.0, 2.0, 3.0, 4)],
+    ids=["default", "recorded"],
+)
+def test_experiment_result_serializes_each_run_build_under_its_own_fields(
+    verification_build,
+):
     verification = VerificationResult(
-        build=BuildStats(
-            preprocess_ir_time=1.0, opt_time=2.0, codegen_time=3.0, obj_size=4
-        ),
-        verified=True,
-        noop_verifies=False,
+        build=verification_build, verified=True, noop_verifies=False
     )
     timing = TimingResult(
         build=BuildStats(
@@ -281,24 +321,27 @@ def test_experiment_result_serializes_each_run_build_under_its_own_fields():
         exec_time=[10, 11],
         reg_usage=12,
     )
-    d = ExperimentResult([verification, timing], executed=True).to_dict()
+    result = ExperimentResult([verification, timing], executed=True)
+    d = result.to_dict()
 
-    assert set(d) == set(PRE_RUN_CHAIN_RESULT) | VERIFICATION_BUILD_FIELDS
-    assert {name: d[name] for name in VERIFICATION_BUILD_FIELDS} == {
-        "verification_preprocess_ir_time": 1.0,
-        "verification_opt_time": 2.0,
-        "verification_codegen_time": 3.0,
-        "verification_obj_size": 4,
-    }
+    recorded = VERIFICATION_BUILD_FIELDS if verification_build else {}
+    assert list(d) == [*PRE_RUN_CHAIN_RESULT, *recorded, "runs"]
+    assert {name: d[name] for name in recorded} == recorded
     assert (d["preprocess_ir_time"], d["opt_time"], d["codegen_time"]) == (5.0, 6.0, 7.0)
     assert d["obj_size"] == 8
     restored = ExperimentResult.from_dict(d)
     assert restored.verification == verification
     assert restored.timing == timing
+    if verification_build:
+        assert result.verification_opt_time == 2.0
+    else:
+        with pytest.raises(AttributeError, match="record_build_stats=True"):
+            result.verification_opt_time
 
     skipped = ExperimentResult([verification]).to_dict()
     assert skipped["exec_time"] == []
     assert (skipped["obj_size"], skipped["opt_time"], skipped["reg_usage"]) == (0, 0.0, 0)
+    assert skipped["runs"] == ["verification"]
 
 
 def test_experiment_result_from_dict_loads_pre_run_chain_results():
@@ -315,6 +358,43 @@ def test_experiment_result_from_dict_loads_pre_run_chain_results():
         reg_usage=3,
     )
     assert (r.verified, r.exec_time, r.opt_time, r.gpu_id) == (True, [7, 8, 9], 1.5, 1)
-    assert r.to_dict() == dict(
-        PRE_RUN_CHAIN_RESULT, **{name: 0 for name in VERIFICATION_BUILD_FIELDS}
-    )
+    assert r.to_dict() == dict(PRE_RUN_CHAIN_RESULT, runs=["verification", "timing"])
+
+
+def test_experiment_result_writes_other_run_kinds_only_when_executed():
+    without = ExperimentResult([VerificationResult(verified=True)]).to_dict()
+    assert set(without) == set(PRE_RUN_CHAIN_RESULT) | {"runs"}
+
+    counters = CounterResult(build=BuildStats(obj_size=8), values={"a": 1})
+    d = ExperimentResult([counters]).to_dict()
+    assert {k: v for k, v in d.items() if k.startswith("counters_")} == {
+        "counters_values": {"a": 1},
+        "counters_preprocess_ir_time": 0.0,
+        "counters_opt_time": 0.0,
+        "counters_codegen_time": 0.0,
+        "counters_obj_size": 8,
+    }
+
+    d["runs"] = ["sampling"]
+    with pytest.raises(ValueError, match="'sampling'.*import the module"):
+        ExperimentResult.from_dict(d)
+
+
+def test_register_run_result_rejects_colliding_keys():
+    with pytest.raises(TypeError, match="reserved result keys: exec_time"):
+
+        @register_run_result
+        @dataclass
+        class ExecResult(RunResult):
+            kind: ClassVar[str] = "exec"
+
+            time: int = 0
+
+    with pytest.raises(TypeError, match="more than one field to: twice_opt_time"):
+
+        @register_run_result
+        @dataclass
+        class TwiceResult(RunResult):
+            kind: ClassVar[str] = "twice"
+
+            opt_time: float = 0.0

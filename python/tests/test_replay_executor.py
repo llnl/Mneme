@@ -657,7 +657,8 @@ def test_build_measures_stages_and_obj_size(monkeypatch, purge_autoinit):
     assert optimize_purges == [purge_autoinit]
 
 
-def test_runs_record_resource_usage_and_noop_verifies(monkeypatch):
+@pytest.mark.parametrize("record_build_stats", [False, True])
+def test_runs_record_resource_usage_and_noop_verifies(monkeypatch, record_build_stats):
     mod = _reload_executor_module(monkeypatch)
     _patch_executor_init_dependencies(
         monkeypatch, mod, FakeRecordedExecution(FakeKernelDescr(kernel_name="K"))
@@ -691,7 +692,9 @@ def test_runs_record_resource_usage_and_noop_verifies(monkeypatch):
         ex, mod.ExperimentConfiguration(), FakeModule()
     )
 
-    verification = VerificationRun().execute(experiment)
+    verification = VerificationRun(record_build_stats=record_build_stats).execute(
+        experiment
+    )
     TimingRun(iterations=1, warmup=0).execute(experiment)
     timing = TimingRun(iterations=5, warmup=2).execute(experiment)
 
@@ -703,6 +706,8 @@ def test_runs_record_resource_usage_and_noop_verifies(monkeypatch):
     assert [call[-1] for call in device_func.profile_calls] == [1, 1, 7]
     assert verification.verified is True
     assert verification.noop_verifies is True
+    expected_build = BuildStats(obj_size=999) if record_build_stats else None
+    assert verification.build == expected_build
     assert timing.exec_time == list(range(7))
     assert timing.build.obj_size == 999
     assert timing.reg_usage == device_func.reg_usage
