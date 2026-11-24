@@ -1,3 +1,4 @@
+#include "state_loader.hpp"
 #include "llvm/core.h"
 #include <memory>
 #include <mneme/MnemePython.hpp>
@@ -25,16 +26,22 @@ prologueAndEpilogue(MnemeDeviceMemStateRef v1, MnemeDeviceMemStateRef v2) {
 }
 
 extern "C" {
-API_EXPORT(MnemeDeviceMemStateRef)
-MnemePy_initializeMemState(const char *KernelName, const char *fn,
-                           const char *BasePrologueFn, bool isPrologue) {
-  std::string BaseSnapshotName =
-      BasePrologueFn == nullptr ? "" : std::string(BasePrologueFn);
-  std::unique_ptr<DeviceMemState> state =
-      isPrologue
-          ? makeReplayPrologueState<Vendor>(KernelName, fn)
-          : makeReplayEpilogueState<Vendor>(KernelName, fn, BaseSnapshotName);
-  return wrap(state.release());
+// A standalone epilogue can use ProFile as a diff base without mapping its VAs.
+API_EXPORT(void)
+MnemePy_openMemStates(const char *Name, const char *ProFile,
+                      const char *EpiFile, size_t BufferSize,
+                      MnemeDeviceMemStateRef *ProOut,
+                      MnemeDeviceMemStateRef *EpiOut) {
+  StateLoader<Vendor> Loader(BufferSize);
+  auto Pro = ProOut ? Loader.prologue(Name, ProFile) : nullptr;
+  auto Epi =
+      EpiOut ? Loader.epilogue(Name, EpiFile, ProFile, Pro.get()) : nullptr;
+  Loader.finish();
+  
+  if (ProOut)
+    *ProOut = wrap(Pro.release());
+  if (EpiOut)
+    *EpiOut = wrap(Epi.release());
 }
 
 API_EXPORT(void) MnemePy_DisposeMemState(MnemeDeviceMemStateRef MemState) {
@@ -42,11 +49,6 @@ API_EXPORT(void) MnemePy_DisposeMemState(MnemeDeviceMemStateRef MemState) {
     return;
   auto state = unwrap(MemState);
   delete state;
-}
-
-API_EXPORT(void) MnemePy_LoadMemState(MnemeDeviceMemStateRef MemState) {
-  auto state = unwrap(MemState);
-  state->load();
 }
 
 API_EXPORT(bool)

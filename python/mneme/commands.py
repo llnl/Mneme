@@ -33,6 +33,7 @@ import yaml
 from mneme.llvm import utils
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
+from mneme.state_loader import add_buffer_size_arg
 from mneme.pass_plugins import add_pass_plugin_args
 from mneme.profile import init_profiler
 from mneme.proteus import jit
@@ -741,6 +742,7 @@ class Replay(BaseExecutor):
             default=False,
         )
 
+        add_buffer_size_arg(parser)
         add_pass_plugin_args(parser)
 
         parser.set_defaults(func=Replay.run)

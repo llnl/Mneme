@@ -129,33 +129,116 @@ inline void SnapshotHeader::write(llvm::raw_ostream &OS) const {
   util::writeScalar(OS, Version);
 }
 
-template <DeviceVendors VendorTypes> class BaseSnapshotSource;
+namespace snapshot_layout {
+inline constexpr SnapshotHeader BytesV0{SnapshotKind::Bytes, 0};
+inline constexpr SnapshotHeader BytesV1{SnapshotKind::Bytes, 1};
+inline constexpr SnapshotHeader DiffV1{SnapshotKind::Diff, 1};
+inline constexpr SnapshotHeader DiffV2{SnapshotKind::Diff, 2};
+} // namespace snapshot_layout
 
-// An opened snapshot file. Each subclass decodes one on-disk layout.
-template <DeviceVendors VendorTypes> class SnapshotReader {
-public:
-  SnapshotReader(std::string Filename,
-                 std::unique_ptr<llvm::MemoryBuffer> Buffer,
-                 size_t PayloadOffset)
-      : Filename(std::move(Filename)), Buffer(std::move(Buffer)),
-        PayloadOffset(PayloadOffset) {}
-  virtual ~SnapshotReader() = default;
+// Views into the mapped file stay valid for the lifetime of its reader.
+class SnapshotCursor {
+  llvm::StringRef Remaining;
+  bool Diff, AnnotationList;
 
-  // True if read() needs a base snapshot to reconstruct the state.
-  virtual bool requiresBaseSnapshot() const = 0;
-
-  virtual Snapshot<VendorTypes>
-  read(const std::string &KernelName,
-       const BaseSnapshotSource<VendorTypes> &Base) const = 0;
-
-protected:
-  const char *payload() const {
-    return Buffer->getBufferStart() + PayloadOffset;
+  template <typename F> void ranges(size_t Extent, F &&Visit) {
+    size_t Count = scalar<size_t>();
+    for (size_t I = 0; I < Count; ++I) {
+      size_t Offset = scalar<size_t>(), Size = scalar<size_t>();
+      if (Offset > Extent || Size > Extent - Offset)
+        LOG_FATAL("Snapshot diff range exceeds its allocation");
+      Visit(Offset, Size);
+    }
   }
 
-  std::string Filename;
-  std::unique_ptr<llvm::MemoryBuffer> Buffer;
-  size_t PayloadOffset;
+  Metadata metadataRecord() {
+    // Validate the variable-length tag before calling the metadata decoder.
+    size_t Prefix = metadata::serializedSize(Metadata{}) - sizeof(size_t);
+    const char *Start = take(Prefix).data();
+    take(scalar<size_t>());
+    return metadata::fromBuffer(Start);
+  }
+
+  std::vector<MemoryAnnotation> annotations(size_t Size) {
+    if (!AnnotationList)
+      return {{{0, Size}, metadataRecord()}};
+
+    std::vector<MemoryAnnotation> Result;
+    size_t Count = scalar<size_t>();
+    for (size_t I = 0; I < Count; ++I) {
+      auto Offset = scalar<uint64_t>(), Extent = scalar<uint64_t>();
+      Result.push_back({{Offset, Extent}, metadataRecord()});
+    }
+
+    return Result;
+  }
+
+public:
+  SnapshotCursor(llvm::StringRef Payload, SnapshotHeader Header)
+      : Remaining(Payload), Diff(Header.Kind == SnapshotKind::Diff),
+        AnnotationList(Header.Version ==
+                       (Diff ? snapshot_layout::DiffV2.Version
+                             : snapshot_layout::BytesV1.Version)) {}
+
+  llvm::StringRef take(size_t Size) {
+    if (Size > Remaining.size())
+      LOG_FATAL("Truncated Mneme snapshot");
+
+    auto Bytes = Remaining.take_front(Size);
+    Remaining = Remaining.drop_front(Size);
+    return Bytes;
+  }
+  template <typename T> T scalar() {
+    const char *P = take(sizeof(T)).data();
+    return util::extractScalar<T>(P);
+  }
+
+  template <typename F> void global(F &&Destination) {
+    auto Name = take(scalar<size_t>()).str();
+    auto Size = scalar<size_t>();
+    auto Addr = scalar<void *>();
+    auto *Dst = Destination(GlobalVarHeader{std::move(Name), Size, Addr});
+
+    auto Copy = [&](size_t Offset, size_t N) {
+      auto Data = take(N);
+      if (N)
+        std::memcpy(Dst + Offset, Data.data(), N);
+    };
+
+    if (Diff)
+      ranges(Size, Copy);
+    else
+      Copy(0, Size);
+  }
+
+  BlobHeader blobHeader() {
+    const char *P = take(BlobHeader::serializedSize()).data();
+    return BlobHeader::read(P);
+  }
+
+  template <typename F>
+  std::vector<MemoryAnnotation> blob(size_t Size, F &&Visit) {
+    auto Payload = [&](size_t Offset, size_t N) { Visit(Offset, take(N)); };
+    if (Diff) {
+      auto Annotations = annotations(Size);
+      ranges(Size, Payload);
+      return Annotations;
+    }
+
+    Payload(0, Size);
+    return annotations(Size);
+  }
+
+  template <typename F> void args(F &&Visit) {
+    if (!Diff) {
+      size_t Count = scalar<size_t>();
+      for (size_t I = 0; I < Count; ++I)
+        Visit(take(scalar<size_t>()));
+    }
+
+    if (!Remaining.empty() && AnnotationList)
+      LOG_FATAL("Unexpected trailing bytes in snapshot");
+  }
 };
 
 // Loads a base prologue snapshot on demand for readers that need one.
@@ -173,308 +256,129 @@ private:
   std::string Filename;
 };
 
-namespace snapshot_detail {
+// Device replay and host-side inspection use the same versioned decoder.
+template <DeviceVendors VendorTypes> class SnapshotReader {
+  using Blob = MnemeMemoryBlob<VendorTypes>;
+  std::unique_ptr<llvm::MemoryBuffer> Buffer;
+  size_t PayloadOffset;
+  SnapshotHeader Header;
 
-// Section decoders shared by the readers. A helper decodes a section as it
-// appears in every layout that calls it. When a new layout changes a section,
-// add a new helper instead of changing one an older reader calls.
-
-inline void
-readGlobals(const char *&Buffer,
-            std::unordered_map<std::string, ReplayGlobalVar> &GlobalVars) {
-  size_t TotalGlobals = util::extractScalar<size_t>(Buffer);
-  LOG_DEBUG("Snapshot contains {} Globals", TotalGlobals);
-  for (size_t I = 0; I < TotalGlobals; ++I) {
-    auto [Name, RGV] = readGlobalVarRecord(Buffer);
-    GlobalVars.try_emplace(Name, std::move(RGV));
-  }
-}
-
-inline void readArgs(const char *&Buffer, KernelInfo &KInfo) {
-  size_t TotalArguments = util::extractScalar<size_t>(Buffer);
-  LOG_DEBUG("Snapshot contains {} total arguments", TotalArguments);
-  KInfo.KernelArgSizes.resize(TotalArguments);
-  KInfo.ArgData.resize(TotalArguments);
-  for (size_t A = 0; A < TotalArguments; ++A) {
-    KInfo.KernelArgSizes[A] = util::extractScalar<size_t>(Buffer);
-    KInfo.setArgData(Buffer, A);
-  }
-}
-
-template <DeviceVendors VendorTypes>
-Snapshot<VendorTypes> loadDiffBase(const BaseSnapshotSource<VendorTypes> &Base,
-                                   const std::string &KernelName,
-                                   const std::string &Filename) {
-  if (Base.empty())
-    LOG_FATAL("Mneme diff snapshot " + Filename +
-              " requires a base prologue snapshot");
-  return Base.load(KernelName);
-}
-
-inline void expectCount(size_t Actual, size_t Expected,
-                        const std::string &Filename, const char *What) {
-  if (Actual != Expected)
-    LOG_FATAL("Mneme diff " + Filename + " does not match prologue " + What +
-              " count");
-}
-
-// A range count followed by that many (offset, size, bytes) ranges.
-inline void applyDiffRanges(const char *&Buffer,
-                            llvm::MutableArrayRef<uint8_t> Target) {
-  size_t NumRanges = util::extractScalar<size_t>(Buffer);
-  for (size_t R = 0; R < NumRanges; ++R) {
-    size_t Offset = util::extractScalar<size_t>(Buffer);
-    size_t Size = util::extractScalar<size_t>(Buffer);
-    if (Offset > Target.size() || Size > Target.size() - Offset)
-      LOG_FATAL("Malformed Mneme diff range: offset " + std::to_string(Offset) +
-                " size " + std::to_string(Size) + " exceeds target size " +
-                std::to_string(Target.size()));
-    std::memcpy(Target.data() + Offset, Buffer, Size);
-    Buffer += Size;
-  }
-}
-
-inline void
-applyGlobalDiffs(const char *&Buffer,
-                 std::unordered_map<std::string, ReplayGlobalVar> &GlobalVars,
-                 const std::string &Filename) {
-  size_t TotalGlobals = util::extractScalar<size_t>(Buffer);
-  expectCount(TotalGlobals, GlobalVars.size(), Filename, "global");
-  for (size_t I = 0; I < TotalGlobals; ++I) {
-    GlobalVarHeader GVH = GlobalVarHeader::read(Buffer);
-    auto It = GlobalVars.find(GVH.Name);
-    if (It == GlobalVars.end())
-      LOG_FATAL("Mneme diff references global missing from prologue: " +
-                GVH.Name);
-    if (It->second.VarSize != GVH.Size)
-      LOG_FATAL("Mneme diff global size mismatch for: " + GVH.Name);
-    It->second.DevAddr = GVH.DevAddr;
-    applyDiffRanges(Buffer, llvm::MutableArrayRef<uint8_t>(
-                                static_cast<uint8_t *>(It->second.HostAddr),
-                                It->second.VarSize));
-  }
-}
-
-// Reads a diff blob header and returns the base blob it refers to.
-template <DeviceVendors VendorTypes>
-MnemeMemoryBlob<VendorTypes> &
-readDiffBlobHeader(const char *&Buffer,
-                   BlobsByAddress<VendorTypes> &DeviceMemory) {
-  BlobHeader BH = BlobHeader::read(Buffer);
-  auto It = DeviceMemory.find(BH.DevAddr);
-  if (It == DeviceMemory.end())
-    LOG_FATAL("Mneme diff references device allocation missing from "
-              "prologue");
-  auto &Blob = It->second;
-  if (Blob.getActualSize() != BH.ActualSize || Blob.getSize() != BH.Size)
-    LOG_FATAL("Mneme diff memory blob size mismatch");
-  return Blob;
-}
-
-template <DeviceVendors VendorTypes>
-llvm::MutableArrayRef<uint8_t> hostBytes(MnemeMemoryBlob<VendorTypes> &Blob) {
-  return llvm::MutableArrayRef<uint8_t>(Blob.getHostData(), Blob.getSize());
-}
-
-inline void expectPayloadEnd(const char *Buffer, const llvm::MemoryBuffer &File,
-                             const std::string &Filename) {
-  if (Buffer != File.getBufferEnd())
-    LOG_FATAL("Unexpected trailing bytes in Mneme snapshot " + Filename);
-}
-
-} // namespace snapshot_detail
-
-template <DeviceVendors VendorTypes>
-class BytesReaderV0 : public SnapshotReader<VendorTypes> {
 public:
-  using SnapshotReader<VendorTypes>::SnapshotReader;
-
-  static constexpr SnapshotHeader Layout{SnapshotKind::Bytes, 0};
-
-  bool requiresBaseSnapshot() const override { return false; }
-
-  Snapshot<VendorTypes>
-  read(const std::string &KernelName,
-       const BaseSnapshotSource<VendorTypes> &) const override {
-    Snapshot<VendorTypes> Snap;
-    Snap.KInfo = std::make_shared<KernelInfo>(KernelName);
-    const char *CurrentPtr = this->payload();
-
-    snapshot_detail::readGlobals(CurrentPtr, Snap.GlobalVars);
-    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
-    for (size_t I = 0; I < TotalMemBlobs; ++I)
-      Snap.DeviceMemory.insert(
-          MnemeMemoryBlob<VendorTypes>::readWithMetadata(CurrentPtr));
-    snapshot_detail::readArgs(CurrentPtr, *Snap.KInfo);
-    return Snap;
+  SnapshotReader(std::unique_ptr<llvm::MemoryBuffer> Buffer, size_t Offset,
+                 SnapshotHeader Header)
+      : Buffer(std::move(Buffer)), PayloadOffset(Offset), Header(Header) {}
+  bool requiresBaseSnapshot() const {
+    return Header.Kind == SnapshotKind::Diff;
   }
-};
 
-// Each blob record carries an annotation list instead of a single metadata.
-template <DeviceVendors VendorTypes>
-class BytesReaderV1 : public SnapshotReader<VendorTypes> {
-public:
-  using SnapshotReader<VendorTypes>::SnapshotReader;
+  // A diff starts with a private copy of its base. The caller owns the storage
+  // policy for blob backing and consumes file payloads while File is alive.
+  template <typename CreateBlob, typename LoadPayload>
+  void readInto(Snapshot<VendorTypes> &Snap, CreateBlob Create,
+                LoadPayload Load) const {
+    SnapshotCursor In(Buffer->getBuffer().drop_front(PayloadOffset), Header);
+    const bool Diff = requiresBaseSnapshot();
+    
+    auto Count = In.scalar<size_t>();
+    if (Diff && Count != Snap.GlobalVars.size())
+      LOG_FATAL("Diff global count differs from prologue");
+    for (size_t I = 0; I < Count; ++I)
+      In.global([&](const GlobalVarHeader &H) {
+        if (Diff) {
+          auto It = Snap.GlobalVars.find(H.Name);
+          if (It == Snap.GlobalVars.end())
+            LOG_FATAL("Diff global {} missing from prologue", H.Name);
+          auto &G = It->second;
+          if (G.VarSize != H.Size)
+            LOG_FATAL("Diff size mismatch for global {}", H.Name);
+          G.DevAddr = H.DevAddr;
+          return static_cast<uint8_t *>(G.HostAddr);
+        }
+        auto [It, New] = Snap.GlobalVars.try_emplace(H.Name, H.DevAddr, H.Size);
+        if (!New)
+          LOG_FATAL("Duplicate global {}", H.Name);
+        return static_cast<uint8_t *>(It->second.HostAddr);
+      });
 
-  static constexpr SnapshotHeader Layout{SnapshotKind::Bytes, 1};
+    Count = In.scalar<size_t>();
+    if (Diff && Count != Snap.DeviceMemory.size())
+      LOG_FATAL("Diff allocation count differs from prologue");
+    for (size_t I = 0; I < Count; ++I) {
+      auto H = In.blobHeader();
+      auto It = Snap.DeviceMemory.find(H.DevAddr);
 
-  bool requiresBaseSnapshot() const override { return false; }
+      if (Diff && It == Snap.DeviceMemory.end())
+        LOG_FATAL("Diff allocation {} missing from prologue", H.DevAddr);
+      if (!Diff && It != Snap.DeviceMemory.end())
+        LOG_FATAL("Duplicate snapshot allocation");
+      if (H.Size > H.ActualSize)
+        LOG_FATAL("Snapshot payload exceeds its allocation");
 
-  Snapshot<VendorTypes>
-  read(const std::string &KernelName,
-       const BaseSnapshotSource<VendorTypes> &) const override {
-    Snapshot<VendorTypes> Snap;
-    Snap.KInfo = std::make_shared<KernelInfo>(KernelName);
-    const char *CurrentPtr = this->payload();
+      auto &B = Diff ? It->second : Create(H);
+      if (B.getSize() != H.Size || B.getActualSize() != H.ActualSize)
+        LOG_FATAL("Diff allocation size differs from prologue");
 
-    snapshot_detail::readGlobals(CurrentPtr, Snap.GlobalVars);
-    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
-    for (size_t I = 0; I < TotalMemBlobs; ++I)
-      Snap.DeviceMemory.insert(
-          MnemeMemoryBlob<VendorTypes>::readWithAnnotations(CurrentPtr));
-    snapshot_detail::readArgs(CurrentPtr, *Snap.KInfo);
-    snapshot_detail::expectPayloadEnd(CurrentPtr, *this->Buffer,
-                                      this->Filename);
-    return Snap;
-  }
-};
-
-// A diff stores only changed ranges, so the diff readers reconstruct the full
-// base prologue first and then overlay the diff onto it.
-template <DeviceVendors VendorTypes>
-class DiffReaderV1 : public SnapshotReader<VendorTypes> {
-public:
-  using SnapshotReader<VendorTypes>::SnapshotReader;
-
-  static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 1};
-
-  bool requiresBaseSnapshot() const override { return true; }
-
-  Snapshot<VendorTypes>
-  read(const std::string &KernelName,
-       const BaseSnapshotSource<VendorTypes> &Base) const override {
-    Snapshot<VendorTypes> Snap =
-        snapshot_detail::loadDiffBase(Base, KernelName, this->Filename);
-    const char *CurrentPtr = this->payload();
-
-    snapshot_detail::applyGlobalDiffs(CurrentPtr, Snap.GlobalVars,
-                                      this->Filename);
-    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
-    snapshot_detail::expectCount(TotalMemBlobs, Snap.DeviceMemory.size(),
-                                 this->Filename, "memory blob");
-    for (size_t I = 0; I < TotalMemBlobs; ++I) {
-      auto &Blob =
-          snapshot_detail::readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
-      Blob.readWholeBlobMetadata(CurrentPtr);
-      snapshot_detail::applyDiffRanges(CurrentPtr,
-                                       snapshot_detail::hostBytes(Blob));
+      auto Annotations =
+          In.blob(H.Size, [&](size_t Offset, llvm::StringRef Data) {
+            if (!Data.empty())
+              Load(B, Offset, Data);
+          });
+      if (!B.replaceAnnotations(std::move(Annotations)))
+        LOG_FATAL("Invalid allocation annotations");
     }
-    return Snap;
+
+
+    In.args([&](llvm::StringRef Arg) {
+      auto &K = *Snap.KInfo;
+      K.KernelArgSizes.push_back(Arg.size());
+      K.ArgData.emplace_back();
+      const char *P = Arg.data();
+      K.setArgData(P, K.ArgData.size() - 1);
+    });
   }
-};
-
-// Each blob record carries an annotation list where version 1 carried a single
-// metadata.
-template <DeviceVendors VendorTypes>
-class DiffReaderV2 : public SnapshotReader<VendorTypes> {
-public:
-  using SnapshotReader<VendorTypes>::SnapshotReader;
-
-  static constexpr SnapshotHeader Layout{SnapshotKind::Diff, 2};
-
-  bool requiresBaseSnapshot() const override { return true; }
 
   Snapshot<VendorTypes>
   read(const std::string &KernelName,
-       const BaseSnapshotSource<VendorTypes> &Base) const override {
-    Snapshot<VendorTypes> Snap =
-        snapshot_detail::loadDiffBase(Base, KernelName, this->Filename);
-    const char *CurrentPtr = this->payload();
+       const BaseSnapshotSource<VendorTypes> &Base) const {
+    Snapshot<VendorTypes> Snap;
+    if (requiresBaseSnapshot())
+      Snap = Base.load(KernelName);
+    else
+      Snap.KInfo = std::make_shared<KernelInfo>(KernelName);
 
-    snapshot_detail::applyGlobalDiffs(CurrentPtr, Snap.GlobalVars,
-                                      this->Filename);
-    size_t TotalMemBlobs = util::extractScalar<size_t>(CurrentPtr);
-    snapshot_detail::expectCount(TotalMemBlobs, Snap.DeviceMemory.size(),
-                                 this->Filename, "memory blob");
-    for (size_t I = 0; I < TotalMemBlobs; ++I) {
-      auto &Blob =
-          snapshot_detail::readDiffBlobHeader(CurrentPtr, Snap.DeviceMemory);
-      Blob.readAnnotations(CurrentPtr);
-      snapshot_detail::applyDiffRanges(CurrentPtr,
-                                       snapshot_detail::hostBytes(Blob));
-    }
-    snapshot_detail::expectPayloadEnd(CurrentPtr, *this->Buffer,
-                                      this->Filename);
+    readInto(
+        Snap,
+        [&](BlobHeader H) -> Blob & {
+          return Snap.DeviceMemory
+              .try_emplace(H.DevAddr, H.ActualSize, nullptr, H.Size)
+              .first->second;
+        },
+        [](Blob &B, size_t Offset, llvm::StringRef Data) {
+          std::memcpy(B.getHostData() + Offset, Data.data(), Data.size());
+        });
     return Snap;
   }
 };
 
-// Every layout Mneme has ever written needs a row here. A reader owns its
-// (kind, version) pair through its Layout member; the writer that produces
-// the current layout returns the same member from header().
 template <DeviceVendors VendorTypes> class SnapshotFormatRegistry {
 public:
   static std::unique_ptr<SnapshotReader<VendorTypes>>
   open(const std::string &Filename) {
-    LOG_DEBUG("Opening snapshot file {}", Filename);
-    auto Buffer = openSnapshotFile(Filename);
-    auto [Header, PayloadOffset] = SnapshotHeader::parse(Buffer->getBuffer());
-
-    size_t Count = 0;
-    const Entry *Table = table(Count);
-    for (size_t I = 0; I < Count; ++I)
-      if (Table[I].Kind == Header.Kind && Table[I].Version == Header.Version)
-        return Table[I].Make(Filename, std::move(Buffer), PayloadOffset);
-
-    LOG_FATAL("Unsupported Mneme snapshot format in " + Filename + ": kind " +
-              std::to_string(static_cast<uint32_t>(Header.Kind)) + " version " +
-              std::to_string(Header.Version));
-  }
-
-private:
-  using Factory = std::unique_ptr<SnapshotReader<VendorTypes>> (*)(
-      std::string, std::unique_ptr<llvm::MemoryBuffer>, size_t);
-
-  struct Entry {
-    SnapshotKind Kind;
-    uint32_t Version;
-    Factory Make;
-  };
-
-  template <typename ReaderT>
-  static std::unique_ptr<SnapshotReader<VendorTypes>>
-  make(std::string Filename, std::unique_ptr<llvm::MemoryBuffer> Buffer,
-       size_t PayloadOffset) {
-    return std::make_unique<ReaderT>(std::move(Filename), std::move(Buffer),
-                                     PayloadOffset);
-  }
-
-  template <typename ReaderT> static constexpr Entry entry() {
-    return {ReaderT::Layout.Kind, ReaderT::Layout.Version, &make<ReaderT>};
-  }
-
-  static const Entry *table(size_t &Count) {
-    static const Entry Table[] = {
-        entry<BytesReaderV0<VendorTypes>>(),
-        entry<BytesReaderV1<VendorTypes>>(),
-        entry<DiffReaderV1<VendorTypes>>(),
-        entry<DiffReaderV2<VendorTypes>>(),
-    };
-    Count = sizeof(Table) / sizeof(Table[0]);
-    return Table;
-  }
-
-  static std::unique_ptr<llvm::MemoryBuffer>
-  openSnapshotFile(const std::string &Filename) {
-    if (!std::filesystem::exists(Filename))
-      LOG_FATAL("Mneme Snapshot file does not exist");
-
-    llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> BufferOrErr =
-        llvm::MemoryBuffer::getFile(Filename);
-    if (std::error_code EC = BufferOrErr.getError())
-      LOG_FATAL("Error when opening file " + EC.message());
-
-    return std::move(BufferOrErr.get());
+    // Binary snapshot layouts do not need a trailing NUL. Allow a direct file
+    // mapping even when the file ends exactly on a page boundary.
+    auto File = llvm::MemoryBuffer::getFile(Filename, /*IsText=*/false,
+                                            /*RequiresNullTerminator=*/false);
+    if (!File)
+      LOG_FATAL("Opening snapshot {}: {}", Filename, File.getError().message());
+    auto [Header, Offset] = SnapshotHeader::parse((*File)->getBuffer());
+    for (auto Layout : {snapshot_layout::BytesV0, snapshot_layout::BytesV1,
+                        snapshot_layout::DiffV1, snapshot_layout::DiffV2})
+      if (Layout.Kind == Header.Kind && Layout.Version == Header.Version)
+        return std::make_unique<SnapshotReader<VendorTypes>>(std::move(*File),
+                                                             Offset, Header);
+    LOG_FATAL(
+        "Unsupported Mneme snapshot format in {}: kind {} version {}",
+        Filename, static_cast<uint32_t>(Header.Kind), Header.Version);
   }
 };
 
@@ -486,8 +390,9 @@ BaseSnapshotSource<VendorTypes>::load(const std::string &KernelName) const {
 
   auto Reader = SnapshotFormatRegistry<VendorTypes>::open(Filename);
   if (Reader->requiresBaseSnapshot())
-    LOG_FATAL("Snapshot " + Filename +
-              " cannot be used as a base because it itself requires a base");
+    LOG_FATAL(
+        "Snapshot {} cannot be used as a base because it itself requires a base",
+        Filename);
 
   return Reader->read(KernelName, BaseSnapshotSource<VendorTypes>());
 }
@@ -629,9 +534,7 @@ public:
   }
 
 protected:
-  SnapshotHeader header() const override {
-    return BytesReaderV1<VendorTypes>::Layout;
-  }
+  SnapshotHeader header() const override { return snapshot_layout::BytesV1; }
 
   void writePayload(llvm::raw_ostream &OutBC,
                     const SnapshotInput<VendorTypes> &In, bool) const override {
@@ -698,9 +601,7 @@ public:
   }
 
 protected:
-  SnapshotHeader header() const override {
-    return DiffReaderV2<VendorTypes>::Layout;
-  }
+  SnapshotHeader header() const override { return snapshot_layout::DiffV2; }
 
   void writePayload(llvm::raw_ostream &OutBC,
                     const SnapshotInput<VendorTypes> &In,

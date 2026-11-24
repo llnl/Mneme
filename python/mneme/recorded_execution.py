@@ -24,23 +24,24 @@ Notes
 
 import hashlib
 import json
-from ctypes import POINTER, c_bool, c_char_p, c_int, c_void_p
+from ctypes import POINTER, byref, c_size_t, c_bool, c_char_p, c_int, c_void_p
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .state_loader import DEFAULT_BUFFER_SIZE, buffer_bytes
 from .llvm import ffi
 from .mneme_types import dim3
 from .proteus import jit
 
 MnemeRecordStateRef = ffi._make_opaque_ref("MnemeRecordState")
-ffi.lib.MnemePy_initializeMemState.argtypes = [c_char_p, c_char_p, c_char_p, c_bool]
-ffi.lib.MnemePy_initializeMemState.restype = MnemeRecordStateRef
-
+ffi.lib.MnemePy_openMemStates.argtypes = [
+    c_char_p, c_char_p, c_char_p, c_size_t,
+    POINTER(MnemeRecordStateRef), POINTER(MnemeRecordStateRef),
+]
+ffi.lib.MnemePy_openMemStates.restype = None
 ffi.lib.MnemePy_DisposeMemState.argtypes = [MnemeRecordStateRef]
-
-ffi.lib.MnemePy_LoadMemState.argtypes = [MnemeRecordStateRef]
 
 ffi.lib.MnemePy_CompareMemState.argtypes = [MnemeRecordStateRef, MnemeRecordStateRef]
 ffi.lib.MnemePy_CompareMemState.restype = c_bool
@@ -125,6 +126,30 @@ def _make_path_relative(p, base_dir):
     return p
 
 
+def _open_states(prologue, epilogue, buffer_size):
+    """ helper for opening the memory states
+    """
+    states = [s for s in (prologue, epilogue) if s is not None]
+    if any(s._load for s in states):
+        raise RuntimeError("Close the open snapshots before loading a new pair")
+
+    pro_file = prologue.fn if prologue is not None else epilogue.base_prologue_fn
+    pro_handle, epi_handle = MnemeRecordStateRef(), MnemeRecordStateRef()
+    ffi.lib.MnemePy_openMemStates(
+        states[0].kernel_name.encode(),
+        pro_file.encode() if pro_file else None,
+        epilogue.fn.encode() if epilogue is not None else None,
+        buffer_bytes(buffer_size),
+        byref(pro_handle) if prologue is not None else None,
+        byref(epi_handle) if epilogue is not None else None,
+    )
+
+    for state, handle in ((prologue, pro_handle), (epilogue, epi_handle)):
+        if state is not None:
+            state._state = handle
+            state._load = True
+
+
 class MemStateRef:
     """
     Handle to a recorded memory snapshot (prologue/epilogue).
@@ -189,26 +214,13 @@ class MemStateRef:
                 self._args = None
                 self._num_args = None
 
-    def open(self):
-        """
-        Initialize and load the snapshot into the native handle.
-
-        Returns
-        -------
-        MemStateRef
-            Returns self for convenient chaining / context-manager usage.
-        """
-        if self._state is None:
-            base_fn = self.base_prologue_fn or ""
-            self._state = ffi.lib.MnemePy_initializeMemState(
-                c_char_p(self.kernel_name.encode("utf-8")),
-                c_char_p(self.fn.encode("utf-8")),
-                c_char_p(base_fn.encode("utf-8")),
-                c_bool(self.s_type == SnapshotType.PROLOGUE),
-            )
-
-        ffi.lib.MnemePy_LoadMemState(self._state)
-        self._load = True
+    def open(self, buffer_size=DEFAULT_BUFFER_SIZE):
+        """Load this snapshot on the current device and return its handle."""
+        if not self._load:
+            if self.s_type == SnapshotType.PROLOGUE:
+                _open_states(self, None, buffer_size)
+            else:
+                _open_states(None, self, buffer_size)
         return self
 
     @property
@@ -479,6 +491,11 @@ class RecordedExecution:
                 SnapshotType.EPILOGUE,
                 base_prologue_fn=prologue_fn,
             )
+
+        def open_states(self, buffer_size=DEFAULT_BUFFER_SIZE):
+            """Open both snapshots, sharing the staging buffer and resident diff base."""
+            _open_states(self.prologue, self.epilogue, buffer_size)
+            return self.prologue, self.epilogue
 
         def __hash__(self):
             return hash(self.dynamic_hash + self.static_hash)

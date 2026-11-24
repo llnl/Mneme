@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -17,12 +18,14 @@ template <typename Ty> Ty roundUp(Ty Size, Ty Divider) {
   return (Size + Divider - 1) & ~(Divider - 1);
 }
 template <typename Ty> Ty extractScalar(const char *&Buffer) {
-  Ty Value = *reinterpret_cast<const Ty *>(Buffer);
+  Ty Value;
+  std::memcpy(&Value, Buffer, sizeof(Value));
   Buffer += sizeof(Ty);
   return Value;
 }
 template <typename Ty> Ty extractScalar(char *&Buffer) {
-  Ty Value = *reinterpret_cast<const Ty *>(Buffer);
+  Ty Value;
+  std::memcpy(&Value, Buffer, sizeof(Value));
   Buffer += sizeof(Ty);
   return Value;
 }

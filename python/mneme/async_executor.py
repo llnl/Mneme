@@ -11,6 +11,7 @@ from typing import Callable, Dict, Optional, Sequence, Union
 
 from mneme.futures import EvalFuture
 from mneme.mneme_logging import logger
+from mneme.state_loader import DEFAULT_BUFFER_SIZE
 from mneme.replay_executor import TuneWorker
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
 
@@ -139,6 +140,7 @@ class TuneWorkerHandle:
         ] = None,
         short_circuit: bool = False,
         pass_plugins: Sequence[str] = (),
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
     ):
         """
         Construct a worker handle and start the worker process + monitor thread.
@@ -169,6 +171,8 @@ class TuneWorkerHandle:
             Whether to skip timing runs when verification fails.
         pass_plugins : Sequence[str]
             Pass plugin libraries the worker loads into the JIT.
+        buffer_size : int
+            The memory state load buffer size.
 
         Notes
         -----
@@ -192,6 +196,7 @@ class TuneWorkerHandle:
         self.warmup = warmup
         self.short_circuit = short_circuit
         self.pass_plugins = pass_plugins
+        self.buffer_size = buffer_size
         self.max_startup_failures = max_startup_failures
         self._startup_failures = 0
         self._on_startup_failure_limit = on_startup_failure_limit
@@ -242,6 +247,7 @@ class TuneWorkerHandle:
                 self.warmup,
                 self.short_circuit,
                 self.pass_plugins,
+                self.buffer_size,
             ),
             daemon=False,
         )
@@ -468,6 +474,7 @@ class AsyncReplayExecutor:
         max_startup_failures: int = 3,
         short_circuit: bool = False,
         pass_plugins: Sequence[str] = (),
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
     ):
         """
         Construct an asynchronous executor with a fixed-size worker pool.
@@ -524,6 +531,7 @@ class AsyncReplayExecutor:
                     on_startup_failure_limit=self._handle_startup_failure_limit,
                     short_circuit=short_circuit,
                     pass_plugins=pass_plugins,
+                    buffer_size=buffer_size,
                 )
             )
 

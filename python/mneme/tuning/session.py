@@ -22,6 +22,7 @@ from mneme.async_executor import AsyncReplayExecutor
 from mneme.convert import export_proteus_tuned_kernel
 from mneme.futures import EvalFuture
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult, dim3
+from mneme.state_loader import DEFAULT_BUFFER_SIZE, buffer_bytes
 from mneme.pass_plugins import resolve_pass_plugins
 from mneme.recorded_execution import RecordedExecution
 from mneme.replay_executor import noop_verifies_warning
@@ -126,6 +127,7 @@ class TuneOptions:
     # Configuration files.
     config: Optional[str] = None
     dump_config: Optional[str] = None
+    buffer_size: int = DEFAULT_BUFFER_SIZE
 
     def resolved_results_dir(self) -> str:
         """ Determine the results directory to use. Uses results_dir if provided, otherwise 
@@ -152,6 +154,7 @@ class TuneOptions:
     def _validate(self) -> None:
         """ an early, quick check to validate some settings before any tuning is started """
 
+        self.buffer_size = buffer_bytes(self.buffer_size)
         self.launch_candidates = normalize_launch_candidates(self.launch_candidates)
         if self.launch_candidates:
             if self.space_module:
@@ -915,6 +918,7 @@ class TuningSession:
                 warmup=self.options.warmup,
                 short_circuit=self.options.short_circuit,
                 pass_plugins=self.options.pass_plugins,
+                buffer_size=self.options.buffer_size,
             )
         # the main tuning phase
         try:

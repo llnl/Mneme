@@ -50,6 +50,7 @@ from mneme.llvm.buffer import MemBufferRef
 from mneme.llvm.module import ModuleRef, parse_assembly, parse_bitcode
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
+from mneme.state_loader import DEFAULT_BUFFER_SIZE, buffer_bytes
 from mneme.pass_plugins import resolve_pass_plugins
 from mneme.profile import init_profiler
 from mneme.proteus import jit
@@ -125,7 +126,9 @@ class BaseExecutor:
         warmup: int = 2,
         short_circuit: bool = False,
         pass_plugins: Sequence[str] = (),
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
     ):
+        self.buffer_size = buffer_bytes(buffer_size)
         self.record_db = record_db
         self.device_id = device_id
         with tracing.span(
@@ -175,17 +178,8 @@ class BaseExecutor:
 
     @tracing.traced("snapshot.setup", flush_after=True)
     def open(self):
-        with tracing.span(
-            "snapshot.prologue.open",
-            lambda: {"path": self.kernel_descr.prologue.fn},
-        ):
-            self._prologue = self.kernel_descr.prologue.open()
-
-        with tracing.span(
-            "snapshot.epilogue.open",
-            lambda: {"path": self.kernel_descr.epilogue.fn},
-        ):
-            self._epilogue = self.kernel_descr.epilogue.open()
+        with tracing.span("snapshot.streaming.open", lambda: {"buffer_size": self.buffer_size}):
+            self._prologue, self._epilogue = self.kernel_descr.open_states(self.buffer_size)
 
         # No kernel has run yet, so this asks whether doing nothing would verify.
         with tracing.span("verify.noop") as event:
@@ -851,6 +845,7 @@ class TuneWorker(BaseExecutor):
         warmup: int = 2,
         short_circuit: bool = False,
         pass_plugins: Sequence[str] = (),
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
     ):
         """
         Worker process entry point: initialize resources and serve requests from a queue.
@@ -930,6 +925,7 @@ class TuneWorker(BaseExecutor):
             warmup=warmup,
             short_circuit=short_circuit,
             pass_plugins=pass_plugins,
+            buffer_size=buffer_size,
         )
         # Open GPU memory, setup prologue epilogue and create a single
         # LLVM IR file to start working on optimizations
