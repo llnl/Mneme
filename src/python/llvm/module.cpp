@@ -1,3 +1,4 @@
+#include "../../pass/MnemePurgeAutoInit.hpp"
 #include "llvm/IR/Module.h"
 #include "core.h"
 #include "llvm-c/Analysis.h"
@@ -339,5 +340,10 @@ LLVMPY_DisposeIFuncsIter(LLVMIFuncsIteratorRef GI) { delete llvm::unwrap(GI); }
 
 API_EXPORT(LLVMModuleRef)
 LLVMPY_CloneModule(LLVMModuleRef M) { return LLVMCloneModule(M); }
+
+API_EXPORT(bool)
+LLVMPY_PurgeAutoInit(LLVMModuleRef M) {
+  return mneme::purgeAutoInit(*llvm::unwrap(M));
+}
 
 } // end extern "C"
