@@ -10,7 +10,7 @@ from mneme.mneme_types import (
     VerificationResult,
 )
 from mneme.futures import EvalFuture
-from mneme.replay_runs import default_run_chain
+from mneme.replay_runs import RunChain, TimingRun, VerificationRun, default_run_chain
 from mneme.async_executor import (
     pop,
     TuneWorkerHandle,
@@ -460,6 +460,7 @@ def test_async_executor_preserves_run_chain_on_worker_respawn(
         num_workers=1,
         **run_options,
     )
+    assert (exe.iterations, exe.warmup, exe.short_circuit) == (3, 2, short_circuit)
     worker = exe.workers[0]
     worker._state.set()
     worker._process._alive = False
@@ -491,6 +492,24 @@ def test_async_executor_rejects_ambiguous_run_options(run_options, message):
             record_db="db", record_id="rid", results_db_dir="/tmp", num_workers=0,
             **run_options,
         )
+
+
+@pytest.mark.parametrize(
+    "run, missing_kind, attribute",
+    [
+        (VerificationRun(), "timing", "iterations"),
+        (VerificationRun(), "timing", "warmup"),
+        (TimingRun(), "verification", "short_circuit"),
+    ],
+)
+def test_async_executor_run_attributes_need_their_run(run, missing_kind, attribute):
+    exe = AsyncReplayExecutor(
+        record_db="db", record_id="rid", results_db_dir="/tmp", num_workers=0,
+        run_chain=RunChain((run,)),
+    )
+
+    with pytest.raises(AttributeError, match=f"no {missing_kind} run"):
+        getattr(exe, attribute)
 
 
 def test_async_executor_submit(monkeypatch):

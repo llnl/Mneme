@@ -7,12 +7,18 @@ from multiprocessing import Process
 from multiprocessing import Queue as ProcessQueue
 from pathlib import Path
 from threading import Event as ThreadEvent
-from typing import Callable, Dict, Optional, Sequence, Union
+from typing import Callable, Dict, Optional, Sequence, Type, Union
 
 from mneme.futures import EvalFuture
 from mneme.mneme_logging import logger
 from mneme.replay_executor import TuneWorker
-from mneme.replay_runs import RunChain, default_run_chain
+from mneme.replay_runs import (
+    ReplayRun,
+    RunChain,
+    TimingRun,
+    VerificationRun,
+    default_run_chain,
+)
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
 
 
@@ -559,6 +565,29 @@ class AsyncReplayExecutor:
                     pass_plugins=pass_plugins,
                 )
             )
+
+    @property
+    def iterations(self) -> int:
+        """Number of measured launches of the run chain's timing run."""
+        return self._run_of_type(TimingRun).iterations
+
+    @property
+    def warmup(self) -> int:
+        """Number of launches of the run chain's timing run before the measured ones."""
+        return self._run_of_type(TimingRun).warmup
+
+    @property
+    def short_circuit(self) -> bool:
+        """Whether a failed verification skips the later runs of the chain."""
+        return self._run_of_type(VerificationRun).short_circuit
+
+    def _run_of_type(self, run_type: Type[ReplayRun]) -> ReplayRun:
+        for run in self.run_chain.runs:
+            if isinstance(run, run_type):
+                return run
+        raise AttributeError(
+            f"The run chain of this AsyncReplayExecutor has no {run_type.kind} run"
+        )
 
     def _handle_startup_failure_limit(self, worker: TuneWorkerHandle, error: str):
         with self._lock:
