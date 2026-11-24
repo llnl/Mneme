@@ -201,6 +201,10 @@ class ModuleRef(ffi.ObjectRef):
     def clone(self):
         return ModuleRef(ffi.lib.LLVMPY_CloneModule(self), self._context)
 
+    def purge_auto_init(self) -> bool:
+        """Remove Clang's auto-init memsets and report whether the IR changed."""
+        return ffi.lib.LLVMPY_PurgeAutoInit(self)
+
     def to_bitcode(self, fn: str):
         ffi.lib.LLVMPY_WriteBitcode(self, _encode_string(fn))
 
@@ -377,3 +381,6 @@ ffi.lib.LLVMPY_GetModuleSourceFileName.argtypes = [ffi.LLVMModuleRef]
 ffi.lib.LLVMPY_GetModuleSourceFileName.restype = c_char_p
 
 ffi.lib.LLVMPY_WriteBitcode.argtypes = [ffi.LLVMModuleRef, c_char_p]
+
+ffi.lib.LLVMPY_PurgeAutoInit.argtypes = [ffi.LLVMModuleRef]
+ffi.lib.LLVMPY_PurgeAutoInit.restype = c_bool

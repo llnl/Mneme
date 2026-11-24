@@ -217,7 +217,7 @@ class ExperimentResult:
     preprocess_ir_time : float
         Time spent in applying ``proteus`` specific optimizations.
     opt_time : float
-        Time spent in the optimization phase of the experiment.
+        Time spent purging auto-init and optimizing the tracked build.
     codegen_time : float
         Time spent in the code generation / compilation phase.
     obj_size : int
