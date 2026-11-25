@@ -52,10 +52,10 @@ from mneme.llvm.module import ModuleRef, parse_assembly, parse_bitcode
 from mneme.mneme_logging import logger
 from mneme.mneme_types import ExperimentConfiguration, ExperimentResult
 from mneme.pass_plugins import resolve_pass_plugins
-from mneme.profile import init_profiler
+from mneme.profile import counters_available, init_profiler
 from mneme.proteus import jit
 from mneme.recorded_execution import RecordedExecution, MemStateRef
-from mneme.utils import cond_gpu_time, cond_time
+from mneme.utils import cond_gpu_counter, cond_gpu_time, cond_time
 
 
 def noop_verifies_warning(record_id: str) -> str:
@@ -66,6 +66,23 @@ def noop_verifies_warning(record_id: str) -> str:
         "Consider re-recording with --filter-config and a skip policy, or using a "
         "different record id."
     )
+
+
+def _counters_requested() -> bool:
+    """
+    Whether the hardware-counter pass is enabled (``MNEME_REPLAY_COUNTERS=1``).
+
+    Off by default. Also off, with a warning, when the profile library cannot
+    collect counters.
+    """
+    if os.environ.get("MNEME_REPLAY_COUNTERS", "") != "1":
+        return False
+    if not counters_available():
+        logger.warning(
+            "MNEME_REPLAY_COUNTERS=1, but this build cannot collect counters"
+        )
+        return False
+    return True
 
 
 class BaseExecutor:
@@ -485,6 +502,33 @@ class BaseExecutor:
             iterations,
         )
 
+    @cond_gpu_counter("counters")
+    def _run_counters(
+        self,
+        result: ExperimentResult,
+        config: ExperimentConfiguration,
+        kernel_name: str,
+        device_func: DeviceFunction,
+        iterations: int,
+    ) -> None:
+        """
+        Replay the kernel once more with a hardware-counter session open.
+
+        This is the last pass of a tracked run, after the warmup and timing
+        launches. The ``cond_gpu_counter`` decorator opens the session, stores
+        the per-launch counter values on ``result`` and prints them. It runs
+        separately from the timed pass because the Activity-based timing receives
+        no kernel records while a counter session is open.
+        """
+        device_func.profile(
+            config.grid,
+            config.block,
+            self._prologue._state,
+            self._epilogue._state,
+            config.shared_mem,
+            iterations,
+        )
+
     @tracing.traced("ir.build")
     def _build(
         self,
@@ -584,6 +628,20 @@ class BaseExecutor:
                 iterations,
                 profile=track,
             )
+
+            if track and _counters_requested():
+                # Last pass: after the warmup and timing launches.
+                try:
+                    self._run_counters(
+                        result,
+                        config,
+                        self.kernel_descr.kernel_name,
+                        device_func,
+                        self._iterations,
+                        counters=True,
+                    )
+                except RuntimeError as error:
+                    logger.error(f"Counter pass failed: {error}")
             if verify:
                 with tracing.span("verify.compare") as event:
                     result.verified = prologue == epilogue
